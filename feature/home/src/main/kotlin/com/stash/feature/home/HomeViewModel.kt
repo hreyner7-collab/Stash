@@ -12,9 +12,11 @@ import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
 import com.stash.data.download.files.FileOrganizer
+import com.stash.data.download.files.LibrarySizeBreakdown
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.SyncDisplayStatus
@@ -54,6 +56,41 @@ class HomeViewModel @Inject constructor(
 ) : ViewModel() {
 
     /**
+     * Disk-truth size + FLAC breakdown of the music library. Bypasses
+     * the DB's `tracks.file_size_bytes` column (unreliable on legacy
+     * libraries). Held as a [MutableStateFlow] so the UI keeps its
+     * last-good value across upstream re-emissions — recomputing in a
+     * Flow chain meant every `trackCount` change reset the visible
+     * Storage value to 0 until the SAF walk finished (could take
+     * minutes for large libraries).
+     *
+     * Updates are driven by a long-running collector in [init] that
+     * watches `trackCount` and re-walks on every change. The walk's
+     * result is written to this StateFlow only on success — failures
+     * (SAF permission flicker, transient DataStore hiccup, scope
+     * cancellation) leave the previous good value intact.
+     */
+    private val _libraryDiskSize = MutableStateFlow(LibrarySizeBreakdown(0L, 0L, 0))
+    private val libraryDiskSize: StateFlow<LibrarySizeBreakdown> = _libraryDiskSize.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            musicRepository.getTrackCount()
+                .distinctUntilChanged()
+                .collect {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { fileOrganizer.computeMusicLibrarySize() }
+                            .onFailure { android.util.Log.w("HomeViewModel", "computeMusicLibrarySize failed", it) }
+                            .getOrNull()
+                    }
+                    if (result != null) {
+                        _libraryDiskSize.value = result
+                    }
+                }
+        }
+    }
+
+    /**
      * Derives [SyncStatusInfo] reactively from the latest sync history record.
      * Emits a default (empty) status when no sync has ever run.
      */
@@ -71,50 +108,28 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Combines the four Room-backed data flows into a single intermediate holder,
-     * keeping the top-level combine at 5 or fewer flows for type safety.
-     *
-     * `storageBytes` and `flacStorageBytes` (in [sourceCountsFlow]) are computed
-     * from the filesystem via [FileOrganizer], NOT from the DB's
-     * `file_size_bytes` column. The column is unreliable on legacy libraries
-     * — many older download paths left it at 0 — and the backfill that's
-     * supposed to recover it has been failing because of orphaned rows + path
-     * format edge cases. Walking the music dir is disk truth and never lies.
-     * The walk is keyed on track count change (a cheap proxy for "library
-     * may have changed"), debounced via Room's own change-distinct semantics,
-     * and offloaded to [Dispatchers.IO]. ~50–200 ms per walk for 3000 files;
-     * runs only when the count actually changes.
+     * Combines the Room-backed data flows + the disk-walked library size
+     * into a single intermediate holder. The DB column `file_size_bytes`
+     * is bypassed for the Storage display because legacy libraries have it
+     * stuck at 0 for thousands of rows. [libraryDiskSizeFlow] always
+     * reflects disk truth via [FileOrganizer.computeMusicLibrarySize],
+     * which is storage-mode-aware (internal File walk OR SAF DocumentFile
+     * traversal).
      */
     private val musicDataFlow = combine(
         musicRepository.getAllPlaylists(),
         musicRepository.getRecentlyAdded(20),
         musicRepository.getTrackCount(),
-        musicRepository.getTrackCount()
-            .distinctUntilChanged()
-            .map { fileOrganizer.getTotalStorageBytes() }
-            .flowOn(Dispatchers.IO),
-    ) { playlists, recentlyAdded, trackCount, storageBytes ->
-        MusicData(playlists, recentlyAdded, trackCount, storageBytes)
+        libraryDiskSize,
+    ) { playlists, recentlyAdded, trackCount, librarySize ->
+        MusicData(playlists, recentlyAdded, trackCount, librarySize)
     }
 
     private val sourceCountsFlow = combine(
         musicRepository.getSpotifyDownloadedCount(),
         musicRepository.getYouTubeDownloadedCount(),
-        musicRepository.getTrackCount()
-            .distinctUntilChanged()
-            .map { fileOrganizer.getLosslessFileCount() }
-            .flowOn(Dispatchers.IO),
-        musicRepository.getTrackCount()
-            .distinctUntilChanged()
-            .map { fileOrganizer.getLosslessStorageBytes() }
-            .flowOn(Dispatchers.IO),
-    ) { spotify, youtube, flac, flacBytes ->
-        SourceCounts(
-            spotify = spotify,
-            youtube = youtube,
-            flac = flac,
-            flacBytes = flacBytes,
-        )
+    ) { spotify, youtube ->
+        SourceCounts(spotify = spotify, youtube = youtube)
     }
 
     /**
@@ -206,9 +221,9 @@ class HomeViewModel @Inject constructor(
                 spotifyTracks = sourceCounts.spotify,
                 youTubeTracks = sourceCounts.youtube,
                 totalPlaylists = musicData.playlists.size,
-                storageUsedBytes = musicData.storageBytes,
-                flacTracks = sourceCounts.flac,
-                flacStorageBytes = sourceCounts.flacBytes,
+                storageUsedBytes = musicData.librarySize.totalBytes,
+                flacTracks = musicData.librarySize.losslessFileCount,
+                flacStorageBytes = musicData.librarySize.losslessBytes,
             ),
             stashMixes = stashMixes,
             spotifyMixes = spotifyMixes,
@@ -219,7 +234,7 @@ class HomeViewModel @Inject constructor(
             spotifyLikedCount = spotifyLikedCount,
             youtubeLikedCount = youtubeLikedCount,
             totalTracks = musicData.trackCount,
-            totalStorageBytes = musicData.storageBytes,
+            totalStorageBytes = musicData.librarySize.totalBytes,
             playlists = otherPlaylists,
             playlistSortOrder = playlistSortOrder,
             isLoading = false,
@@ -455,20 +470,17 @@ private data class MusicData(
     val playlists: List<Playlist>,
     val recentlyAdded: List<Track>,
     val trackCount: Int,
-    val storageBytes: Long,
+    val librarySize: LibrarySizeBreakdown,
 )
 
 /**
- * Bundled counts/sizes that flow into [HomeUiState.syncStatus]. Pre-computed
- * here so the top-level uiState combine stays at <=5 inputs (the typed
- * [kotlinx.coroutines.flow.combine] arity ceiling — see comment on
- * `musicDataFlow`).
+ * Bundled per-source counts that flow into [HomeUiState.syncStatus].
+ * FLAC count + storage now come from disk via [MusicData.librarySize],
+ * not from this struct — see KDoc on `musicDataFlow` for why.
  */
 private data class SourceCounts(
     val spotify: Int,
     val youtube: Int,
-    val flac: Int,
-    val flacBytes: Long,
 )
 
 /**
