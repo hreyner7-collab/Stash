@@ -11,12 +11,8 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
-import com.stash.data.download.files.FileOrganizer
 import com.stash.data.download.files.LibrarySizeBreakdown
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.withContext
+import com.stash.data.download.files.LibrarySizeHolder
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.SyncDisplayStatus
@@ -52,43 +48,8 @@ class HomeViewModel @Inject constructor(
     private val lastFmSessionPreference: LastFmSessionPreference,
     private val lastFmCredentials: LastFmCredentials,
     private val listeningEventDao: ListeningEventDao,
-    private val fileOrganizer: FileOrganizer,
+    private val librarySizeHolder: LibrarySizeHolder,
 ) : ViewModel() {
-
-    /**
-     * Disk-truth size + FLAC breakdown of the music library. Bypasses
-     * the DB's `tracks.file_size_bytes` column (unreliable on legacy
-     * libraries). Held as a [MutableStateFlow] so the UI keeps its
-     * last-good value across upstream re-emissions — recomputing in a
-     * Flow chain meant every `trackCount` change reset the visible
-     * Storage value to 0 until the SAF walk finished (could take
-     * minutes for large libraries).
-     *
-     * Updates are driven by a long-running collector in [init] that
-     * watches `trackCount` and re-walks on every change. The walk's
-     * result is written to this StateFlow only on success — failures
-     * (SAF permission flicker, transient DataStore hiccup, scope
-     * cancellation) leave the previous good value intact.
-     */
-    private val _libraryDiskSize = MutableStateFlow(LibrarySizeBreakdown(0L, 0L, 0))
-    private val libraryDiskSize: StateFlow<LibrarySizeBreakdown> = _libraryDiskSize.asStateFlow()
-
-    init {
-        viewModelScope.launch {
-            musicRepository.getTrackCount()
-                .distinctUntilChanged()
-                .collect {
-                    val result = withContext(Dispatchers.IO) {
-                        runCatching { fileOrganizer.computeMusicLibrarySize() }
-                            .onFailure { android.util.Log.w("HomeViewModel", "computeMusicLibrarySize failed", it) }
-                            .getOrNull()
-                    }
-                    if (result != null) {
-                        _libraryDiskSize.value = result
-                    }
-                }
-        }
-    }
 
     /**
      * Derives [SyncStatusInfo] reactively from the latest sync history record.
@@ -120,7 +81,7 @@ class HomeViewModel @Inject constructor(
         musicRepository.getAllPlaylists(),
         musicRepository.getRecentlyAdded(20),
         musicRepository.getTrackCount(),
-        libraryDiskSize,
+        librarySizeHolder.size,
     ) { playlists, recentlyAdded, trackCount, librarySize ->
         MusicData(playlists, recentlyAdded, trackCount, librarySize)
     }
