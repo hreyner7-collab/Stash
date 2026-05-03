@@ -605,7 +605,15 @@ private fun SyncStatusCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                val showFlac = syncStatus.flacTracks > 0 && syncStatus.flacStorageBytes > 0
+                // Decoupled gating: show each FLAC sub-line whenever its
+                // own value is > 0. The previous AND-coupling
+                // (`flacTracks > 0 && flacStorageBytes > 0`) hid the
+                // sub-text for any user whose DB had FLAC rows but
+                // file_size_bytes still at 0 — turning the "defensive"
+                // check into a permanent display blocker. Per-stat
+                // gating is the design that v0.9.0 originally shipped
+                // with; the coupling was a regression introduced in
+                // c3c6529 and is now reverted.
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -613,7 +621,7 @@ private fun SyncStatusCard(
                     StatItem(
                         label = "Tracks",
                         value = syncStatus.totalTracks.toString(),
-                        subValue = if (showFlac) "${syncStatus.flacTracks} FLAC" else null,
+                        subValue = if (syncStatus.flacTracks > 0) "${syncStatus.flacTracks} FLAC" else null,
                     )
                     StatItem(
                         label = "Spotify",
@@ -626,7 +634,7 @@ private fun SyncStatusCard(
                     StatItem(
                         label = "Storage",
                         value = formatBytes(syncStatus.storageUsedBytes),
-                        subValue = if (showFlac) "${formatBytes(syncStatus.flacStorageBytes)} FLAC" else null,
+                        subValue = if (syncStatus.flacStorageBytes > 0) "${formatBytes(syncStatus.flacStorageBytes)} FLAC" else null,
                     )
                 }
                 if (syncStatus.lastSyncTime != null) {
