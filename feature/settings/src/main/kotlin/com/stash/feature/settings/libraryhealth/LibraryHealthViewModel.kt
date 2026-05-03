@@ -77,7 +77,14 @@ class LibraryHealthViewModel @Inject constructor(
                 var written = 0
                 for (row in rows) {
                     val meta = metadataExtractor.extract(row.filePath)
-                    if (meta != null && meta.format != "unknown" && meta.bitrateKbps > 0) {
+                    // Mirror the v0.9.1 download-path fix: write the format
+                    // whenever it's known, even when MMR couldn't compute a
+                    // bitrate. FLAC is variable-bitrate and MMR routinely
+                    // returns 0 for it, so the prior gate `bitrateKbps > 0`
+                    // skipped every misclassified-FLAC row — the exact
+                    // scenario this backfill exists to fix. Library Health's
+                    // bucket UI already renders qualityKbps=0 as `—`.
+                    if (meta != null && meta.format != "unknown") {
                         runCatching {
                             trackDao.setFormatAndQuality(
                                 trackId = row.id,
