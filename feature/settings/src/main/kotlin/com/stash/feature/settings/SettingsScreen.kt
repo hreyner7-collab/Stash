@@ -446,16 +446,16 @@ private fun SettingsContent(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Lossless downloads (experimental)",
+                            text = "Lossless downloads",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = if (uiState.losslessEnabled) {
-                                "Try Qobuz proxy first; FLAC ~10× larger"
+                                "On — studio-quality FLAC via Qobuz. ~10× larger files."
                             } else {
-                                "Off — uses YouTube/yt-dlp like before"
+                                "Studio-quality FLAC via Qobuz. Files ~10× larger than MP3."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -488,7 +488,7 @@ private fun SettingsContent(
                                     contentColor = MaterialTheme.colorScheme.primary,
                                 ),
                             ) {
-                                Text("Verify in browser")
+                                Text("Connect to squid.wtf")
                             }
                             if (uiState.squidWtfCaptchaCookie.isNotEmpty()) {
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -504,6 +504,12 @@ private fun SettingsContent(
                                 )
                             }
                         }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Search any song → tap Download → solve the captcha. Stash captures the cookie automatically.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
 
                         // -- Advanced expander row (chevron + label) -----------
                         Spacer(modifier = Modifier.height(8.dp))
@@ -996,26 +1002,24 @@ private fun LastFmSection(
                 )
             }
             LastFmAuthState.Disconnected -> {
-                Text(
-                    text = "Scrobble your plays",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Connect Last.fm and every song you finish in Stash lands in your Last.fm profile — perfect for building your own listening history independent of Spotify.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                androidx.compose.material3.OutlinedButton(
-                    onClick = onConnect,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.primary,
-                    ),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Connect Last.fm")
+                    Text(
+                        text = "Scrobble your plays",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = onConnect,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    ) {
+                        Text("Connect Last.fm")
+                    }
                 }
             }
             is LastFmAuthState.AwaitingAuth -> {

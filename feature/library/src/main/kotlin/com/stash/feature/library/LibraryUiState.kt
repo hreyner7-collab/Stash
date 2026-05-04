@@ -11,7 +11,7 @@ import com.stash.core.model.Track
  * hide the noise from daily-mix one-off entries behind an expandable section.
  */
 data class LibraryUiState(
-    val activeTab: LibraryTab = LibraryTab.PLAYLISTS,
+    val activeTab: LibraryTab = LibraryTab.TRACKS,
     val searchQuery: String = "",
     val sortOrder: SortOrder = SortOrder.RECENT,
     val sourceFilter: SourceFilter = SourceFilter.ALL,

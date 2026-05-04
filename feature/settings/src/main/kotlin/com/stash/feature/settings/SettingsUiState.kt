@@ -24,7 +24,7 @@ import com.stash.core.model.ThemeMode
 data class SettingsUiState(
     val spotifyAuthState: AuthState = AuthState.NotConnected,
     val youTubeAuthState: AuthState = AuthState.NotConnected,
-    val audioQuality: QualityTier = QualityTier.BEST,
+    val audioQuality: QualityTier = QualityTier.MAX,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /**
      * Network + power conditions under which Stash runs background
@@ -37,13 +37,17 @@ data class SettingsUiState(
     val ytPendingCount: Int = 0,
     /**
      * Master switch for the lossless-source download path
-     * (squid.wtf-proxied Qobuz). Off by default — flipping it on routes
-     * every track through the registry first and falls back to yt-dlp
-     * only when no source has a confident lossless match. Files end up
-     * 5-10× larger than Opus, so the UI should warn at least once
-     * before enabling.
+     * (squid.wtf-proxied Qobuz). On by default as of v0.9.8 — every
+     * track is routed through the registry first and falls back to
+     * yt-dlp only when no source has a confident lossless match (or
+     * the captcha is unverified). Files end up 5–10× larger than Opus.
+     *
+     * Existing v0.9.7 users who explicitly toggled this off keep their
+     * saved `false`; v0.9.7 users who never opened the toggle pick up
+     * the new default (functionally identical to v0.9.7 behaviour
+     * because captcha-unverified silently falls back to yt-dlp/MP3).
      */
-    val losslessEnabled: Boolean = false,
+    val losslessEnabled: Boolean = true,
     /**
      * Manually-pasted `captcha_verified_at` cookie value from
      * `qobuz.squid.wtf`. Bridges the captcha gate until WebView-based

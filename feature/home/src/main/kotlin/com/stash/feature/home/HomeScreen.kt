@@ -199,6 +199,21 @@ fun HomeScreen(
             }
         }
 
+        // ── Lossless connect nudge ───────────────────────────────────
+        // Shown when the user has lossless toggled OFF and hasn't
+        // dismissed. Tap routes to Settings; X dismisses forever.
+        // Stacks below the Last.fm banner if both apply.
+        uiState.losslessPrompt?.let {
+            item {
+                Spacer(Modifier.height(6.dp))
+                LosslessConnectBanner(
+                    onSetUp = onNavigateToSettings,
+                    onDismiss = viewModel::dismissLosslessBanner,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
         // ── Mixes (split by source, each with a Play All button) ─────
         if (uiState.spotifyMixes.isNotEmpty() || uiState.youtubeMixes.isNotEmpty()) {
             item {
@@ -1562,6 +1577,70 @@ private fun LastFmConnectBanner(
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Dismiss Last.fm banner",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "Try lossless audio" Home banner. Shows when the user has
+ * lossless turned off (explicit save, since v0.9.8 fresh installs
+ * default to ON) and hasn't dismissed. Tapping routes to Settings,
+ * where the existing Audio Quality card hosts the toggle + captcha
+ * setup flow. Mirrors [LastFmConnectBanner]'s visual treatment so
+ * both Home prompts feel consistent.
+ */
+@Composable
+private fun LosslessConnectBanner(
+    onSetUp: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = MaterialTheme.colorScheme.tertiary
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onSetUp)
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Try lossless audio",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "Studio-quality FLAC downloads via Qobuz. Tap to set up.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = "Set up →",
+                style = MaterialTheme.typography.labelSmall,
+                color = accent,
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss lossless banner",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )

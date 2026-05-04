@@ -17,6 +17,7 @@ import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.Track
 import com.stash.data.download.files.LibrarySizeBreakdown
 import com.stash.data.download.files.LibrarySizeHolder
+import com.stash.data.download.lossless.LosslessSourcePreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -49,6 +50,7 @@ class HomeViewModel @Inject constructor(
     private val lastFmCredentials: LastFmCredentials,
     private val listeningEventDao: ListeningEventDao,
     private val librarySizeHolder: LibrarySizeHolder,
+    private val losslessPrefs: LosslessSourcePreferences,
 ) : ViewModel() {
 
     /**
@@ -125,19 +127,41 @@ class HomeViewModel @Inject constructor(
         }
 
     /**
-     * Derives (spotifyConnected, youTubeConnected, lastFmPrompt) from
-     * TokenManager + Last.fm session state. Bundled so the top-level
-     * combine stays at 5 inputs.
+     * Lossless connect nudge: only visible when the user has not
+     * enabled lossless AND has not dismissed the banner. Mirrors
+     * [lastFmPromptFlow]'s shape and lifecycle — once dismissed,
+     * the DataStore write makes the Flow re-emit null and the
+     * banner disappears on its own.
+     *
+     * No `isConfigured` guard (unlike [lastFmPromptFlow]) because
+     * lossless ships unconditionally — every install has the
+     * feature. Last.fm's guard exists because that feature is
+     * gated on app-level API credentials.
+     */
+    private val losslessPromptFlow = combine(
+        losslessPrefs.enabled,
+        losslessPrefs.bannerDismissed,
+    ) { enabled, dismissed ->
+        if (!enabled && !dismissed) LosslessPromptState else null
+    }
+
+    /**
+     * Derives (spotifyConnected, youTubeConnected, lastFmPrompt,
+     * losslessPrompt) from TokenManager + Last.fm session state +
+     * lossless prefs. Bundled so the top-level combine stays at 5
+     * inputs (the non-vararg ceiling).
      */
     private val authStateFlow = combine(
         tokenManager.spotifyAuthState,
         tokenManager.youTubeAuthState,
         lastFmPromptFlow,
-    ) { spotify, youtube, lastFmPrompt ->
+        losslessPromptFlow,
+    ) { spotify, youtube, lastFmPrompt, losslessPrompt ->
         AuthInfo(
             spotifyConnected = spotify is AuthState.Connected,
             youTubeConnected = youtube is AuthState.Connected,
             lastFmPrompt = lastFmPrompt,
+            losslessPrompt = losslessPrompt,
         )
     }
 
@@ -202,6 +226,7 @@ class HomeViewModel @Inject constructor(
             spotifyConnected = authInfo.spotifyConnected,
             youTubeConnected = authInfo.youTubeConnected,
             lastFmPrompt = authInfo.lastFmPrompt,
+            losslessPrompt = authInfo.losslessPrompt,
             hasEverSynced = syncStatus.lastSyncTime != null,
         )
     }.stateIn(
@@ -227,6 +252,17 @@ class HomeViewModel @Inject constructor(
     fun dismissLastFmBanner() {
         viewModelScope.launch {
             lastFmSessionPreference.setBannerDismissed(true)
+        }
+    }
+
+    /**
+     * Hide the "Try lossless audio" Home banner forever. Writes
+     * through to DataStore; the prompt Flow re-emits null on the
+     * next tick and the banner disappears.
+     */
+    fun dismissLosslessBanner() {
+        viewModelScope.launch {
+            losslessPrefs.setBannerDismissed(true)
         }
     }
 
@@ -452,4 +488,5 @@ private data class AuthInfo(
     val spotifyConnected: Boolean,
     val youTubeConnected: Boolean,
     val lastFmPrompt: LastFmPromptState?,
+    val losslessPrompt: LosslessPromptState?,
 )
