@@ -62,6 +62,15 @@ data class HomeUiState(
      * scrobbled. Drives the Home banner nudging them into Settings.
      */
     val lastFmPrompt: LastFmPromptState? = null,
+    /**
+     * Non-null when the user has not enabled lossless AND has not
+     * dismissed the Home banner. Drives the "Try lossless audio"
+     * banner that shows below the sync card.
+     *
+     * Same shape as [lastFmPrompt] but a singleton (no varying
+     * fields like pendingCount); the banner copy is static.
+     */
+    val losslessPrompt: LosslessPromptState? = null,
     val hasEverSynced: Boolean = false,
 ) {
     /** Total liked songs across both sources. */
@@ -95,6 +104,13 @@ data class HomeUiState(
 
 /** Payload for the "connect Last.fm to send plays" banner. */
 data class LastFmPromptState(val pendingCount: Int)
+
+/**
+ * Sentinel for the "Try lossless audio" Home banner. Singleton
+ * (data object) because the banner copy is static — its mere
+ * presence in the UI state signals "show the banner."
+ */
+data object LosslessPromptState
 
 /**
  * Sort options for the Home Playlists grid. Deliberately duplicated from
