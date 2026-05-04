@@ -1002,26 +1002,24 @@ private fun LastFmSection(
                 )
             }
             LastFmAuthState.Disconnected -> {
-                Text(
-                    text = "Scrobble your plays",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Connect Last.fm and every song you finish in Stash lands in your Last.fm profile — perfect for building your own listening history independent of Spotify.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                androidx.compose.material3.OutlinedButton(
-                    onClick = onConnect,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.primary,
-                    ),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Connect Last.fm")
+                    Text(
+                        text = "Scrobble your plays",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = onConnect,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    ) {
+                        Text("Connect")
+                    }
                 }
             }
             is LastFmAuthState.AwaitingAuth -> {
