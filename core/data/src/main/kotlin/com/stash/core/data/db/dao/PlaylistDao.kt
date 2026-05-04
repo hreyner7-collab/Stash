@@ -106,18 +106,39 @@ interface PlaylistDao {
     /**
      * All playlists eligible to render on Home/Library.
      *
-     * Visibility is decoupled from the per-playlist `sync_enabled` toggle.
-     * `sync_enabled = 0` means "skip on the next sync" — it does NOT mean
-     * "hide from the library." Once a playlist has been imported, its
-     * tracks live locally and the user's mental model is that they stay
-     * accessible until manually deleted. Sync Preferences are forward-
-     * looking: they choose what the next sync touches.
+     * Visibility is now coupled to the per-playlist `sync_enabled`
+     * toggle: turning sync off in Sync Preferences hides the playlist
+     * from Home + Library. The escape hatch is downloaded content —
+     * if the playlist has at least one downloaded, non-blacklisted
+     * track, it stays visible regardless of `sync_enabled`. This
+     * preserves user investment in playlists they previously synced.
      *
-     * To remove a playlist from Home/Library entirely, the user marks it
-     * inactive (or it gets auto-deactivated when missing from a remote
-     * snapshot for sources that prune). `is_active = 0` is the only gate.
+     * The Sync tab continues to show every playlist via dedicated DAO
+     * methods ([getSpotifyPlaylistsForPreferences],
+     * [getYouTubePlaylistsForPreferences]) so the user can flip sync
+     * back on for any playlist they want.
+     *
+     * Pre-v0.9.9 this was decoupled — `sync_enabled = 0` only meant
+     * "skip on the next sync," and once-imported playlists stayed
+     * forever. The change addresses the long-standing complaint that
+     * upstream Spotify/YouTube libraries flooded Home with mosaics
+     * for playlists the user never opted into.
      */
-    @Query("SELECT * FROM playlists WHERE is_active = 1 ORDER BY name ASC")
+    @Query("""
+        SELECT p.* FROM playlists p
+        WHERE p.is_active = 1
+          AND (
+              p.sync_enabled = 1
+              OR EXISTS (
+                  SELECT 1 FROM playlist_tracks pt
+                  JOIN tracks t ON pt.track_id = t.id
+                  WHERE pt.playlist_id = p.id
+                    AND t.is_downloaded = 1
+                    AND t.is_blacklisted = 0
+              )
+          )
+        ORDER BY p.name ASC
+    """)
     fun getAllVisible(): Flow<List<PlaylistEntity>>
 
     /** All playlists from a specific music source. */

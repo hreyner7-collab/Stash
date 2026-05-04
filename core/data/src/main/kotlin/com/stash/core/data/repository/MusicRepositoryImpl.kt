@@ -260,7 +260,7 @@ class MusicRepositoryImpl @Inject constructor(
             sourceId = "custom_${java.util.UUID.randomUUID()}",
             type = com.stash.core.model.PlaylistType.CUSTOM,
             isActive = true,
-            syncEnabled = false,
+            syncEnabled = true,
         )
         return playlistDao.insert(entity)
     }
