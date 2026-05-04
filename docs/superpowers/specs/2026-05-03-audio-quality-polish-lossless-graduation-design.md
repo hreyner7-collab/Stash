@@ -91,7 +91,7 @@ Mirrors the existing Last.fm prompt at `HomeViewModel:148–164` exactly. Same c
 **Files touched:**
 - `data/download/.../lossless/LosslessSourcePreferences.kt` — add `bannerDismissed: Flow<Boolean>` (default `false`) + `setBannerDismissed(value: Boolean)` setter, alongside existing `enabled` and `captchaCookieValue` keys. No new DataStore file.
 - `feature/home/.../HomeUiState.kt` — add `losslessPrompt: LosslessPromptState? = null` field.
-- `feature/home/.../HomeViewModel.kt` — add `losslessPromptFlow`, fold into the existing top-level combine, add `dismissLosslessBanner()` method. Add `private val losslessPrefs: LosslessSourcePreferences` constructor param.
+- `feature/home/.../HomeViewModel.kt` — add `losslessPromptFlow`, fold it into the existing `authStateFlow` combine (the established 3-input bundling point — its KDoc reads *"Bundled so the top-level combine stays at 5 inputs"*; the top-level combine is already at the 5-input non-vararg ceiling and cannot grow). Extend `AuthInfo` with a `losslessPrompt: LosslessPromptState?` field. Add `dismissLosslessBanner()` method. Add `private val losslessPrefs: LosslessSourcePreferences` constructor param.
 - `feature/home/.../HomeScreen.kt` — render the banner at the top of the scrollable Column, directly under the sync card, when `uiState.losslessPrompt != null`. Tap → `onSetUpLossless()` callback. `×` icon → `viewModel::dismissLosslessBanner`.
 - `app/.../navigation/StashNavHost.kt` — wire `onSetUpLossless = { navController.navigate(SettingsRoute) }`.
 
@@ -104,6 +104,25 @@ private val losslessPromptFlow = combine(
     if (!enabled && !dismissed) LosslessPromptState else null
 }
 ```
+
+**Folding into `authStateFlow`** (the existing 3-input bundle becomes 4-input):
+```kotlin
+private val authStateFlow = combine(
+    tokenManager.spotifyAuthState,
+    tokenManager.youTubeAuthState,
+    lastFmPromptFlow,
+    losslessPromptFlow,
+) { spotify, youtube, lastFmPrompt, losslessPrompt ->
+    AuthInfo(
+        spotifyConnected = spotify is AuthState.Connected,
+        youTubeConnected = youtube is AuthState.Connected,
+        lastFmPrompt = lastFmPrompt,
+        losslessPrompt = losslessPrompt,
+    )
+}
+```
+
+`AuthInfo` gains a `losslessPrompt: LosslessPromptState?` field. The top-level combine stays at exactly 5 inputs.
 
 This gives the right behavior across all three cohorts:
 - Fresh install → `enabled = true` (new default) → banner hidden.
@@ -153,10 +172,14 @@ The 3-line body description ("Connect Last.fm and every song you finish in Stash
 ### 5. Library smart-default
 
 **Files touched:**
-- `feature/library/.../LibraryUiState.kt` (line 14) — change `activeTab` data-class default from `LibraryTab.PLAYLISTS` to `LibraryTab.TRACKS`. `sortOrder = SortOrder.RECENT` is already correct. `sourceFilter = SourceFilter.ALL` stays — the FLAC override is applied after init by the ViewModel, not as a static default, so the empty-state never flickers.
-- `feature/library/.../LibraryViewModel.kt` — add an init-time one-shot snapshot read that sets `_sourceFilter = SourceFilter.FLAC` when ≥1 lossless track is present.
+- `feature/library/.../LibraryUiState.kt` (line 14) — change `activeTab` data-class default from `LibraryTab.PLAYLISTS` to `LibraryTab.TRACKS`. This is the *initial* `LibraryUiState` value emitted before flows resolve.
+- `feature/library/.../LibraryViewModel.kt`:
+  - In the `private data class ControlState` (line ~421) change the `activeTab` default from `LibraryTab.PLAYLISTS` to `LibraryTab.TRACKS`. This is the source-of-truth default that drives the user-controls flow. The `LibraryUiState.activeTab` change above is a matching cosmetic default — `ControlState` is what the rest of the ViewModel reads.
+  - Keep `sortOrder = SortOrder.RECENT` and `sourceFilter = SourceFilter.ALL` in `ControlState`. The FLAC override is applied after init by the smart-default logic below, not as a static default, so the empty-state never flickers.
+  - Add an init-time one-shot snapshot read that flips `sourceFilter` to `FLAC` when ≥1 lossless track is present.
 
-**Smart-default init logic:**
+**Smart-default init logic** (lives inside the `LibraryViewModel.init` block; uses the existing `_controls: MutableStateFlow<ControlState>` mutation pattern at line 217 — `_controls.update { it.copy(sourceFilter = …) }` — *not* a separate `MutableStateFlow<SourceFilter>`):
+
 ```kotlin
 init {
     viewModelScope.launch {
@@ -164,8 +187,8 @@ init {
         val hasLossless = firstSnapshot.any {
             it.fileFormat?.lowercase() in LOSSLESS_CODECS
         }
-        if (hasLossless && _sourceFilter.value == SourceFilter.ALL) {
-            _sourceFilter.value = SourceFilter.FLAC
+        if (hasLossless && _controls.value.sourceFilter == SourceFilter.ALL) {
+            _controls.update { it.copy(sourceFilter = SourceFilter.FLAC) }
         }
     }
 }
@@ -173,7 +196,7 @@ init {
 
 Reuses the existing `LOSSLESS_CODECS` set defined in `LibraryViewModel` (line 116 region — same set used by the manual FLAC filter chip).
 
-The `_sourceFilter.value == SourceFilter.ALL` guard means: don't fight the user. If anything else (e.g. future `SavedStateHandle`-based restoration) has already set a non-`ALL` filter before the snapshot resolves, we leave it alone.
+The `_controls.value.sourceFilter == SourceFilter.ALL` guard means: don't fight the user. If anything else (e.g. future `SavedStateHandle`-based restoration) has already set a non-`ALL` filter before the snapshot resolves, we leave it alone.
 
 **Behavior:**
 - Cold start, library has any FLAC tracks → Library opens to TRACKS / RECENT / FLAC.
