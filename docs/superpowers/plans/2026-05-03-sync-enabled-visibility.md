@@ -51,7 +51,7 @@ This plan touches **two files**.
 | `core/data/src/main/kotlin/com/stash/core/data/repository/MusicRepositoryImpl.kt` | `:core:data` | Flip `createPlaylist` (the user-facing "+ Playlist" path) from `syncEnabled = false` to `syncEnabled = true`. User-created playlists have no upstream sync toggle, so they need to be visible on Home + Library immediately under the new filter. |
 | `app/build.gradle.kts` | `:app` | `versionCode 45 → 46`, `versionName "0.9.8" → "0.9.9"`. |
 
-Net change: ~25 lines of code (one SQL @Query body, one KDoc rewrite, one 2-line copy/edit in `insertPlaylist`, two version-bump constants).
+Net change: ~25 lines of code (one SQL @Query body, one KDoc rewrite, one 1-line flip in `createPlaylist`, two version-bump constants).
 
 `HomeViewModel`, `LibraryViewModel`, and `SyncViewModel` are **not** modified. The sync engine (`DiffWorker`, `PlaylistFetchWorker`) is **not** modified.
 
