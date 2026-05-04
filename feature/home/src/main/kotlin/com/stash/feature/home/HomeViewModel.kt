@@ -132,6 +132,11 @@ class HomeViewModel @Inject constructor(
      * [lastFmPromptFlow]'s shape and lifecycle — once dismissed,
      * the DataStore write makes the Flow re-emit null and the
      * banner disappears on its own.
+     *
+     * No `isConfigured` guard (unlike [lastFmPromptFlow]) because
+     * lossless ships unconditionally — every install has the
+     * feature. Last.fm's guard exists because that feature is
+     * gated on app-level API credentials.
      */
     private val losslessPromptFlow = combine(
         losslessPrefs.enabled,
