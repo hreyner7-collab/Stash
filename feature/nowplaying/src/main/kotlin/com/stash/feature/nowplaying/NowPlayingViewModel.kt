@@ -36,6 +36,9 @@ import javax.inject.Inject
 class NowPlayingViewModel @Inject constructor(
     private val playerRepository: PlayerRepository,
     private val musicRepository: MusicRepository,
+    private val likeDispatcher: com.stash.core.data.social.LikeDestinationDispatcher,
+    private val likePreferences: com.stash.core.data.prefs.LikePreferences,
+    private val tokenManager: com.stash.core.auth.TokenManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
@@ -47,6 +50,10 @@ class NowPlayingViewModel @Inject constructor(
     )
     /** One-shot snackbar messages (e.g. "Track flagged as wrong match"). */
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
+
+    // v0.9.13: Per-track Like override sheet state. `null` = sheet hidden.
+    private val _likeSheetState = MutableStateFlow<com.stash.core.ui.components.LikeDestinationSheetState?>(null)
+    val likeSheetState: StateFlow<com.stash.core.ui.components.LikeDestinationSheetState?> = _likeSheetState.asStateFlow()
 
     init {
         observePlayerState()
@@ -239,6 +246,100 @@ class NowPlayingViewModel @Inject constructor(
                 _userMessages.tryEmit("Deleted from your device.")
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // v0.9.13 — Heart / Like actions
+    // ------------------------------------------------------------------
+
+    /**
+     * Tap-to-like with the user's default destinations from Settings.
+     *
+     * Stash always works locally; Spotify and YT Music only fire when the
+     * user is connected AND has the corresponding default toggled on. The
+     * dispatcher itself handles per-destination dedup — already-saved
+     * targets are no-ops.
+     *
+     * Failures emit a per-destination Toast via [_userMessages]. Successes
+     * are silent: the heart icon flips state via the Track flow update,
+     * which is feedback enough.
+     */
+    fun onLikeTap() {
+        val track = _uiState.value.currentTrack ?: return
+        viewModelScope.launch {
+            val defaults = buildSet {
+                if (likePreferences.heartDefaultStashNow()) add(com.stash.core.data.social.Destination.STASH)
+                if (likePreferences.heartDefaultSpotifyNow() &&
+                    tokenManager.spotifyAuthState.value is com.stash.core.auth.model.AuthState.Connected) {
+                    add(com.stash.core.data.social.Destination.SPOTIFY)
+                }
+                if (likePreferences.heartDefaultYtMusicNow() &&
+                    tokenManager.youTubeAuthState.value is com.stash.core.auth.model.AuthState.Connected) {
+                    add(com.stash.core.data.social.Destination.YT_MUSIC)
+                }
+            }
+            if (defaults.isEmpty()) return@launch
+            val results = likeDispatcher.like(track, defaults)
+            results.forEach { (dest, result) ->
+                if (result.isFailure) {
+                    val msg = "Couldn't save to ${friendlyName(dest)}"
+                    _userMessages.tryEmit(msg)
+                }
+            }
+        }
+    }
+
+    /**
+     * Long-press on the heart — opens the per-track override sheet
+     * pre-checked with the user's defaults, plus "Already saved" hints
+     * for any destination whose `*_saved_at` is already populated.
+     */
+    fun onLikeLongPress() {
+        viewModelScope.launch {
+            val track = _uiState.value.currentTrack ?: return@launch
+            _likeSheetState.value = com.stash.core.ui.components.LikeDestinationSheetState(
+                spotifyVisible = tokenManager.spotifyAuthState.value is com.stash.core.auth.model.AuthState.Connected,
+                ytVisible = tokenManager.youTubeAuthState.value is com.stash.core.auth.model.AuthState.Connected,
+                stashChecked = likePreferences.heartDefaultStashNow(),
+                spotifyChecked = likePreferences.heartDefaultSpotifyNow(),
+                ytChecked = likePreferences.heartDefaultYtMusicNow(),
+                stashAlreadySaved = track.stashLikedAt != null,
+                spotifyAlreadySaved = track.spotifySavedAt != null,
+                ytAlreadySaved = track.ytMusicSavedAt != null,
+            )
+        }
+    }
+
+    /** Dismiss the override sheet without saving. */
+    fun onLikeSheetDismiss() {
+        _likeSheetState.value = null
+    }
+
+    /**
+     * Save action from the override sheet. Selection is ephemeral — it
+     * does NOT update Settings defaults. Errors are intentionally
+     * swallowed here; the dispatcher logs them and the sheet closes
+     * either way to match Material guidance for modal sheets.
+     */
+    fun onLikeSheetSave(selected: Set<com.stash.core.ui.components.DestinationCheckbox>) {
+        val track = _uiState.value.currentTrack ?: return
+        viewModelScope.launch {
+            val mapped = selected.map { ui ->
+                when (ui) {
+                    com.stash.core.ui.components.DestinationCheckbox.STASH -> com.stash.core.data.social.Destination.STASH
+                    com.stash.core.ui.components.DestinationCheckbox.SPOTIFY -> com.stash.core.data.social.Destination.SPOTIFY
+                    com.stash.core.ui.components.DestinationCheckbox.YT_MUSIC -> com.stash.core.data.social.Destination.YT_MUSIC
+                }
+            }.toSet()
+            likeDispatcher.like(track, mapped)
+            _likeSheetState.value = null
+        }
+    }
+
+    private fun friendlyName(dest: com.stash.core.data.social.Destination): String = when (dest) {
+        com.stash.core.data.social.Destination.STASH -> "Stash"
+        com.stash.core.data.social.Destination.SPOTIFY -> "Spotify"
+        com.stash.core.data.social.Destination.YT_MUSIC -> "YouTube Music"
     }
 
     // ------------------------------------------------------------------

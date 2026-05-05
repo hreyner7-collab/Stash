@@ -129,6 +129,16 @@ fun NowPlayingScreen(
         )
     }
 
+    // v0.9.13: Per-track Like override sheet — driven by VM state flow.
+    val likeSheetState by viewModel.likeSheetState.collectAsStateWithLifecycle()
+    likeSheetState?.let { state ->
+        com.stash.core.ui.components.LikeDestinationSheet(
+            state = state,
+            onDismiss = viewModel::onLikeSheetDismiss,
+            onSave = viewModel::onLikeSheetSave,
+        )
+    }
+
     // "This song is wrong" — 3-option dialog triggered by the flag icon.
     // Separated from the icon's direct action so the same entry point
     // covers three very different outcomes: mark for replacement, delete
@@ -213,7 +223,7 @@ fun NowPlayingScreen(
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // -- Top bar: dismiss, label, flag, save, queue --
+            // -- Top bar: dismiss, label, flag, like, save, queue --
             TopBar(
                 onDismiss = onDismiss,
                 onFlagWrongMatch = { showWrongMatchDialog = true },
@@ -221,6 +231,11 @@ fun NowPlayingScreen(
                 onQueueClick = { showQueue = true },
                 hasTrack = uiState.hasTrack,
                 queueSize = uiState.queueSize,
+                onLikeTap = viewModel::onLikeTap,
+                onLikeLongPress = viewModel::onLikeLongPress,
+                likedAny = uiState.currentTrack?.let {
+                    it.stashLikedAt != null || it.spotifySavedAt != null || it.ytMusicSavedAt != null
+                } ?: false,
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -356,6 +371,9 @@ private fun TopBar(
     onQueueClick: () -> Unit,
     hasTrack: Boolean,
     queueSize: Int,
+    onLikeTap: () -> Unit,                    // NEW v0.9.13
+    onLikeLongPress: () -> Unit,              // NEW v0.9.13
+    likedAny: Boolean,                        // NEW v0.9.13
 ) {
     Row(
         modifier = Modifier
@@ -393,6 +411,17 @@ private fun TopBar(
                     modifier = Modifier.size(24.dp),
                 )
             }
+        }
+
+        // v0.9.13: Like button — tap fires defaults, long-press opens override sheet.
+        if (hasTrack) {
+            com.stash.core.ui.components.LikeButton(
+                likedAny = likedAny,
+                onTap = onLikeTap,
+                onLongPress = onLikeLongPress,
+                unlikedTint = Color.White,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
 
         // Save to playlist — only shown when a track is loaded.
