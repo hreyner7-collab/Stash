@@ -4,6 +4,7 @@ import android.util.Log
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.AudioFormat
 import com.stash.data.download.lossless.LosslessSource
+import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
@@ -19,7 +20,8 @@ import kotlin.math.abs
  * [LosslessSource] backed by the Qobuz catalog via the kennyy.com.br
  * public proxy (`qobuz.kennyy.com.br/api`). Searches for the requested
  * track, scores candidates by ISRC / title / artist / duration agreement,
- * and resolves the best match to a signed FLAC download URL.
+ * and resolves the best match to a signed FLAC download URL at the user's
+ * preferred quality tier (read from [LosslessSourcePreferences]).
  *
  * kennyy.com.br is a near-clone of qobuz.squid.wtf (same Qobuz-DL
  * Next.js codebase, different operator). Critically: **no captcha gate**
@@ -37,6 +39,7 @@ import kotlin.math.abs
 class KennyySource @Inject constructor(
     private val apiClient: KennyyApiClient,
     private val rateLimiter: AggregatorRateLimiter,
+    private val losslessPrefs: LosslessSourcePreferences,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
@@ -81,7 +84,9 @@ class KennyySource @Inject constructor(
         // 3. Resolve to a signed download URL. kennyy.com.br returns 403
         // when the track is non-streamable; callLimited returns null so
         // we fall through to the next source cleanly.
-        val requestedQuality = QobuzQuality.FLAC_HIRES_192
+        val tier = losslessPrefs.qualityTierNow()
+        val requestedQuality = tier.qobuzCode
+        Log.d(TAG, "kennyy_qobuz: requested quality=$requestedQuality (tier=${tier.name})")
         val download = callLimited {
             apiClient.getFileUrl(best.first.id, requestedQuality)
         } ?: return null
