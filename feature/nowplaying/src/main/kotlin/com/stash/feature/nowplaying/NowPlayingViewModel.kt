@@ -17,8 +17,13 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -58,6 +63,7 @@ class NowPlayingViewModel @Inject constructor(
     init {
         observePlayerState()
         observeUserPlaylists()
+        observeLikeStateForCurrentTrack()
     }
 
     // ------------------------------------------------------------------
@@ -122,6 +128,44 @@ class NowPlayingViewModel @Inject constructor(
                                 trackCount = playlist.trackCount,
                             )
                         },
+                    )
+                }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * v0.9.13: Live-bind the heart icon's state to Room. The player's
+     * Track snapshot doesn't refresh from the `tracks` table after
+     * marker writes, so without this observation the heart reverts to
+     * outline whenever the screen is recomposed from scratch (e.g.
+     * mini-player closed and reopened — fresh VM, fresh `_uiState`,
+     * fresh player snapshot still showing null timestamps).
+     *
+     * `flatMapLatest` re-anchors when the user skips to a different
+     * track. `distinctUntilChanged` deduplicates emissions when an
+     * unrelated `tracks` mutation re-fires the Flow but doesn't move
+     * any of the three timestamps.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeLikeStateForCurrentTrack() {
+        playerRepository.playerState
+            .map { it.currentTrack?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { id ->
+                if (id == null) flowOf(null) else musicRepository.observeLikeState(id)
+            }
+            .distinctUntilChanged()
+            .onEach { state ->
+                _uiState.update { current ->
+                    val track = current.currentTrack ?: return@update current
+                    if (state == null || state.id != track.id) return@update current
+                    current.copy(
+                        currentTrack = track.copy(
+                            stashLikedAt = state.stashLikedAt,
+                            spotifySavedAt = state.spotifySavedAt,
+                            ytMusicSavedAt = state.ytMusicSavedAt,
+                        )
                     )
                 }
             }

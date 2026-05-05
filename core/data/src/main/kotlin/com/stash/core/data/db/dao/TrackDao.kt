@@ -24,6 +24,23 @@ data class ArtistSummary(
 )
 
 /**
+ * v0.9.13: Projection of just the three Like-state timestamp columns.
+ * Subscribed by Now Playing so the heart icon stays in sync with Room
+ * across screen open/close cycles — the player's cached Track is a
+ * snapshot taken at track-load time and doesn't refresh from the
+ * `tracks` table after `markStashLiked`/`markSpotifySaved`/etc. fire.
+ *
+ * Forward-only semantics make any non-null value the canonical answer
+ * for "is this destination saved?".
+ */
+data class TrackLikeState(
+    val id: Long,
+    @androidx.room.ColumnInfo(name = "stash_liked_at") val stashLikedAt: Long?,
+    @androidx.room.ColumnInfo(name = "spotify_saved_at") val spotifySavedAt: Long?,
+    @androidx.room.ColumnInfo(name = "ytmusic_saved_at") val ytMusicSavedAt: Long?,
+)
+
+/**
  * Summary projection for album browsing.
  *
  * @property album  Album name.
@@ -474,6 +491,15 @@ interface TrackDao {
      */
     @Query("UPDATE tracks SET stash_liked_at = :ts WHERE id = :trackId")
     suspend fun markStashLiked(trackId: Long, ts: Long)
+
+    /**
+     * v0.9.13: Live-observe a track's three Like-state timestamps.
+     * Now Playing subscribes to this so the heart icon reflects the
+     * persisted state on every screen open, not the stale snapshot
+     * cached in the player's in-memory Track.
+     */
+    @Query("SELECT id, stash_liked_at, spotify_saved_at, ytmusic_saved_at FROM tracks WHERE id = :trackId")
+    fun observeLikeState(trackId: Long): Flow<TrackLikeState?>
 
     /**
      * v0.9.13: Count of tracks marked as auto-saved to Spotify since

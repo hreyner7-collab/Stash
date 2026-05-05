@@ -96,6 +96,14 @@ interface MusicRepository {
     /** All active playlists of a given type (e.g. LIKED_SONGS). */
     fun getPlaylistsByType(type: com.stash.core.model.PlaylistType): Flow<List<Playlist>>
 
+    /**
+     * v0.9.13: Live-observe a track's Like-state timestamps. Subscribed
+     * by Now Playing to keep the heart icon in sync across screen
+     * open/close cycles — the player's cached Track is a snapshot
+     * taken at track-load time and doesn't refresh from Room.
+     */
+    fun observeLikeState(trackId: Long): Flow<com.stash.core.data.db.dao.TrackLikeState?>
+
     // ── Mutations ───────────────────────────────────────────────────────
 
     /** Record a play event: increments play count and updates last-played. */
