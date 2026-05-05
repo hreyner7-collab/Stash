@@ -999,6 +999,7 @@ interface TrackDao {
               AND pt.removed_at IS NULL
               AND (
                   p.type = 'LIKED_SONGS'
+                  OR p.type = 'STASH_LIKED'
                   OR (p.type = 'CUSTOM' AND p.source = 'BOTH')
               )
         )
@@ -1022,6 +1023,7 @@ interface TrackDao {
               AND pt.removed_at IS NULL
               AND (
                   p.type = 'LIKED_SONGS'
+                  OR p.type = 'STASH_LIKED'
                   OR (p.type = 'CUSTOM' AND p.source = 'BOTH')
               )
         )
