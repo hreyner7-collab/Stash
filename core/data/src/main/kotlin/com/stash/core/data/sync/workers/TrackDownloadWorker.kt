@@ -247,19 +247,20 @@ class TrackDownloadWorker @AssistedInject constructor(
                                         File(outcome.filePath).length()
                                     } catch (_: Exception) { 0L }
 
+                                    // Extract metadata BEFORE markAsDownloaded so we can
+                                    // persist bit-depth + sample-rate in the same row write.
+                                    // The file is on disk at this point — `outcome.filePath`
+                                    // is final, not a temp path.
+                                    val meta = audioDurationExtractor.extract(outcome.filePath)
+
                                     trackDao.markAsDownloaded(
                                         trackId = queueItem.trackId,
                                         filePath = outcome.filePath,
                                         fileSizeBytes = fileSize,
+                                        sampleRateHz = meta?.sampleRateHz,
+                                        bitsPerSample = meta?.bitsPerSample,
                                     )
 
-                                    // Read codec / bitrate / duration from the
-                                    // file's own container. Single retriever
-                                    // pass — covers three writes that used to
-                                    // be either skipped (file_format,
-                                    // quality_kbps) or guarded on
-                                    // duration_ms=0.
-                                    val meta = audioDurationExtractor.extract(outcome.filePath)
                                     if (meta != null) {
                                         // Format: source-of-truth for Library Health.
                                         // Write whenever the codec is known, even when
