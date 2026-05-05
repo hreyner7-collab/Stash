@@ -4,20 +4,14 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.PlaybackException
 import com.stash.core.data.db.dao.TrackDao
-import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.preview.PreviewPlayer
 import com.stash.core.media.preview.PreviewState
 import com.stash.core.media.preview.SearchPreviewMediaSource
-import com.stash.core.model.MusicSource
-import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
-import com.stash.data.download.DownloadExecutor
-import com.stash.data.download.DownloadResult
-import com.stash.data.download.files.FileOrganizer
-import com.stash.data.download.prefs.QualityPreferencesManager
-import com.stash.data.download.prefs.toYtDlpArgs
 import com.stash.data.download.preview.PreviewUrlCache
 import com.stash.data.download.preview.PreviewUrlExtractor
+import com.stash.data.download.search.SearchDownloadCoordinator
+import com.stash.data.download.search.SearchDownloadStatus
 import dagger.hilt.android.scopes.ViewModelScoped
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -27,10 +21,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -54,11 +46,8 @@ class TrackActionsDelegate @Inject constructor(
     private val searchPreviewMediaSource: SearchPreviewMediaSource,
     private val previewUrlExtractor: PreviewUrlExtractor,
     private val previewUrlCache: PreviewUrlCache,
-    private val downloadExecutor: DownloadExecutor,
     private val trackDao: TrackDao,
-    private val fileOrganizer: FileOrganizer,
-    private val qualityPrefs: QualityPreferencesManager,
-    private val musicRepository: MusicRepository,
+    private val searchDownloadCoordinator: SearchDownloadCoordinator,
 ) {
     /** Mirrors [PreviewPlayer.previewState] so consumers don't need a second dep. */
     val previewState: StateFlow<PreviewState> = previewPlayer.previewState
@@ -277,101 +266,46 @@ class TrackActionsDelegate @Inject constructor(
      * the cancel.
      */
     fun downloadTrack(item: TrackItem) {
-        if (item.videoId in _downloadingIds.value) return
-        if (item.videoId in _downloadedIds.value) return
-        _downloadingIds.update { it + item.videoId }
+        val key = item.videoId
+        if (key in _downloadingIds.value || key in _downloadedIds.value) return
+        _downloadingIds.update { it + key }
 
         scope().launch {
-            val t0 = System.currentTimeMillis()
-            android.util.Log.d("LATDIAG", "download-start videoId=${item.videoId} title='${item.title}'")
             try {
-                val url = "https://www.youtube.com/watch?v=${item.videoId}"
-                val qualityTier = qualityPrefs.qualityTier.first()
-                val qualityArgs = qualityTier.toYtDlpArgs()
-                val tempDir = fileOrganizer.getTempDir()
-                val tempFilename = "actions_${item.videoId}_${UUID.randomUUID()}"
-
-                val dt0 = System.currentTimeMillis()
-                val result = downloadExecutor.download(
-                    url = url,
-                    outputDir = tempDir,
-                    filename = tempFilename,
-                    qualityArgs = qualityArgs,
-                )
-                val downloadDt = System.currentTimeMillis() - dt0
-                android.util.Log.d(
-                    "LATDIAG",
-                    "download-exec videoId=${item.videoId} dt=${downloadDt}ms result=${result.javaClass.simpleName}",
-                )
-                when (result) {
-                    is DownloadResult.Success -> {
-                        val ct0 = System.currentTimeMillis()
-                        handleDownloadSuccess(result, item)
-                        val commitDt = System.currentTimeMillis() - ct0
-                        android.util.Log.d(
-                            "LATDIAG",
-                            "download-commit videoId=${item.videoId} dt=${commitDt}ms totalDt=${System.currentTimeMillis() - t0}ms",
-                        )
-                    }
-                    is DownloadResult.YtDlpError -> {
-                        Log.e(TAG, "Download failed for ${item.title}: ${result.message.take(100)}")
-                        markDownloadFailed(item.videoId)
-                    }
-                    is DownloadResult.NoOutput -> {
-                        Log.e(TAG, "Download produced no output for ${item.title}")
-                        markDownloadFailed(item.videoId)
-                    }
-                    is DownloadResult.Error -> {
-                        Log.e(TAG, "Download error for ${item.title}: ${result.message}")
-                        markDownloadFailed(item.videoId)
+                searchDownloadCoordinator.download(item).collect { status ->
+                    when (status) {
+                        is SearchDownloadStatus.Resolving -> {
+                            // Already in _downloadingIds; no UI change needed.
+                        }
+                        is SearchDownloadStatus.Downloading -> {
+                            // Notify the user when falling back to YouTube — the
+                            // lossless (Qobuz) path is the expected fast case and
+                            // needs no message.
+                            if (status.via == SearchDownloadStatus.Source.YOUTUBE) {
+                                _userMessages.tryEmit("Downloading via YouTube (slower)…")
+                            }
+                        }
+                        is SearchDownloadStatus.Completed -> {
+                            _downloadingIds.update { it - key }
+                            _downloadedIds.update { it + key }
+                        }
+                        is SearchDownloadStatus.Failed -> {
+                            _downloadingIds.update { it - key }
+                            _userMessages.tryEmit("Download failed: ${status.message}")
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                // Preserve structured cancellation — remove the spinner and
+                // rethrow so the owning scope sees the cancellation signal.
+                _downloadingIds.update { it - key }
+                throw e
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                Log.e(TAG, "Download error for ${item.title}", e)
-                markDownloadFailed(item.videoId)
+                Log.e(TAG, "downloadTrack failed for $key", e)
+                _downloadingIds.update { it - key }
+                _userMessages.tryEmit("Download failed: ${e.message ?: "unknown error"}")
             }
         }
-    }
-
-    private suspend fun handleDownloadSuccess(
-        result: DownloadResult.Success,
-        item: TrackItem,
-    ) {
-        val committed = fileOrganizer.commitDownload(
-            tempFile = result.file,
-            artist = item.artist,
-            album = null,
-            title = item.title,
-            format = result.file.extension,
-        )
-
-        val track = Track(
-            title = item.title,
-            artist = item.artist,
-            durationMs = (item.durationSeconds * 1000).toLong(),
-            source = MusicSource.YOUTUBE,
-            youtubeId = item.videoId,
-            filePath = committed.filePath,
-            fileSizeBytes = committed.sizeBytes,
-            isDownloaded = true,
-            albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(item.thumbnailUrl),
-        )
-        val trackId = musicRepository.insertTrack(track)
-
-        // Link to the protected "Your Downloads" playlist so the next-launch
-        // orphan sweep leaves this track alone. Swallow failures — the track
-        // is already in the library; a missing link self-heals on the next
-        // download (seeder re-runs) or on the next startup seeder pass.
-        runCatching { musicRepository.linkTrackToDownloadsMix(trackId) }
-            .onFailure { Log.e(TAG, "linkTrackToDownloadsMix failed for id=$trackId", it) }
-
-        _downloadingIds.update { it - item.videoId }
-        _downloadedIds.update { it + item.videoId }
-    }
-
-    private fun markDownloadFailed(videoId: String) {
-        _downloadingIds.update { it - videoId }
     }
 
     /**
