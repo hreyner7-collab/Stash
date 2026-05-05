@@ -6,7 +6,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import com.stash.core.media.actions.TrackItem
+import com.stash.core.model.TrackItem
 import com.stash.data.download.preview.PreviewUrlExtractor
 import javax.inject.Inject
 import javax.inject.Singleton

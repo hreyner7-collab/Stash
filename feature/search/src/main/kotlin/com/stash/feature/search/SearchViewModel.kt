@@ -217,14 +217,14 @@ internal fun TrackSummary.toSearchResultItem() = SearchResultItem(
 )
 
 /**
- * Adapter: [TrackSummary] → [com.stash.core.media.actions.TrackItem].
+ * Adapter: [TrackSummary] → [com.stash.core.model.TrackItem].
  *
  * Used at download call sites in the screen — the delegate's `downloadTrack`
- * takes a [com.stash.core.media.actions.TrackItem] (the minimal identity
+ * takes a [com.stash.core.model.TrackItem] (the minimal identity
  * needed to kick off a yt-dlp download). Kept next to [toSearchResultItem]
  * so the two adapters are easy to compare.
  */
-internal fun TrackSummary.toTrackItem() = com.stash.core.media.actions.TrackItem(
+internal fun TrackSummary.toTrackItem() = com.stash.core.model.TrackItem(
     videoId = videoId,
     title = title,
     artist = artist,
@@ -233,14 +233,14 @@ internal fun TrackSummary.toTrackItem() = com.stash.core.media.actions.TrackItem
 )
 
 /**
- * Adapter: [SearchResultItem] → [com.stash.core.media.actions.TrackItem].
+ * Adapter: [SearchResultItem] → [com.stash.core.model.TrackItem].
  *
  * [PopularTracksSection]'s `onDownload` callback surfaces the row as a
  * [SearchResultItem] (since the composable converts internally via
  * [toSearchResultItem] to feed [PreviewDownloadRow]). Screens that route
  * that callback into `delegate.downloadTrack` use this one-liner.
  */
-internal fun SearchResultItem.toTrackItem() = com.stash.core.media.actions.TrackItem(
+internal fun SearchResultItem.toTrackItem() = com.stash.core.model.TrackItem(
     videoId = videoId,
     title = title,
     artist = artist,

@@ -9,6 +9,7 @@ import com.stash.core.media.preview.PreviewPlayer
 import com.stash.core.media.preview.PreviewState
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
+import com.stash.core.model.TrackItem
 import com.stash.data.download.DownloadExecutor
 import com.stash.data.download.DownloadResult
 import com.stash.data.download.files.FileOrganizer
@@ -367,18 +368,6 @@ class TrackActionsDelegate @Inject constructor(
     }
 }
 
-/**
- * Minimal track identity needed to initiate a download. A light-weight stand-in
- * that both `SearchResultItem` (feature/search) and any future caller (e.g.
- * `AlbumDiscoveryViewModel`) can map to at the call site with a one-liner.
- *
- * Lives here (not in `core/model`) because it's specific to the delegate's
- * download path — other layers work with full [com.stash.core.model.Track]s.
- */
-data class TrackItem(
-    val videoId: String,
-    val title: String,
-    val artist: String,
-    val durationSeconds: Double,
-    val thumbnailUrl: String?,
-)
+// TrackItem was defined here until v0.9.12; it now lives in
+// com.stash.core.model.TrackItem so that :data:download can reference it
+// without creating a circular module dependency with :core:media.

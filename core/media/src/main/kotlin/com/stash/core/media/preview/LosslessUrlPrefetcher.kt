@@ -1,7 +1,7 @@
 package com.stash.core.media.preview
 
 import android.util.Log
-import com.stash.core.media.actions.TrackItem
+import com.stash.core.model.TrackItem
 import com.stash.data.download.lossless.LosslessSourceRegistry
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery

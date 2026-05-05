@@ -8,7 +8,7 @@ import com.stash.core.data.cache.AlbumCache
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.actions.TrackActionsDelegate
-import com.stash.core.media.actions.TrackItem
+import com.stash.core.model.TrackItem
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job

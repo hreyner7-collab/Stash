@@ -25,7 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.stash.core.media.actions.TrackItem
+import com.stash.core.model.TrackItem
 import com.stash.core.media.preview.PreviewState
 import com.stash.core.ui.components.DiscoveryErrorCard
 import com.stash.core.ui.components.SectionHeader

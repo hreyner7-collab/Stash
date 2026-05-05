@@ -6,8 +6,10 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheEvictor
+import androidx.media3.datasource.cache.CacheKeyFactory
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import com.stash.core.media.preview.TrackKeyCacheKeyFactory
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -60,4 +62,15 @@ object PreviewCacheModule {
             .setUserAgent("Stash/0.9.12")
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
+
+    /**
+     * Binds [TrackKeyCacheKeyFactory] as the graph-wide [CacheKeyFactory].
+     *
+     * [SearchDownloadCoordinator] lives in `:data:download`, which cannot
+     * depend on `:core:media` (circular). It injects [CacheKeyFactory] (the
+     * media3 interface) so Hilt resolves the concrete type here, at the
+     * `:core:media` layer, which owns the factory class.
+     */
+    @Provides @Singleton
+    fun provideCacheKeyFactory(impl: TrackKeyCacheKeyFactory): CacheKeyFactory = impl
 }
