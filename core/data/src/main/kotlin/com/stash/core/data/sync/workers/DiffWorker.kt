@@ -56,6 +56,7 @@ class DiffWorker @AssistedInject constructor(
     private val syncStateManager: SyncStateManager,
     private val musicRepository: MusicRepository,
     private val syncPreferencesManager: SyncPreferencesManager,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -305,21 +306,22 @@ class DiffWorker @AssistedInject constructor(
 
         var newTrackCount = 0
         for (trackSnapshot in trackSnapshots) {
-            val existingTrack = findExistingTrack(trackSnapshot)
-
-            // Blacklist: user explicitly blocked this identity from ever
-            // being re-downloaded. Skip both the download-queue insert
-            // and the playlist_tracks link — the track stays invisible
-            // to the library unless the user unblocks from Settings →
-            // Blocked Songs.
-            if (existingTrack != null && existingTrack.isBlacklisted) {
-                Log.d(
-                    TAG,
-                    "Skipping blacklisted track id=${existingTrack.id} " +
-                        "'${existingTrack.title}' by ${existingTrack.artist}",
-                )
+            // v0.9.15: Blocklist guard at the door. Identity-keyed so a
+            // re-like on a different source / canonical disagreement / new
+            // tracks row can't slip past. Replaces the prior
+            // `existingTrack.isBlacklisted` check, which only worked when
+            // findExistingTrack happened to land on the same row.
+            if (blocklistGuard.isBlocked(
+                    artist = trackSnapshot.artist,
+                    title = trackSnapshot.title,
+                    spotifyUri = trackSnapshot.spotifyUri,
+                    youtubeId = trackSnapshot.youtubeId,
+                )) {
+                Log.d(TAG, "Skipping blocked snapshot: ${trackSnapshot.artist} - ${trackSnapshot.title}")
                 continue
             }
+
+            val existingTrack = findExistingTrack(trackSnapshot)
 
             if (existingTrack != null) {
                 ensurePlaylistMembership(
