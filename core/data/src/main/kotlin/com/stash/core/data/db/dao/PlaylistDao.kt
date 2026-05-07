@@ -259,6 +259,16 @@ interface PlaylistDao {
     suspend fun removeTrackFromPlaylist(playlistId: Long, trackId: Long)
 
     /**
+     * v0.9.15: Hard-delete every cross-ref for [trackId] across all
+     * playlists. Used by [com.stash.core.data.blocklist.BlocklistGuard.block]
+     * so a blocked track stops appearing in any playlist UI immediately,
+     * and so the next sync's `getUnqueuedTrackIds` doesn't see a sync-
+     * enabled-playlist membership that would re-queue the download.
+     */
+    @Query("DELETE FROM playlist_tracks WHERE track_id = :trackId")
+    suspend fun deleteAllCrossRefsForTrack(trackId: Long)
+
+    /**
      * One-time cleanup: hard-delete all soft-deleted playlist_tracks entries.
      * These accumulate from daily mix rotations and serve no purpose after
      * the soft-delete marker is set. Reduces table bloat.

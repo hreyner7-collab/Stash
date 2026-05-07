@@ -146,6 +146,10 @@ interface TrackDao {
     @Delete
     suspend fun delete(track: TrackEntity)
 
+    /** Delete a track row by id. Used by BlocklistGuard's atomic block transaction. */
+    @Query("DELETE FROM tracks WHERE id = :trackId")
+    suspend fun deleteById(trackId: Long)
+
     /**
      * Top artists in the library ranked by track count. Used by the
      * Stash Discover seeding fallback — when a fresh-install user has no
