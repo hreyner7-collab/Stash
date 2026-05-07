@@ -53,6 +53,7 @@ class TrackDownloadWorker @AssistedInject constructor(
     private val trackDownloader: TrackDownloader,
     private val tokenManager: com.stash.core.auth.TokenManager,
     private val audioDurationExtractor: AudioDurationExtractor,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -222,6 +223,23 @@ class TrackDownloadWorker @AssistedInject constructor(
                                     errorMessage = "Track not found in database",
                                 )
                                 failedCount.incrementAndGet()
+                                return@launch
+                            }
+
+                            // v0.9.15: Last-line defense. The DAO feeders
+                            // (getAllPendingBySources etc.) already exclude
+                            // blocklisted tracks, but a track could enter the
+                            // queue via a path that runs BEFORE this worker
+                            // sees it. If it's blocked, drop the queue entry
+                            // and skip — never download a blocked identity.
+                            if (blocklistGuard.isBlocked(
+                                    artist = trackEntity.artist,
+                                    title = trackEntity.title,
+                                    spotifyUri = trackEntity.spotifyUri,
+                                    youtubeId = trackEntity.youtubeId,
+                                )) {
+                                Log.d(TAG, "Skipping blocked track ${trackEntity.id} (${trackEntity.artist} - ${trackEntity.title})")
+                                downloadQueueDao.deleteByTrackId(trackEntity.id)
                                 return@launch
                             }
 
