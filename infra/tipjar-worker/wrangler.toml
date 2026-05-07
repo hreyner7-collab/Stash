@@ -1,0 +1,13 @@
+name = "stash-tipjar"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+
+# KV namespace binding. `id` is filled by `wrangler kv:namespace create
+# STASH_KV` — see ../README.md step 3.
+[[kv_namespaces]]
+binding = "STASH_KV"
+id = "fca1bc38b42741e6a8cac11f54de5abd"
+
+# Secret: KOFI_VERIFICATION_TOKEN
+# Set via `wrangler secret put KOFI_VERIFICATION_TOKEN` (paste from
+# https://ko-fi.com/manage/webhooks). NOT committed.

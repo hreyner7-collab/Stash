@@ -1,0 +1,14 @@
+{
+  "name": "stash-tipjar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that receives Ko-fi webhooks and serves the live supporter list to the Stash Android app.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.88.0"
+  }
+}
