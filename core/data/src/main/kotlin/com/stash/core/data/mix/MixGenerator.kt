@@ -59,6 +59,7 @@ class MixGenerator @Inject constructor(
     private val trackTagDao: TrackTagDao,
     private val listeningEventDao: ListeningEventDao,
     private val discoveryQueueDao: DiscoveryQueueDao,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) {
 
     companion object {
@@ -270,6 +271,15 @@ class MixGenerator @Inject constructor(
     ) {
         if (similarArtistSuggestions.isEmpty()) return
         val toInsert = similarArtistSuggestions.mapNotNull { cand ->
+            // v0.9.15: Skip blocklisted identities so the same blocked
+            // artist+title doesn't get re-queued every refresh and end up
+            // re-discovered via StashDiscoveryWorker.
+            if (blocklistGuard.isBlocked(
+                    artist = cand.artist, title = cand.title,
+                    spotifyUri = null, youtubeId = null,
+                )) {
+                return@mapNotNull null
+            }
             val exists = discoveryQueueDao.existsForRecipe(recipe.id, cand.artist, cand.title)
             if (exists) null else DiscoveryQueueEntity(
                 recipeId = recipe.id,

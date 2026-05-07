@@ -57,6 +57,7 @@ class StashDiscoveryWorker @AssistedInject constructor(
     private val playlistDao: PlaylistDao,
     private val recipeDao: StashMixRecipeDao,
     private val trackMatcher: TrackMatcher,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -174,6 +175,22 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 null,
                 "recipe has no playlist yet — refresh hasn't materialized it",
             )
+
+        // v0.9.15: Reject blocklisted identities. Without this, a blocked
+        // track that was previously discovered (and is still in the
+        // library row-wise via the rolling rollout) would re-link into
+        // the recipe's playlist on every refresh, AND a fresh-stub branch
+        // would create a new TrackEntity that bypasses the blocklist.
+        if (blocklistGuard.isBlocked(
+                artist = entry.artist, title = entry.title,
+                spotifyUri = null, youtubeId = null,
+            )) {
+            return HandledResult(
+                status = DiscoveryQueueEntity.STATUS_FAILED,
+                trackId = null,
+                error = "blocklisted",
+            )
+        }
 
         // De-dup against the existing library by canonical title+artist
         // match. Saves a redundant download when the user already has the

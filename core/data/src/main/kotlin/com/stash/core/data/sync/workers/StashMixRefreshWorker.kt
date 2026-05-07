@@ -68,6 +68,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val mixGenerator: MixGenerator,
     private val lastFmApiClient: LastFmApiClient,
     private val lastFmCredentials: LastFmCredentials,
+    private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -228,9 +229,20 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // the same track (possible if a Discovery download completed and
         // then showed up in the user's library in some other way).
         val librarySet = tracks.mapTo(HashSet(tracks.size)) { it.id }
-        val discoveryTrackIds = discoveryQueueDao
+        // v0.9.15: Filter out blocked identities. Without this, a track
+        // that was discovered + downloaded + later blocked would re-link
+        // into the mix on every refresh because the discovery queue's
+        // DONE row is keyed by track id, not identity. `filter` doesn't
+        // accept suspend lambdas, so the blocklist check is a manual
+        // loop that calls the suspend guard sequentially.
+        val candidateIds = discoveryQueueDao
             .getDoneTrackIdsForRecipe(recipe.id)
             .filter { it !in librarySet }
+        val discoveryTrackIds = buildList {
+            for (trackId in candidateIds) {
+                if (!blocklistGuard.isBlockedByTrackId(trackId)) add(trackId)
+            }
+        }
         discoveryTrackIds.forEachIndexed { offset, trackId ->
             playlistDao.insertCrossRef(
                 PlaylistTrackCrossRef(
