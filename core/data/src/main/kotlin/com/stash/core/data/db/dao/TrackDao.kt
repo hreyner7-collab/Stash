@@ -1064,6 +1064,19 @@ interface TrackDao {
     @Query("SELECT COUNT(*) FROM tracks WHERE match_flagged = 1")
     fun getFlaggedCount(): Flow<Int>
 
+    /**
+     * v0.9.15: Snapshot every tracks row (with its stored canonicals) for
+     * the [com.stash.core.data.sync.workers.BlocklistIntegrityWorker]
+     * one-shot cleanup. The worker iterates this list, checks each row's
+     * canonical_artist|canonical_title against `track_blocklist`, and
+     * tears down the rows whose identity matches — i.e. the v0.9.13/14-
+     * era tracks that leaked back during the broken-flag-era. Returns the
+     * full list (no LIMIT) because we need a stable snapshot to iterate
+     * while the worker mutates the table.
+     */
+    @Query("SELECT * FROM tracks")
+    suspend fun getAllForIntegrityScan(): List<TrackEntity>
+
     // ── Library candidate pool ──────────────────────────────────────────
 
     /**

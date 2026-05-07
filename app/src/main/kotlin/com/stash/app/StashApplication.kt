@@ -186,6 +186,7 @@ class StashApplication : Application(), Configuration.Provider {
         // Health covers any rows that slipped through, and the worker's
         // own predicate is idempotent.
         maybeEnqueueQualityBackfill()
+        maybeEnqueueBlocklistIntegrity()
         // Also fire a one-shot check on every cold start so a release pushed
         // between periodic-worker windows surfaces within seconds of the
         // next launch — the 24-hour periodic worker alone can leave users
@@ -392,6 +393,27 @@ class StashApplication : Application(), Configuration.Provider {
         )
         prefs.edit().putBoolean("quality_backfill_done_v17", true).apply()
         Log.i("StashMigration", "maybeEnqueueQualityBackfill: enqueued v17 quality-info backfill")
+    }
+
+    /**
+     * v0.9.15: One-shot cleanup of tracks that leaked back during the
+     * v0.9.13/14 broken-flag era. Walks every tracks row whose stored
+     * canonical identity matches `track_blocklist` and tears it down.
+     *
+     * Uses [androidx.work.ExistingWorkPolicy.KEEP] so a re-launch before
+     * the worker completes doesn't re-enqueue. Idempotent on subsequent
+     * runs (matched rows are gone after the first pass).
+     */
+    private fun maybeEnqueueBlocklistIntegrity() {
+        androidx.work.WorkManager.getInstance(applicationContext)
+            .enqueueUniqueWork(
+                "blocklist_integrity_v1",
+                androidx.work.ExistingWorkPolicy.KEEP,
+                androidx.work.OneTimeWorkRequestBuilder<
+                    com.stash.core.data.sync.workers.BlocklistIntegrityWorker
+                >().build(),
+            )
+        Log.i("StashMigration", "maybeEnqueueBlocklistIntegrity: enqueued v0.9.15 cleanup sweep")
     }
 
     companion object {
