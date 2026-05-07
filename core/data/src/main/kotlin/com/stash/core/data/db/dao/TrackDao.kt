@@ -174,8 +174,18 @@ interface TrackDao {
 
     // ── List queries (all reactive) ─────────────────────────────────────
 
-    /** All tracks ordered by most-recently-added first. */
-    @Query("SELECT * FROM tracks ORDER BY date_added DESC")
+    /** All tracks ordered by most-recently-added first. v0.9.15: filters blocked. */
+    @Query(
+        """
+        SELECT t.* FROM tracks t
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
+        WHERE bl.canonical_key IS NULL
+        ORDER BY t.date_added DESC
+        """
+    )
     fun getAllByDateAdded(): Flow<List<TrackEntity>>
 
     /** All tracks by a specific artist, ordered by album then title. */
@@ -191,7 +201,13 @@ interface TrackDao {
         SELECT t.* FROM tracks t
         INNER JOIN playlist_tracks pt ON t.id = pt.track_id
         INNER JOIN playlists p ON pt.playlist_id = p.id
-        WHERE pt.playlist_id = :playlistId AND pt.removed_at IS NULL
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
+        WHERE pt.playlist_id = :playlistId
+          AND pt.removed_at IS NULL
+          AND bl.canonical_key IS NULL
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC
@@ -624,7 +640,12 @@ interface TrackDao {
         """
         SELECT tracks.* FROM tracks
         JOIN tracks_fts ON tracks.rowid = tracks_fts.rowid
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (tracks.canonical_artist || '|' || tracks.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = tracks.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = tracks.youtube_id)
         WHERE tracks_fts MATCH :query
+          AND bl.canonical_key IS NULL
         """
     )
     fun search(query: String): Flow<List<TrackEntity>>
