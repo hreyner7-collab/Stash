@@ -20,7 +20,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Block
@@ -32,6 +40,7 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +48,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -149,8 +159,14 @@ fun SettingsScreen(
         )
     }
 
+    // v0.9.13: Single-shot consumption of any pending Settings deep-link
+    // focus from Home banners. Read once per Settings entry; cleared
+    // immediately so revisiting the screen doesn't re-scroll.
+    val deepLinkFocus = remember { viewModel.consumeDeepLinkFocus() }
+
     SettingsContent(
         uiState = uiState,
+        focusOnEntry = deepLinkFocus,
         onConnectSpotify = viewModel::onConnectSpotify,
         onDisconnectSpotify = viewModel::onDisconnectSpotify,
         onConnectYouTube = viewModel::onConnectYouTube,
@@ -175,6 +191,11 @@ fun SettingsScreen(
         onLosslessQualityTierChanged = viewModel::onLosslessQualityTierChanged,
         onSquidWtfCaptchaCookieChanged = viewModel::onSquidWtfCaptchaCookieChanged,
         onResetLosslessRateLimiter = viewModel::onResetLosslessRateLimiter,
+        onAutoSaveEnabledChanged = viewModel::onAutoSaveEnabledChanged,
+        onAutoSaveThresholdChanged = viewModel::onAutoSaveThresholdChanged,
+        onHeartDefaultStashChanged = viewModel::onHeartDefaultStashChanged,
+        onHeartDefaultSpotifyChanged = viewModel::onHeartDefaultSpotifyChanged,
+        onHeartDefaultYtMusicChanged = viewModel::onHeartDefaultYtMusicChanged,
         onNavigateToEqualizer = onNavigateToEqualizer,
         onNavigateToLibraryHealth = onNavigateToLibraryHealth,
         onNavigateToSquidWtfCaptcha = onNavigateToSquidWtfCaptcha,
@@ -187,8 +208,10 @@ fun SettingsScreen(
  * callbacks as parameters for testability and preview support.
  */
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun SettingsContent(
     uiState: SettingsUiState,
+    focusOnEntry: com.stash.core.data.navigation.SettingsFocus?,
     onConnectSpotify: () -> Unit,
     onDisconnectSpotify: () -> Unit,
     onConnectYouTube: () -> Unit,
@@ -213,12 +236,30 @@ private fun SettingsContent(
     onLosslessQualityTierChanged: (LosslessQualityTier) -> Unit,
     onSquidWtfCaptchaCookieChanged: (String) -> Unit,
     onResetLosslessRateLimiter: () -> Unit,
+    onAutoSaveEnabledChanged: (Boolean) -> Unit,
+    onAutoSaveThresholdChanged: (Int) -> Unit,
+    onHeartDefaultStashChanged: (Boolean) -> Unit,
+    onHeartDefaultSpotifyChanged: (Boolean) -> Unit,
+    onHeartDefaultYtMusicChanged: (Boolean) -> Unit,
     onNavigateToEqualizer: () -> Unit,
     onNavigateToLibraryHealth: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
+
+    // v0.9.13: deep-link scroll anchors. Each requester is attached to
+    // the relevant section's container modifier; bringIntoView() runs in
+    // a LaunchedEffect once on first composition with a non-null focus.
+    val losslessRequester = remember { BringIntoViewRequester() }
+    val lastFmRequester = remember { BringIntoViewRequester() }
+    LaunchedEffect(focusOnEntry) {
+        when (focusOnEntry) {
+            com.stash.core.data.navigation.SettingsFocus.LOSSLESS -> losslessRequester.bringIntoView()
+            com.stash.core.data.navigation.SettingsFocus.LASTFM -> lastFmRequester.bringIntoView()
+            null -> Unit
+        }
+    }
 
     Column(
         modifier = modifier
@@ -299,6 +340,21 @@ private fun SettingsContent(
             authState = uiState.spotifyAuthState,
             onConnect = onConnectSpotify,
             onDisconnect = onDisconnectSpotify,
+            // v0.9.13: auto-save toggle lives INSIDE the Spotify card, mirroring
+            // the YT Music history pattern below. Always rendered so the
+            // feature stays discoverable; SpotifyAutoSaveSection itself
+            // handles the disconnected-greyed state internally.
+            extraContent = {
+                com.stash.feature.settings.components.SpotifyAutoSaveSection(
+                    enabled = uiState.autoSaveEnabled,
+                    threshold = uiState.autoSaveThreshold,
+                    autoSavedCountLast7Days = uiState.autoSavedCountLast7Days,
+                    spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected,
+                    onToggle = onAutoSaveEnabledChanged,
+                    onThresholdChanged = onAutoSaveThresholdChanged,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            },
         )
 
         AccountConnectionCard(
@@ -309,24 +365,20 @@ private fun SettingsContent(
             onConnect = onConnectYouTube,
             onDisconnect = onDisconnectYouTube,
             // Sync toggle lives INSIDE the YT Music card, below the connect
-            // row, only when the user is connected. Hiding it entirely when
-            // disconnected keeps the card compact — the user can reach
-            // "Connect" from the same row and the sub-setting appears the
-            // moment they're authenticated.
-            extraContent = if (uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected) {
-                {
-                    YouTubeHistorySyncSection(
-                        enabled = uiState.ytHistoryEnabled,
-                        health = uiState.ytHistoryHealth,
-                        pendingCount = uiState.ytPendingCount,
-                        ytConnected = true,
-                        onToggle = onYouTubeHistoryEnabledChanged,
-                        onRetry = onRetryYouTubeHistory,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
-                }
-            } else {
-                null
+            // row. Always rendered so the feature stays discoverable for
+            // users who haven't connected yet — YouTubeHistorySyncSection
+            // greys itself out and shows "Connect YouTube Music first" in
+            // the disconnected state.
+            extraContent = {
+                YouTubeHistorySyncSection(
+                    enabled = uiState.ytHistoryEnabled,
+                    health = uiState.ytHistoryHealth,
+                    pendingCount = uiState.ytPendingCount,
+                    ytConnected = uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected,
+                    onToggle = onYouTubeHistoryEnabledChanged,
+                    onRetry = onRetryYouTubeHistory,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
             },
         )
 
@@ -336,7 +388,9 @@ private fun SettingsContent(
         // different enough (web-auth vs cookie / OAuth) that we render
         // via its own composable instead of AccountConnectionCard.
         val lastFmUriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-        GlassCard {
+        GlassCard(
+            modifier = Modifier.bringIntoViewRequester(lastFmRequester),
+        ) {
             LastFmSection(
                 state = uiState.lastFmState,
                 onConnect = {
@@ -375,7 +429,7 @@ private fun SettingsContent(
         // -- Audio Quality section --------------------------------------------
         SectionHeader(title = "Audio Quality")
 
-        GlassCard {
+        GlassCard(modifier = Modifier.bringIntoViewRequester(losslessRequester)) {
             var advancedExpanded by remember(uiState.losslessEnabled) { mutableStateOf(false) }
             val chevronRotation by animateFloatAsState(
                 targetValue = if (advancedExpanded) 90f else 0f,
@@ -456,9 +510,9 @@ private fun SettingsContent(
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = if (uiState.losslessEnabled) {
-                                "On — studio-quality FLAC via Qobuz. ~10× larger files."
+                                "FLAC routing active. Files ~10\u00D7 larger than MP3."
                             } else {
-                                "Studio-quality FLAC via Qobuz. Files ~10× larger than MP3."
+                                "Studio-quality FLAC via Qobuz. Files ~10\u00D7 larger than MP3."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -471,47 +525,25 @@ private fun SettingsContent(
                     )
                 }
 
-                // -- Captcha sub-block + Advanced expander (only when lossless on) -
+                // -- Routing status + advanced expander (only when lossless on) -
                 AnimatedVisibility(
                     visible = uiState.losslessEnabled,
                     enter = expandVertically() + fadeIn(),
                     exit = shrinkVertically() + fadeOut(),
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
 
-                        // Verify button + verified status, single row to save vertical
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            OutlinedButton(
-                                onClick = onNavigateToSquidWtfCaptcha,
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.primary,
-                                ),
-                            ) {
-                                Text("Connect to squid.wtf")
-                            }
-                            if (uiState.squidWtfCaptchaCookie.isNotEmpty()) {
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = "✓ Verified",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .weight(1f, fill = false)
-                                        .semantics {
-                                            contentDescription = "captcha cookie verified"
-                                        },
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Search any song → tap Download → solve the captcha. Stash captures the cookie automatically.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        // v0.9.13 ROUTING block — replaces the prominent
+                        // "Connect to squid.wtf" CTA. The previous treatment
+                        // implied lossless required a captcha to function;
+                        // it doesn't — kenny carries lossless on its own,
+                        // squid is an optional second source. Now we show
+                        // both sources and let the user solve the captcha
+                        // inline if they want the redundancy.
+                        LosslessRoutingStatus(
+                            squidConfigured = uiState.squidWtfCaptchaCookie.isNotEmpty(),
+                            onSolveCaptcha = onNavigateToSquidWtfCaptcha,
                         )
 
                         // -- Lossless quality picker --------------------------
@@ -631,6 +663,11 @@ private fun SettingsContent(
                 }
             }
         }
+
+        // v0.9.13: heart-defaults Library & Likes section removed — heart is
+        // now Stash-only toggle (standard like-button UX), so there are no
+        // per-destination defaults to configure. Spotify auto-save lives
+        // inside the Spotify connect card above as `extraContent`.
 
         // -- Downloads section ------------------------------------------------
         // Governs when background workers (Stash Discover, tag enrichment)
@@ -1335,6 +1372,131 @@ private fun StorageRow(label: String, value: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
+    }
+}
+
+/**
+ * v0.9.13 — ROUTING status block for the lossless source chain.
+ *
+ * Replaces the legacy "Connect to squid.wtf" CTA which falsely implied
+ * lossless required a captcha to function. Reality: kenny carries
+ * lossless without auth or captcha; squid is an optional second source
+ * that the user can unlock via captcha. When squid is down, kenny
+ * silently fills in.
+ *
+ * Visual is dublab-influenced: mono caps header, indented `↳` rows,
+ * small status dots (filled = configured, outlined = optional). Solve
+ * link inline on the squid row when no cookie is set.
+ *
+ * Honesty caveat: we don't have ping/health telemetry yet, so we never
+ * claim "live" — we use "active" (= configured and reachable in the
+ * resolver chain). v0.9.14 can add real-time health based on the
+ * AggregatorRateLimiter / source-success cache.
+ */
+@Composable
+private fun LosslessRoutingStatus(
+    squidConfigured: Boolean,
+    onSolveCaptcha: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val mono = androidx.compose.ui.text.font.FontFamily.Monospace
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = "ROUTING",
+            fontFamily = mono,
+            style = MaterialTheme.typography.labelSmall.copy(
+                letterSpacing = 1.2.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        RoutingRow(
+            host = "kennyy.com.br",
+            configured = true,
+            statusLabel = "active",
+        )
+        RoutingRow(
+            host = "squid.wtf",
+            configured = squidConfigured,
+            statusLabel = if (squidConfigured) "active" else "optional",
+            actionLabel = if (squidConfigured) null else "solve captcha \u2192",
+            onAction = if (squidConfigured) null else onSolveCaptcha,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "Lossless works on any active source. Adding squid gives you a backup host.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Single row inside [LosslessRoutingStatus]: indent arrow, host name,
+ * status dot + label. Optional action link (e.g. "solve captcha →") on
+ * the right when the source needs user setup.
+ */
+@Composable
+private fun RoutingRow(
+    host: String,
+    configured: Boolean,
+    statusLabel: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val mono = androidx.compose.ui.text.font.FontFamily.Monospace
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "\u21B3",
+            fontFamily = mono,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 6.dp),
+        )
+        Text(
+            text = host,
+            fontFamily = mono,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        // Status dot — filled-primary when configured, outlined-muted when not.
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(
+                    if (configured) MaterialTheme.colorScheme.primary
+                    else androidx.compose.ui.graphics.Color.Transparent,
+                )
+                .border(
+                    width = if (configured) 0.dp else 1.dp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    shape = CircleShape,
+                ),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = statusLabel,
+            fontFamily = mono,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (actionLabel != null && onAction != null) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = actionLabel,
+                fontFamily = mono,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable(onClick = onAction),
+            )
+        }
     }
 }
 

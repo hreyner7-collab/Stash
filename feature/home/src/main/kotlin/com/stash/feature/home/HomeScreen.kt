@@ -11,6 +11,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.MarqueeSpacing
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -21,6 +23,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import com.stash.core.ui.theme.SpaceGrotesk
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +51,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -136,7 +148,10 @@ fun HomeScreen(
             .statusBarsPadding(),
         contentPadding = PaddingValues(bottom = 120.dp),
     ) {
-        // ── App title (Bungee Shade wordmark) ────────────────────────
+        // ── App title row: wordmark + social icons ────────────────────
+        // v0.9.13: empty space to the right of the wordmark holds quick
+        // links to the project (GitHub, X). Supporter pill moves back
+        // to its own full-width row below.
         item {
             Row(
                 modifier = Modifier
@@ -144,11 +159,6 @@ fun HomeScreen(
                     .padding(horizontal = 20.dp, vertical = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Bungee Shade "Stash" as a VectorDrawable. The light and
-                // dark variants are both in drawable/ and we pick via the
-                // LocalIsDarkTheme CompositionLocal, because the app theme
-                // is Compose-state driven (not OS ui-mode) so the
-                // drawable-night/ resource qualifier wouldn't flip with it.
                 val isDark = LocalIsDarkTheme.current
                 Image(
                     painter = painterResource(
@@ -158,13 +168,34 @@ fun HomeScreen(
                     contentDescription = "Stash",
                     modifier = Modifier.height(48.dp),
                 )
+                Spacer(modifier = Modifier.weight(1f))
+
+                val socialUriHandler = LocalUriHandler.current
+                androidx.compose.material3.IconButton(
+                    onClick = { socialUriHandler.openUri(STASH_ISSUE_URL) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = Icons.Filled.Build,
+                        contentDescription = "Report an issue on GitHub",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
         }
 
-        // ── Supporter pill (full row so messages aren't truncated) ───
+        // ── Supporter pill (full row) ─────────────────────────────────
+        // v0.9.13: live data from TipJarRepository. Tap → ko-fi.
         item {
+            val tipJar = uiState.tipJar
+            val pillSupporters = remember(tipJar) {
+                tipJar.supporters.map {
+                    Supporter(name = it.name, amount = "$${it.amountUsd}", message = it.message)
+                }.ifEmpty { HOME_SUPPORTERS }
+            }
             SupporterPill(
-                supporters = HOME_SUPPORTERS,
+                supporters = pillSupporters,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
@@ -192,7 +223,13 @@ fun HomeScreen(
                 Spacer(Modifier.height(6.dp))
                 LastFmConnectBanner(
                     pendingCount = prompt.pendingCount,
-                    onConnect = onNavigateToSettings,
+                    onConnect = {
+                        // v0.9.13: queue the Settings focus target THEN navigate.
+                        // The Settings VM reads + clears the focus on entry and
+                        // scrolls the Last.fm card into view.
+                        viewModel.requestSettingsLastFmFocus()
+                        onNavigateToSettings()
+                    },
                     onDismiss = viewModel::dismissLastFmBanner,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
@@ -207,7 +244,10 @@ fun HomeScreen(
             item {
                 Spacer(Modifier.height(6.dp))
                 LosslessConnectBanner(
-                    onSetUp = onNavigateToSettings,
+                    onSetUp = {
+                        viewModel.requestSettingsLosslessFocus()
+                        onNavigateToSettings()
+                    },
                     onDismiss = viewModel::dismissLosslessBanner,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
@@ -1657,6 +1697,11 @@ private data class Supporter(
     val message: String,
 )
 
+// v0.9.13: report-an-issue link shown as a wrench icon next to the
+// wordmark on Home. Tap → GitHub new-issue form so users can file
+// bugs without leaving the project. Edit when the repo URL changes.
+private const val STASH_ISSUE_URL = "https://github.com/rawnaldclark/Stash/issues/new"
+
 private val HOME_SUPPORTERS = listOf(
     Supporter(
         name = "Cedric",
@@ -1668,13 +1713,27 @@ private val HOME_SUPPORTERS = listOf(
         amount = "$5",
         message = "Amazing work! Keep sticking it to the man!",
     ),
+    Supporter(
+        name = "RucaNebas",
+        amount = "$5",
+        message = "Awesome application! I hope continuous improvement and support",
+    ),
 )
 
 /**
- * Compact pill that sits to the right of the Stash wordmark and crossfades
- * through Ko-fi supporters. Two-line content shows name · amount on top and
- * the supporter's message (truncated) below. Tap opens the Ko-fi page. An
- * outlined heart distinguishes it from the filled-gradient Liked Songs heart.
+ * v0.9.13: Tip Jar pill — calmer, on-brand redesign.
+ *
+ * Replaces the prior typewriter+sheet approach (felt corny). Now:
+ *  - Small mono lowercase `tip jar` tag with subtle purple glow
+ *  - Avatar circle with the supporter's initial (track-row vocabulary)
+ *  - Name in Space Grotesk Bold (heroic, like a song title)
+ *  - Amount right-aligned in mono (the only number on the surface)
+ *  - Message in Inter italic, low-contrast (testimonial / liner-note)
+ *  - Footer hint `ko-fi.com/rawnald →` so the tap target is obvious
+ *  - Crossfade between supporters every ~6s
+ *
+ * Tap on the whole card opens ko-fi in the browser. No in-app sheet —
+ * goal/progress tracking lives at ko-fi where it actually happens.
  */
 @Composable
 private fun SupporterPill(
@@ -1684,18 +1743,20 @@ private fun SupporterPill(
     if (supporters.isEmpty()) return
     val uriHandler = LocalUriHandler.current
     val extendedColors = StashTheme.extendedColors
-    var index by remember { mutableStateOf(0) }
 
+    var index by remember { mutableStateOf(0) }
     LaunchedEffect(supporters.size) {
         while (true) {
-            kotlinx.coroutines.delay(5000)
-            index = (index + 1) % supporters.size
+            kotlinx.coroutines.delay(7000)
+            if (supporters.isNotEmpty()) {
+                index = (index + 1) % supporters.size
+            }
         }
     }
+    val current = supporters[index.coerceIn(0, supporters.lastIndex)]
 
     Surface(
-        modifier = modifier
-            .clickable { uriHandler.openUri("https://ko-fi.com/rawnald") },
+        modifier = modifier.clickable { uriHandler.openUri("https://ko-fi.com/rawnald") },
         color = extendedColors.glassBackground,
         shape = RoundedCornerShape(14.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
@@ -1705,8 +1766,8 @@ private fun SupporterPill(
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(
-                imageVector = Icons.Default.FavoriteBorder,
+            androidx.compose.material3.Icon(
+                imageVector = androidx.compose.material.icons.Icons.Default.FavoriteBorder,
                 contentDescription = "Supporters on Ko-fi",
                 tint = Color(0xFFFFC947),
                 modifier = Modifier
@@ -1714,15 +1775,14 @@ private fun SupporterPill(
                     .padding(top = 2.dp),
             )
             Crossfade(
-                targetState = index,
+                targetState = current,
                 animationSpec = tween(durationMillis = 600),
-                label = "supporter-cycle",
+                label = "supporter-crossfade",
                 modifier = Modifier.weight(1f),
-            ) { i ->
-                val s = supporters[i]
+            ) { s ->
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        text = "${s.name} · ${s.amount}",
+                        text = "${s.name} \u00B7 ${s.amount}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
@@ -1731,14 +1791,9 @@ private fun SupporterPill(
                     Text(
                         text = "\u201C${s.message}\u201D",
                         style = MaterialTheme.typography.bodySmall.copy(
-                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            fontStyle = FontStyle.Italic,
                         ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        // Allow up to 4 lines so the longest current
-                        // message ("Just downloaded Stash to replace
-                        // Spotify…") fits without truncation. Keep an
-                        // ellipsis cap in case a future supporter
-                        // writes a paragraph.
                         maxLines = 4,
                         overflow = TextOverflow.Ellipsis,
                     )

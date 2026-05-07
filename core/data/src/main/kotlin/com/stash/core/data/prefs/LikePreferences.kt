@@ -1,0 +1,87 @@
+package com.stash.core.data.prefs
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+
+// Top-level Context extension — mirrors LosslessSourcePreferences.kt:18-20.
+private val Context.likeDataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "like_preferences",
+)
+
+/**
+ * User preferences for the v0.9.13 Library & Likes feature:
+ *  - Auto-save toggle + threshold slider (default 3 distinct days/30d)
+ *  - Heart-button per-destination defaults (Stash on, Spotify on, YT off)
+ *
+ * Stash on by default for the heart button — local Liked Songs always
+ * works, no external account required. Spotify on by default IF/WHEN
+ * the user is connected (Settings UI gates visibility). YT off by
+ * default — most users haven't connected YT Music.
+ *
+ * Auto-save off by default. Even with Spotify connected, opt-in
+ * required.
+ */
+@Singleton
+class LikePreferences @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
+    private val autoSaveEnabledKey = booleanPreferencesKey("auto_save_enabled")
+    private val autoSaveThresholdKey = intPreferencesKey("auto_save_threshold")
+    private val heartDefaultStashKey = booleanPreferencesKey("heart_default_stash")
+    private val heartDefaultSpotifyKey = booleanPreferencesKey("heart_default_spotify")
+    private val heartDefaultYtMusicKey = booleanPreferencesKey("heart_default_ytmusic")
+
+    val autoSaveEnabled: Flow<Boolean> =
+        context.likeDataStore.data.map { it[autoSaveEnabledKey] ?: false }
+
+    val autoSaveThreshold: Flow<Int> =
+        context.likeDataStore.data.map {
+            (it[autoSaveThresholdKey] ?: 3).coerceIn(1, 10)
+        }
+
+    val heartDefaultStash: Flow<Boolean> =
+        context.likeDataStore.data.map { it[heartDefaultStashKey] ?: true }
+
+    val heartDefaultSpotify: Flow<Boolean> =
+        context.likeDataStore.data.map { it[heartDefaultSpotifyKey] ?: true }
+
+    val heartDefaultYtMusic: Flow<Boolean> =
+        context.likeDataStore.data.map { it[heartDefaultYtMusicKey] ?: false }
+
+    suspend fun autoSaveEnabledNow(): Boolean = autoSaveEnabled.first()
+    suspend fun autoSaveThresholdNow(): Int = autoSaveThreshold.first()
+    suspend fun heartDefaultStashNow(): Boolean = heartDefaultStash.first()
+    suspend fun heartDefaultSpotifyNow(): Boolean = heartDefaultSpotify.first()
+    suspend fun heartDefaultYtMusicNow(): Boolean = heartDefaultYtMusic.first()
+
+    suspend fun setAutoSaveEnabled(value: Boolean) {
+        context.likeDataStore.edit { it[autoSaveEnabledKey] = value }
+    }
+
+    suspend fun setAutoSaveThreshold(value: Int) {
+        context.likeDataStore.edit { it[autoSaveThresholdKey] = value.coerceIn(1, 10) }
+    }
+
+    suspend fun setHeartDefaultStash(value: Boolean) {
+        context.likeDataStore.edit { it[heartDefaultStashKey] = value }
+    }
+
+    suspend fun setHeartDefaultSpotify(value: Boolean) {
+        context.likeDataStore.edit { it[heartDefaultSpotifyKey] = value }
+    }
+
+    suspend fun setHeartDefaultYtMusic(value: Boolean) {
+        context.likeDataStore.edit { it[heartDefaultYtMusicKey] = value }
+    }
+}

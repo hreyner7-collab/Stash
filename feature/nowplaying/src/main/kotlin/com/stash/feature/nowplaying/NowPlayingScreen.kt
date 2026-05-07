@@ -213,7 +213,7 @@ fun NowPlayingScreen(
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // -- Top bar: dismiss, label, flag, save, queue --
+            // -- Top bar: dismiss, label, flag, like, save, queue --
             TopBar(
                 onDismiss = onDismiss,
                 onFlagWrongMatch = { showWrongMatchDialog = true },
@@ -221,6 +221,8 @@ fun NowPlayingScreen(
                 onQueueClick = { showQueue = true },
                 hasTrack = uiState.hasTrack,
                 queueSize = uiState.queueSize,
+                onLikeTap = viewModel::onLikeTap,
+                isLiked = uiState.currentTrack?.stashLikedAt != null,
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -356,6 +358,8 @@ private fun TopBar(
     onQueueClick: () -> Unit,
     hasTrack: Boolean,
     queueSize: Int,
+    onLikeTap: () -> Unit,
+    isLiked: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -393,6 +397,19 @@ private fun TopBar(
                     modifier = Modifier.size(24.dp),
                 )
             }
+        }
+
+        // v0.9.13: Like button — Stash-only toggle. Tap on empty saves to
+        // Stash Liked Songs; tap on filled removes. Long-press is a no-op
+        // by design; the override sheet was deprecated in favor of the
+        // simpler standard like-button UX.
+        if (hasTrack) {
+            com.stash.core.ui.components.LikeButton(
+                isLiked = isLiked,
+                onTap = onLikeTap,
+                unlikedTint = Color.White,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
 
         // Save to playlist — only shown when a track is loaded.
@@ -573,7 +590,21 @@ private fun PlaybackControls(
  * should render no line at all.
  */
 private fun trackQualityText(track: com.stash.core.model.Track): String? {
-    val codec = track.fileFormat.takeIf { it.isNotBlank() }?.uppercase() ?: return null
+    // v0.9.13 fix: tracks downloaded before format-tracking was wired (pre-v0.9.11)
+    // default to file_format = "opus" regardless of the actual codec — so a FLAC
+    // file would render "OPUS · 4233 kbps", which is the source of "every track says
+    // Opus" complaints. The Library Health backfill writes correct values from disk
+    // but only when the user opens that screen. Cheap interim correction: if the
+    // track has a downloaded filePath, prefer the file extension as canonical.
+    val extension = track.filePath
+        ?.takeIf { it.isNotBlank() }
+        ?.substringAfterLast('.', missingDelimiterValue = "")
+        ?.lowercase()
+    val codec = when (extension) {
+        "flac", "alac", "wav", "ape", "tta", "wv", "aiff" -> extension!!.uppercase()
+        "opus", "m4a", "mp3", "ogg", "aac" -> extension!!.uppercase()
+        else -> track.fileFormat.takeIf { it.isNotBlank() }?.uppercase() ?: return null
+    }
     val bitDepth = track.bitsPerSample
     val sampleRateKHz = track.sampleRateHz?.let { it / 1000.0 }
     val bitrate = track.qualityKbps.takeIf { it > 0 }

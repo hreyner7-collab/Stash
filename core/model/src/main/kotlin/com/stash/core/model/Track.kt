@@ -43,4 +43,10 @@ data class Track(
      * Audio sample rate in Hz (44100, 48000, 96000, 192000). NULL when unknown.
      */
     val sampleRateHz: Int? = null,
+    /**
+     * v0.9.13 — see TrackEntity.spotifySavedAt KDoc.
+     */
+    val spotifySavedAt: Long? = null,
+    val ytMusicSavedAt: Long? = null,
+    val stashLikedAt: Long? = null,
 )

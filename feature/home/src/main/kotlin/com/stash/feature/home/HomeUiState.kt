@@ -72,6 +72,17 @@ data class HomeUiState(
      */
     val losslessPrompt: LosslessPromptState? = null,
     val hasEverSynced: Boolean = false,
+
+    /**
+     * v0.9.13: live tip-jar state. Drives the Home pill (compact
+     * `$X/$Y` indicator) and the Tip Jar bottom sheet. Sourced from
+     * [com.stash.core.data.tipjar.TipJarRepository] which fetches
+     * the public supporters JSON. Defaults to [com.stash.core.data.tipjar.TipJarState.EMPTY]
+     * before the repo's first emission so the Home pill never crashes
+     * on null.
+     */
+    val tipJar: com.stash.core.data.tipjar.TipJarState =
+        com.stash.core.data.tipjar.TipJarState.EMPTY,
 ) {
     /** Total liked songs across both sources. */
     val totalLikedCount: Int get() = spotifyLikedCount + youtubeLikedCount

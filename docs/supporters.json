@@ -1,0 +1,19 @@
+{
+  "supporters": [
+    {
+      "name": "Cedric",
+      "amountUsd": 10,
+      "message": "Just downloaded Stash to replace Spotify. This is amazing bro. Thanks for your work."
+    },
+    {
+      "name": "Slowcab",
+      "amountUsd": 5,
+      "message": "Amazing work! Keep sticking it to the man!"
+    },
+    {
+      "name": "RucaNebas",
+      "amountUsd": 5,
+      "message": "Awesome application! I hope continuous improvement and support"
+    }
+  ]
+}

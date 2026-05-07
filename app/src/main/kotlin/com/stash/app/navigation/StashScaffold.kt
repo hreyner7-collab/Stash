@@ -61,7 +61,12 @@ fun StashScaffold(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets(0.dp),
+        // Use Scaffold's default safe-drawing insets so screens automatically
+        // avoid the status bar (top) and gesture / 3-button nav (bottom).
+        // The previous `WindowInsets(0.dp)` override was leaking content under
+        // the system status bar — Pixel 6 Pro and similar devices on Android
+        // 15+ where edge-to-edge is enforced. Reported via Twitter
+        // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
             Column {
                 MiniPlayer(

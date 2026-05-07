@@ -11,6 +11,7 @@ import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
+import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmScrobbler
 import com.stash.core.data.youtube.YouTubeHistoryScrobbler
 import com.stash.core.data.mix.StashMixDefaults
@@ -20,6 +21,7 @@ import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
+import com.stash.core.data.sync.workers.AutoSaveScrobbler
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
@@ -79,7 +81,13 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var youTubeHistoryScrobbler: YouTubeHistoryScrobbler
 
     @Inject
+    lateinit var autoSaveScrobbler: AutoSaveScrobbler
+
+    @Inject
     lateinit var stashMixRecipeDao: StashMixRecipeDao
+
+    @Inject
+    lateinit var trackDao: TrackDao
 
     @Inject
     lateinit var downloadNetworkPreference: DownloadNetworkPreference
@@ -186,6 +194,7 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeInvalidateArtistCache() }
         applicationScope.launch { maybeEnableYouTubePlaylistSync() }
         applicationScope.launch { maybeHideEmptyYouTubePlaylists() }
+        applicationScope.launch { maybeBackfillCodecsFromExtension() }
 
         // Start the local listening-history recorder + optional Last.fm
         // and YouTube Music scrobbler. All are safe to start unconditionally —
@@ -194,6 +203,7 @@ class StashApplication : Application(), Configuration.Provider {
         listeningRecorder.start()
         lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
+        autoSaveScrobbler.start()
     }
 
     /**
@@ -210,6 +220,49 @@ class StashApplication : Application(), Configuration.Provider {
             artistProfileCacheDao.clearAll()
             prefs.edit().putInt("artist_cache_version", ARTIST_CACHE_VERSION).apply()
         }
+    }
+
+    /**
+     * v0.9.13: One-shot data correction. Tracks downloaded before v0.9.11
+     * defaulted to `file_format = 'opus'` regardless of the actual codec
+     * (legacy schema default). New downloads get the correct value via
+     * `TrackDao.setFormatAndQuality`, but every pre-existing row was
+     * stuck mislabeled — so a downloaded `.flac` file would render
+     * "OPUS · 4233 kbps" in Now Playing and undercount in Home FLAC
+     * stats. The Library Health backfill fixes this from disk via
+     * MMR but only when the user opens that screen.
+     *
+     * This migration does the cheap correction at app start: for every
+     * downloaded track stuck at the legacy `'opus'` default, look at
+     * the file_path extension. If it's a recognized codec, write that
+     * codec back. We can do this safely because the download workers
+     * always name files with the correct extension; the column was the
+     * lossy field, not the path.
+     */
+    private suspend fun maybeBackfillCodecsFromExtension() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("codec_backfill_version", 0)
+        if (stored >= CODEC_BACKFILL_VERSION) return
+
+        val rows = runCatching { trackDao.getOpusDefaultedTracks() }
+            .onFailure { Log.w("StashMigration", "getOpusDefaultedTracks failed", it) }
+            .getOrDefault(emptyList())
+
+        var updated = 0
+        rows.forEach { row ->
+            val ext = row.filePath.substringAfterLast('.', "").lowercase()
+            if (ext.isBlank() || ext == "opus") return@forEach
+            if (ext in KNOWN_CODECS) {
+                runCatching { trackDao.updateFileFormat(row.id, ext) }
+                    .onSuccess { updated++ }
+                    .onFailure { e -> Log.w("StashMigration", "updateFileFormat failed for ${row.id}", e) }
+            }
+        }
+        Log.i(
+            "StashMigration",
+            "maybeBackfillCodecsFromExtension: scanned ${rows.size}, corrected $updated rows",
+        )
+        prefs.edit().putInt("codec_backfill_version", CODEC_BACKFILL_VERSION).apply()
     }
 
     /**
@@ -384,5 +437,20 @@ class StashApplication : Application(), Configuration.Provider {
          *    used to fill the non-discovery slots drop on next refresh.
          */
         private const val STASH_DISCOVER_TUNING_VERSION = 2
+
+        /**
+         * v0.9.13: bump when [maybeBackfillCodecsFromExtension] should run
+         * again. v1 = initial rollout that corrects every downloaded
+         * track stuck at the legacy `file_format = 'opus'` default
+         * inherited from the pre-v0.9.11 schema, by reading the actual
+         * extension off the on-disk file path.
+         */
+        private const val CODEC_BACKFILL_VERSION = 1
+
+        /** Recognized audio file extensions that the codec-backfill writes back. */
+        private val KNOWN_CODECS = setOf(
+            "flac", "alac", "wav", "ape", "tta", "wv", "aiff",
+            "m4a", "mp3", "ogg", "aac",
+        )
     }
 }

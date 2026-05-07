@@ -35,6 +35,9 @@ fun TrackEntity.toDomain(): Track = Track(
     explicit = explicit,
     bitsPerSample = bitsPerSample,
     sampleRateHz = sampleRateHz,
+    spotifySavedAt = spotifySavedAt,
+    ytMusicSavedAt = ytMusicSavedAt,
+    stashLikedAt = stashLikedAt,
 )
 
 /**
@@ -67,4 +70,7 @@ fun Track.toEntity(): TrackEntity = TrackEntity(
     explicit = explicit,
     bitsPerSample = bitsPerSample,
     sampleRateHz = sampleRateHz,
+    spotifySavedAt = spotifySavedAt,
+    ytMusicSavedAt = ytMusicSavedAt,
+    stashLikedAt = stashLikedAt,
 )

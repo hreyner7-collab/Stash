@@ -24,6 +24,32 @@ data class ArtistSummary(
 )
 
 /**
+ * v0.9.13: Projection of just the three Like-state timestamp columns.
+ * Subscribed by Now Playing so the heart icon stays in sync with Room
+ * across screen open/close cycles — the player's cached Track is a
+ * snapshot taken at track-load time and doesn't refresh from the
+ * `tracks` table after `markStashLiked`/`markSpotifySaved`/etc. fire.
+ *
+ * Forward-only semantics make any non-null value the canonical answer
+ * for "is this destination saved?".
+ */
+data class TrackLikeState(
+    val id: Long,
+    @androidx.room.ColumnInfo(name = "stash_liked_at") val stashLikedAt: Long?,
+    @androidx.room.ColumnInfo(name = "spotify_saved_at") val spotifySavedAt: Long?,
+    @androidx.room.ColumnInfo(name = "ytmusic_saved_at") val ytMusicSavedAt: Long?,
+)
+
+/**
+ * v0.9.13: Tiny projection used by the one-shot codec-backfill at app
+ * startup. Just id + path; we don't need the full TrackEntity.
+ */
+data class TrackPathRow(
+    val id: Long,
+    @androidx.room.ColumnInfo(name = "file_path") val filePath: String,
+)
+
+/**
  * Summary projection for album browsing.
  *
  * @property album  Album name.
@@ -450,6 +476,90 @@ interface TrackDao {
     /** Update the [last_played] timestamp for the given track. */
     @Query("UPDATE tracks SET last_played = :timestamp WHERE id = :trackId")
     suspend fun updateLastPlayed(trackId: Long, timestamp: Long)
+
+    /**
+     * v0.9.13: Mark a track as saved to Spotify Liked Songs.
+     * Called by [LikeDestinationDispatcher] after a successful
+     * `PUT /v1/me/tracks` call. Forward-only; once set, never cleared
+     * by Stash (user can clear externally via Spotify Web).
+     */
+    @Query("UPDATE tracks SET spotify_saved_at = :ts WHERE id = :trackId")
+    suspend fun markSpotifySaved(trackId: Long, ts: Long)
+
+    /**
+     * v0.9.13: Mark a track as liked on YouTube Music.
+     * Called after a successful InnerTube `like/like` call.
+     */
+    @Query("UPDATE tracks SET ytmusic_saved_at = :ts WHERE id = :trackId")
+    suspend fun markYtMusicSaved(trackId: Long, ts: Long)
+
+    /**
+     * v0.9.13: Mark a track as added to the local Stash "Liked Songs"
+     * playlist. Called by [StashLikedPlaylistRepository.add] after the
+     * cross-ref is in place.
+     */
+    @Query("UPDATE tracks SET stash_liked_at = :ts WHERE id = :trackId")
+    suspend fun markStashLiked(trackId: Long, ts: Long)
+
+    /**
+     * v0.9.13: Clear the Stash-liked timestamp. Paired with
+     * [StashLikedPlaylistRepository.remove] when the user un-likes a
+     * track via the heart toggle. Spotify/YT timestamps are NOT
+     * cleared by Stash unlike — those remain forward-only by design
+     * (see auto-save scrobbler one-way contract).
+     */
+    @Query("UPDATE tracks SET stash_liked_at = NULL WHERE id = :trackId")
+    suspend fun clearStashLiked(trackId: Long)
+
+    /**
+     * v0.9.13: One-shot startup backfill. Returns id + filePath for
+     * every downloaded track stuck at the legacy `file_format = 'opus'`
+     * default. The caller derives the real codec from the path
+     * extension and writes it back via [updateFileFormat].
+     */
+    @Query(
+        """
+        SELECT id, file_path FROM tracks
+        WHERE is_downloaded = 1
+          AND LOWER(file_format) = 'opus'
+          AND file_path IS NOT NULL
+          AND file_path != ''
+        """
+    )
+    suspend fun getOpusDefaultedTracks(): List<TrackPathRow>
+
+    /** v0.9.13: Pair with [getOpusDefaultedTracks] to write the corrected codec. */
+    @Query("UPDATE tracks SET file_format = :format WHERE id = :id")
+    suspend fun updateFileFormat(id: Long, format: String)
+
+    /**
+     * v0.9.13: Live-observe a track's three Like-state timestamps.
+     * Now Playing subscribes to this so the heart icon reflects the
+     * persisted state on every screen open, not the stale snapshot
+     * cached in the player's in-memory Track.
+     */
+    @Query("SELECT id, stash_liked_at, spotify_saved_at, ytmusic_saved_at FROM tracks WHERE id = :trackId")
+    fun observeLikeState(trackId: Long): Flow<TrackLikeState?>
+
+    /**
+     * v0.9.13: Live-observe a full track row by id. Now Playing uses
+     * this as the canonical source for currentTrack — the Player only
+     * provides id+title+artist+album+art via MediaItem extras, but
+     * every other field (filePath, fileFormat, like timestamps,
+     * bit-depth, sample rate, quality, youtubeId, spotifyUri, etc.)
+     * has to come from the database. Without this, the codec badge
+     * shows "OPUS" for every track and the heart icon fails to
+     * persist across screen open/close.
+     */
+    @Query("SELECT * FROM tracks WHERE id = :trackId")
+    fun observeById(trackId: Long): Flow<TrackEntity?>
+
+    /**
+     * v0.9.13: Count of tracks marked as auto-saved to Spotify since
+     * `sinceMs`. Drives the Settings diagnostics line.
+     */
+    @Query("SELECT COUNT(*) FROM tracks WHERE spotify_saved_at > :sinceMs")
+    fun autoSavedSinceCount(sinceMs: Long): Flow<Int>
 
     /**
      * Backfill: set date_added to now for all downloaded Spotify tracks.
@@ -999,6 +1109,7 @@ interface TrackDao {
               AND pt.removed_at IS NULL
               AND (
                   p.type = 'LIKED_SONGS'
+                  OR p.type = 'STASH_LIKED'
                   OR (p.type = 'CUSTOM' AND p.source = 'BOTH')
               )
         )
@@ -1022,6 +1133,7 @@ interface TrackDao {
               AND pt.removed_at IS NULL
               AND (
                   p.type = 'LIKED_SONGS'
+                  OR p.type = 'STASH_LIKED'
                   OR (p.type = 'CUSTOM' AND p.source = 'BOTH')
               )
         )

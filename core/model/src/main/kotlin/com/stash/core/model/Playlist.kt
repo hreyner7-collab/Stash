@@ -55,4 +55,15 @@ enum class PlaylistType {
      * membership. The Stash Mix engine ignores this type.
      */
     DOWNLOADS_MIX,
+
+    /**
+     * v0.9.13: User's local "Liked Songs" — populated by the heart
+     * button when the Stash destination is enabled. Independent of
+     * Spotify Liked Songs and YT Music Liked Music (which are written
+     * to those external services directly). For users without Spotify
+     * connected, this is the only place hearts land. Seeded lazily on
+     * first like (mirrors DOWNLOADS_MIX). Never deleted by orphan
+     * cleanup.
+     */
+    STASH_LIKED,
 }

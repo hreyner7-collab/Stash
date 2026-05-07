@@ -72,8 +72,8 @@ android {
         applicationId = "com.stash.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 50
-        versionName = "0.9.12"
+        versionCode = 51
+        versionName = "0.9.13"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // AppAuth redirect scheme removed -- Spotify now uses sp_dc cookie auth
         // Last.fm API credentials exposed via BuildConfig for the app-level
@@ -81,6 +81,15 @@ android {
         // valid — the Settings UI just disables the connect button.
         buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmApiKey\"")
         buildConfigField("String", "LASTFM_API_SECRET", "\"$lastFmApiSecret\"")
+        // v0.9.13: TipJarRepository fetches the public supporters JSON from
+        // this URL on Home foreground (cache-aware, ~15 min refresh). Edit
+        // the JSON and push to update the supporter list without an APK
+        // release. Forks repoint by overriding this single line.
+        buildConfigField(
+            "String",
+            "SUPPORTERS_JSON_URL",
+            "\"https://stash-tipjar.rawnaldclark.workers.dev\"",
+        )
     }
 
     signingConfigs {

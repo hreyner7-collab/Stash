@@ -8,7 +8,9 @@ import com.stash.core.auth.model.AuthState
 import com.stash.core.auth.youtube.YouTubeCookieHelper
 import android.content.Context
 import android.net.Uri
+import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.prefs.DownloadNetworkPreference
+import com.stash.core.data.prefs.LikePreferences
 import com.stash.core.data.prefs.QualityPreference
 import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.data.prefs.ThemePreference
@@ -38,10 +40,12 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
 import com.stash.core.model.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -82,7 +86,19 @@ class SettingsViewModel @Inject constructor(
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
     private val losslessRateLimiter: AggregatorRateLimiter,
+    private val likePreferences: LikePreferences,
+    private val trackDao: TrackDao,
+    private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
 ) : ViewModel() {
+
+    /**
+     * v0.9.13: One-shot deep-link focus from Home banners. Read once on
+     * Settings entry; the screen scrolls the targeted card into view and
+     * clears the value so re-entry doesn't re-scroll. Null means "no
+     * focus requested — render Settings at the top as usual".
+     */
+    fun consumeDeepLinkFocus(): com.stash.core.data.navigation.SettingsFocus? =
+        settingsDeepLinkController.consume()
 
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
@@ -90,6 +106,20 @@ class SettingsViewModel @Inject constructor(
     // Phase 8: `blockedCount` + `onRunYtLibraryBackfill` relocated to
     // SyncViewModel — the Blocked Songs + Fix-wrong-version rows moved
     // out of Settings into the Sync tab's Library section.
+
+    /**
+     * v0.9.13: count of tracks auto-saved to Spotify in the last 7 days.
+     * Re-anchors on every `autoSaveEnabled` flip so the `sinceMs` boundary
+     * is fresh whenever the user revisits Settings — no need to reschedule
+     * a cron-style refresh just for a diagnostics line.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val autoSavedCountLast7Days: kotlinx.coroutines.flow.Flow<Int> =
+        likePreferences.autoSaveEnabled.flatMapLatest {
+            trackDao.autoSavedSinceCount(
+                System.currentTimeMillis() - 7L * 24 * 3600 * 1000,
+            )
+        }
 
     /**
      * The main UI state, combining reactive auth states from [TokenManager],
@@ -114,6 +144,12 @@ class SettingsViewModel @Inject constructor(
         losslessPrefs.enabled,
         losslessPrefs.captchaCookieValue,
         losslessPrefs.qualityTier,
+        likePreferences.autoSaveEnabled,
+        likePreferences.autoSaveThreshold,
+        likePreferences.heartDefaultStash,
+        likePreferences.heartDefaultSpotify,
+        likePreferences.heartDefaultYtMusic,
+        autoSavedCountLast7Days,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -134,6 +170,12 @@ class SettingsViewModel @Inject constructor(
         val losslessEnabled = values[15] as Boolean
         val squidWtfCaptchaCookie = (values[16] as String?).orEmpty()
         val losslessQualityTier = values[17] as LosslessQualityTier
+        val autoSaveEnabled = values[18] as Boolean
+        val autoSaveThreshold = values[19] as Int
+        val heartDefaultStash = values[20] as Boolean
+        val heartDefaultSpotify = values[21] as Boolean
+        val heartDefaultYtMusic = values[22] as Boolean
+        val autoSavedCount7d = values[23] as Int
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -172,6 +214,12 @@ class SettingsViewModel @Inject constructor(
             losslessEnabled = losslessEnabled,
             squidWtfCaptchaCookie = squidWtfCaptchaCookie,
             losslessQualityTier = losslessQualityTier,
+            autoSaveEnabled = autoSaveEnabled,
+            autoSaveThreshold = autoSaveThreshold,
+            heartDefaultStash = heartDefaultStash,
+            heartDefaultSpotify = heartDefaultSpotify,
+            heartDefaultYtMusic = heartDefaultYtMusic,
+            autoSavedCountLast7Days = autoSavedCount7d,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -634,6 +682,40 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             losslessRateLimiter.reset(QobuzSource.SOURCE_ID)
         }
+    }
+
+    // -- Library & Likes (v0.9.13) ------------------------------------------
+
+    /**
+     * Master toggle for the auto-save scrobbler. When true,
+     * AutoSaveScrobbler observes plays and pushes tracks crossing the
+     * day-distinct-plays threshold into Spotify Liked Songs.
+     */
+    fun onAutoSaveEnabledChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setAutoSaveEnabled(value) }
+    }
+
+    /**
+     * Persist the day-distinct-plays threshold (1..10). Values outside
+     * the range are coerced inside [LikePreferences.setAutoSaveThreshold].
+     */
+    fun onAutoSaveThresholdChanged(value: Int) {
+        viewModelScope.launch { likePreferences.setAutoSaveThreshold(value) }
+    }
+
+    /** Whether tapping the heart adds to the local Stash Liked Songs playlist. */
+    fun onHeartDefaultStashChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultStash(value) }
+    }
+
+    /** Whether tapping the heart pushes to Spotify Liked Songs. */
+    fun onHeartDefaultSpotifyChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultSpotify(value) }
+    }
+
+    /** Whether tapping the heart pushes to YT Music Liked Music. */
+    fun onHeartDefaultYtMusicChanged(value: Boolean) {
+        viewModelScope.launch { likePreferences.setHeartDefaultYtMusic(value) }
     }
 
     // -- Internal state -------------------------------------------------------

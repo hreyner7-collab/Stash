@@ -51,7 +51,29 @@ class HomeViewModel @Inject constructor(
     private val listeningEventDao: ListeningEventDao,
     private val librarySizeHolder: LibrarySizeHolder,
     private val losslessPrefs: LosslessSourcePreferences,
+    private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
+    private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
 ) : ViewModel() {
+
+    init {
+        // v0.9.13: warm the tip-jar cache on cold-start, then trigger a
+        // network refresh if the cache is stale (>15 min). Failures are
+        // silently absorbed by the repo — the pill always shows
+        // something thanks to the bundled fallback.
+        viewModelScope.launch {
+            tipJarRepository.warmUp()
+            if (tipJarRepository.isStale()) {
+                tipJarRepository.refresh()
+            }
+        }
+    }
+
+    /** v0.9.13: callable from the screen on resume to keep the pill fresh. */
+    fun refreshTipJarIfStale() {
+        viewModelScope.launch {
+            if (tipJarRepository.isStale()) tipJarRepository.refresh()
+        }
+    }
 
     /**
      * Derives [SyncStatusInfo] reactively from the latest sync history record.
@@ -171,7 +193,18 @@ class HomeViewModel @Inject constructor(
         authStateFlow,
         sourceCountsFlow,
         _playlistSortOrder,
-    ) { musicData, syncStatus, authInfo, sourceCounts, playlistSortOrder ->
+        tipJarRepository.state,
+    ) { args ->
+        @Suppress("UNCHECKED_CAST")
+        val musicData = args[0] as MusicData
+        @Suppress("UNCHECKED_CAST")
+        val syncStatus = args[1] as SyncStatusInfo
+        @Suppress("UNCHECKED_CAST")
+        val authInfo = args[2] as AuthInfo
+        @Suppress("UNCHECKED_CAST")
+        val sourceCounts = args[3] as SourceCounts
+        val playlistSortOrder = args[4] as PlaylistSortOrder
+        val tipJar = args[5] as com.stash.core.data.tipjar.TipJarState
         // Stash Mixes — recipe-driven, generated locally. Separate from
         // sync-imported Daily Mixes so the UI can label them distinctly.
         val stashMixes = musicData.playlists.filter {
@@ -191,7 +224,7 @@ class HomeViewModel @Inject constructor(
         val youtubeLikedCount = youtubeLikedPlaylists.sumOf { it.trackCount }
 
         val otherPlaylists = musicData.playlists
-            .filter { it.type == PlaylistType.CUSTOM }
+            .filter { it.type == PlaylistType.CUSTOM || it.type == PlaylistType.STASH_LIKED }
             .let { list ->
                 when (playlistSortOrder) {
                     PlaylistSortOrder.RECENT -> list.sortedByDescending { it.dateAdded }
@@ -228,6 +261,7 @@ class HomeViewModel @Inject constructor(
             lastFmPrompt = authInfo.lastFmPrompt,
             losslessPrompt = authInfo.losslessPrompt,
             hasEverSynced = syncStatus.lastSyncTime != null,
+            tipJar = tipJar,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -264,6 +298,22 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             losslessPrefs.setBannerDismissed(true)
         }
+    }
+
+    /**
+     * v0.9.13: Queue a Settings deep-link to the Lossless / Audio Quality
+     * card. The Settings screen reads + clears this on entry and scrolls
+     * the targeted card into view. Called by [LosslessConnectBanner]'s
+     * tap handler immediately before navigation, so the read happens
+     * after the navigation has actually started.
+     */
+    fun requestSettingsLosslessFocus() {
+        settingsDeepLinkController.request(com.stash.core.data.navigation.SettingsFocus.LOSSLESS)
+    }
+
+    /** v0.9.13: Counterpart for the Last.fm connect nudge. */
+    fun requestSettingsLastFmFocus() {
+        settingsDeepLinkController.request(com.stash.core.data.navigation.SettingsFocus.LASTFM)
     }
 
     /**
