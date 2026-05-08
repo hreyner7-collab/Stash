@@ -80,6 +80,7 @@ import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.theme.StashTheme
 import androidx.compose.material3.AlertDialog
 import com.stash.feature.settings.components.AccountConnectionCard
+import com.stash.feature.settings.components.AudioQualityPicker
 import com.stash.feature.settings.components.SpotifyCookieDialog
 import com.stash.feature.settings.components.YouTubeCookieDialog
 import com.stash.feature.settings.components.YouTubeHistorySyncSection
@@ -449,40 +450,10 @@ private fun SettingsContent(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
 
-                QualityTier.entries.forEach { tier ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .selectable(
-                                selected = uiState.audioQuality == tier,
-                                onClick = { onQualityChanged(tier) },
-                                role = Role.RadioButton,
-                            )
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(
-                            selected = uiState.audioQuality == tier,
-                            onClick = null, // handled by Row's selectable
-                            colors = RadioButtonDefaults.colors(
-                                selectedColor = MaterialTheme.colorScheme.primary,
-                                unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            ),
-                        )
-                        Column(modifier = Modifier.padding(start = 8.dp)) {
-                            Text(
-                                text = tier.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Text(
-                                text = "${tier.bitrateKbps} kbps  ~${tier.sizeMbPerMinute} MB/min",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
+                AudioQualityPicker(
+                    selected = uiState.audioQuality,
+                    onSelected = onQualityChanged,
+                )
 
                 // -- Divider between always-on quality + experimental lossless ---
                 // glassBorder matches the existing in-card divider style used by
