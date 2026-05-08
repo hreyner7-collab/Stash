@@ -22,6 +22,11 @@ import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
+import com.stash.core.data.lastfm.LastFmPeriod
+import com.stash.core.data.lastfm.LastFmPersonas
+import com.stash.core.data.lastfm.LastFmSessionPreference
+import com.stash.core.data.lastfm.LastFmTopArtist
+import com.stash.core.data.lastfm.LastFmTopTrack
 import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.StashMixDefaults
 import com.stash.core.model.MusicSource
@@ -29,6 +34,8 @@ import com.stash.core.model.PlaylistType
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
@@ -68,6 +75,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val mixGenerator: MixGenerator,
     private val lastFmApiClient: LastFmApiClient,
     private val lastFmCredentials: LastFmCredentials,
+    private val sessionPreference: LastFmSessionPreference,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : CoroutineWorker(appContext, params) {
 
@@ -143,6 +151,22 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val now = System.currentTimeMillis()
         val lastFmConfigured = lastFmCredentials.isConfigured
 
+        val username = sessionPreference.session.first()?.username
+        val personas = if (lastFmConfigured && !username.isNullOrBlank()) {
+            // v0.9.16: Bound the persona fetch — 5 periods × 2 endpoints =
+            // 10 sequential HTTP calls. With a slow connection or upstream
+            // hiccup, OkHttp's default timeouts could stack into multiple
+            // minutes and blow past WorkManager's 10-min budget. 30s ceiling
+            // means we degrade gracefully to library-only seeding when
+            // Last.fm is sluggish; the next refresh tries again.
+            runCatching {
+                withTimeout(30_000L) { fetchPersonas(username) }
+            }.getOrElse { e ->
+                Log.w(TAG, "persona fetch failed/timed-out, falling back to local seeds", e)
+                LastFmPersonas.EMPTY
+            }
+        } else LastFmPersonas.EMPTY
+
         for (recipe in active) {
             val tracks = mixGenerator.generate(recipe)
             // Empty-tracks skip is only safe for library-only recipes
@@ -163,7 +187,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
 
             // Discovery — opportunistic. Don't block refresh success on it.
             if (recipe.discoveryRatio > 0f && lastFmConfigured) {
-                runCatching { queueDiscoveryForRecipe(recipe) }
+                runCatching { queueDiscoveryForRecipe(recipe, personas) }
                     .onFailure { Log.w(TAG, "discovery queueing failed for '${recipe.name}'", it) }
             }
         }
@@ -274,7 +298,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
      * Rate-limited at ~4.5 req/sec on similar-artist calls to stay
      * comfortably inside Last.fm's ceiling.
      */
-    private suspend fun queueDiscoveryForRecipe(recipe: StashMixRecipeEntity) {
+    private suspend fun queueDiscoveryForRecipe(
+        recipe: StashMixRecipeEntity,
+        @Suppress("UNUSED_PARAMETER") personas: LastFmPersonas,
+    ) {
         val since = System.currentTimeMillis() -
             AFFINITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
 
@@ -331,5 +358,34 @@ class StashMixRefreshWorker @AssistedInject constructor(
         if (candidates.isEmpty()) return
         Log.i(TAG, "'${recipe.name}': queueing ${candidates.size} discovery candidates")
         mixGenerator.queueDiscoveryCandidates(recipe, candidates)
+    }
+
+    /**
+     * v0.9.16: Snapshot the user's period-sliced top tracks/artists once
+     * per refresh run so each recipe can pull whichever slice it needs
+     * (Daily Discover → 1month, Throwback → overall − 3month, etc.)
+     * without redundant network calls. Sequential with a small inter-call
+     * delay to stay polite under Last.fm's rate ceiling. Wrapped by
+     * [withTimeout] at the call site — failures here surface as the
+     * cancelled-coroutine path which the caller turns into [LastFmPersonas.EMPTY].
+     */
+    private suspend fun fetchPersonas(username: String): LastFmPersonas {
+        val periods = listOf(
+            LastFmPeriod.SEVEN_DAY,
+            LastFmPeriod.ONE_MONTH,
+            LastFmPeriod.THREE_MONTH,
+            LastFmPeriod.SIX_MONTH,
+            LastFmPeriod.OVERALL,
+        )
+        val tracks = mutableMapOf<LastFmPeriod, List<LastFmTopTrack>>()
+        val artists = mutableMapOf<LastFmPeriod, List<LastFmTopArtist>>()
+        for (period in periods) {
+            tracks[period] = lastFmApiClient.getUserTopTracks(username, period, limit = 100)
+                .getOrNull().orEmpty()
+            artists[period] = lastFmApiClient.getUserTopArtists(username, period, limit = 50)
+                .getOrNull().orEmpty()
+            delay(SIMILAR_REQUEST_INTERVAL_MS)
+        }
+        return LastFmPersonas(tracks, artists)
     }
 }
