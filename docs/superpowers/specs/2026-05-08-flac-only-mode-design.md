@@ -34,7 +34,7 @@ This spec adds a strict-FLAC mode as the new default, surfaces a deferred-track 
 - **No system notification** when the banner triggers. A 30-min recoverable state is too noisy for a cross-app push; the in-app banner is the right surface.
 - **No "lossless required for new tracks only, leave existing m4a alone" toggle.** This is already implicit: deferral only fires on the next download attempt, so existing m4a files stay where they are.
 - **No re-download of existing m4a as FLAC.** A user who flips into strict mode and wants to upgrade existing files manually deletes + re-downloads (out of scope).
-- **No changes to the lossless source registry, captcha interceptor, or rate limiter.** This spec consumes their existing surfaces; it does not modify them.
+- **No behavior changes to the lossless source registry, captcha interceptor, or rate limiter.** This spec consumes their existing surfaces. The one exception is a read-only emission hook on `AggregatorRateLimiter` (`circuitResetEvents: SharedFlow<String>`, see §3.3) that exposes existing internal state transitions without changing their semantics — the breaker still trips and resets exactly as it does in v0.9.16.
 - **No changes to the v0.9.11 `LosslessQualityTier` picker** (`CD / Hi-Res / Max`). That dial is orthogonal — it controls lossless quality once a source has been picked.
 
 ## Design
@@ -224,7 +224,7 @@ Banner is **dismissible per-session** (not forever) — one-tap dismissal hides 
 | Expired (cookie matches lastKnownBadCookie) | (any) | `N tracks waiting — squid.wtf cookie expired` | `solve captcha →` opens `SquidWtfCaptchaScreen` |
 | Not configured (cookie empty) | Down (circuit broken) | `N tracks waiting — set up a lossless source` | `connect →` opens `SquidWtfCaptchaScreen` |
 | Active (cookie set, not last-bad) | Down | `N tracks waiting — kennyy.com.br temporarily down` | `dismiss` only (auto-recovers via circuit-breaker reset) |
-| Active | Up | (banner shouldn't render — count should be 0; if it does, retry sweep is lagging) | `retry →` enqueues `LosslessRetryWorker` directly |
+| Active | Up | (defensive — count should be 0 under §4.1's render rule; if it isn't, the retry sweep lagged a state change) | `retry →` enqueues `LosslessRetryWorker` directly |
 
 Banner state derivation is a pure function (`bannerStateFor(...)`) — testable in isolation from the full `HomeViewModel` graph.
 
@@ -256,8 +256,9 @@ Before any implementation:
 
 | Test | Module | What it asserts |
 |---|---|---|
-| `TrackDownloadWorkerTest`: registry-null + fallback-off → marks `WAITING_FOR_LOSSLESS` | `:core:data` | New deferral path |
+| `TrackDownloadWorkerTest`: registry-null + fallback-off → marks `WAITING_FOR_LOSSLESS` | `:core:data` | New deferral path (sync pipeline) |
 | `TrackDownloadWorkerTest`: registry-null + fallback-on → falls through to yt-dlp | `:core:data` | Backward-compat path preserved |
+| `SearchDownloadCoordinatorTest`: registry-null + fallback-off → emits `SearchDownloadStatus.WaitingForLossless` and writes `WAITING_FOR_LOSSLESS` to the row | `:data:download` | Edge case 5.5 — search-tab parity |
 | `LosslessRetryWorkerTest`: deferred row resolves → status flips to `PENDING` | `:core:data` | Sweep recovery |
 | `LosslessRetryWorkerTest`: deferred row still null → status stays `WAITING_FOR_LOSSLESS` | `:core:data` | No accidental skip |
 | `LosslessRetrySchedulerTest`: cookie-change emission → enqueues worker | `:data:download` | Reactive trigger 1 |
