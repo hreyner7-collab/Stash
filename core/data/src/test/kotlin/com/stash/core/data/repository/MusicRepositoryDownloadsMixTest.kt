@@ -112,5 +112,7 @@ class MusicRepositoryDownloadsMixTest {
         syncHistoryDao = syncHistoryDao,
         downloadQueueDao = downloadQueueDao,
         discoveryQueueDao = discoveryQueueDao,
+        blocklistGuard = mockk(relaxed = true),
+        trackMatcher = mockk(relaxed = true),
     )
 }
