@@ -103,8 +103,12 @@ interface DiscoveryQueueDao {
     suspend fun getActiveTrackIds(): List<Long>
 
     /**
-     * Does this recipe already have a pending/complete entry for
-     * (artist, title)? Prevents duplicate discoveries across refreshes.
+     * Does this recipe already have an entry for (artist, title) queued
+     * within the TTL window? v0.9.16 introduces a 30-day TTL on the
+     * dedup key — older candidates that failed download or were
+     * skipped/blocked previously can re-enter the funnel after a month
+     * so the discovery surface stays fresh instead of permanently
+     * pinning a candidate the moment it's first queued.
      */
     @Query(
         """
@@ -113,10 +117,16 @@ interface DiscoveryQueueDao {
             WHERE recipe_id = :recipeId
               AND LOWER(artist) = LOWER(:artist)
               AND LOWER(title) = LOWER(:title)
+              AND queued_at >= :sinceMs
         )
         """
     )
-    suspend fun existsForRecipe(recipeId: Long, artist: String, title: String): Boolean
+    suspend fun existsForRecipeSince(
+        recipeId: Long,
+        artist: String,
+        title: String,
+        sinceMs: Long,
+    ): Boolean
 
     /**
      * Age-out pass: delete PENDING rows that have been queued longer than

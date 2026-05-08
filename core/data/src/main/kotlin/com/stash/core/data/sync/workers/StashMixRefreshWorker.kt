@@ -28,6 +28,8 @@ import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.lastfm.LastFmTopArtist
 import com.stash.core.data.lastfm.LastFmTopTrack
 import com.stash.core.data.mix.MixGenerator
+import com.stash.core.data.mix.MixSeedGenerator
+import com.stash.core.data.mix.MixSeedStrategy
 import com.stash.core.data.mix.StashMixDefaults
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
@@ -73,6 +75,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val listeningEventDao: ListeningEventDao,
     private val trackDao: TrackDao,
     private val mixGenerator: MixGenerator,
+    private val seedGenerator: MixSeedGenerator,
     private val lastFmApiClient: LastFmApiClient,
     private val lastFmCredentials: LastFmCredentials,
     private val sessionPreference: LastFmSessionPreference,
@@ -84,8 +87,6 @@ class StashMixRefreshWorker @AssistedInject constructor(
         private const val WORK_NAME = "stash_mix_refresh"
         private const val ONE_SHOT_WORK_NAME = "stash_mix_refresh_oneshot"
         private const val TOP_ARTISTS_LIMIT = 8
-        private const val SIMILAR_PER_SEED = 5
-        private const val TRACKS_PER_SIMILAR = 3
         private const val SIMILAR_REQUEST_INTERVAL_MS = 220L
         private const val AFFINITY_LOOKBACK_DAYS = 180L
 
@@ -291,72 +292,51 @@ class StashMixRefreshWorker @AssistedInject constructor(
     }
 
     /**
-     * For each of the user's top artists (scoped by affinity window),
-     * fetch Last.fm similar artists, then for each similar artist its
-     * top tracks. Enqueue unique candidates into [discoveryQueueDao].
-     *
-     * Rate-limited at ~4.5 req/sec on similar-artist calls to stay
-     * comfortably inside Last.fm's ceiling.
+     * v0.9.16: Per-recipe candidate generation, dispatched by the
+     * recipe's [StashMixRecipeEntity.seedStrategy]. Each strategy
+     * inputs different signals from the user's personas + library;
+     * [MixSeedGenerator] handles the Last.fm calls + rate limiting and
+     * returns the candidate list, which we hand off to
+     * [MixGenerator.queueDiscoveryCandidates] for blocklist + dedup
+     * filtering before insertion.
      */
     private suspend fun queueDiscoveryForRecipe(
         recipe: StashMixRecipeEntity,
-        @Suppress("UNUSED_PARAMETER") personas: LastFmPersonas,
+        personas: LastFmPersonas,
     ) {
+        val strategy = MixSeedStrategy.fromStored(recipe.seedStrategy)
+        if (strategy == MixSeedStrategy.NONE) return
+
         val since = System.currentTimeMillis() -
             AFFINITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
 
-        // Seed-artist fallback chain. Listening history is the best signal
-        // when it exists — it reflects what the user actually plays in
-        // Stash, not just what they imported. But the original gate here
-        // ("no listening events → skip discovery entirely") stranded every
-        // fresh-install user with an empty mix until they accumulated a
-        // few scrobbles. The library-top-artists fallback uses what
-        // they've already synced as a taste proxy so Stash Discover
-        // populates on day one. When even the library is empty (installed
-        // but never synced), there's nothing to seed from and we skip.
-        val listeningSeeds = listeningEventDao
-            .getTopArtistsSince(since, TOP_ARTISTS_LIMIT)
-            .map { it.artist }
-        val topArtists = if (listeningSeeds.isNotEmpty()) {
-            listeningSeeds
-        } else {
-            val librarySeeds = trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT)
-            if (librarySeeds.isNotEmpty()) {
-                Log.i(
-                    TAG,
-                    "'${recipe.name}': no listening history yet — seeding discovery " +
-                        "from ${librarySeeds.size} top library artist(s)",
-                )
-            }
-            librarySeeds
-        }
+        // Seed-artist fallback chain. Persona slice (1-month) > local
+        // listening events > library-top-artists. The library fallback
+        // matters for fresh installs that have synced but not yet played
+        // — without it, Stash Discover would be empty until the user
+        // racked up a few scrobbles.
+        val seedArtists = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
+            ?.takeIf { it.isNotEmpty() }
+            ?.take(TOP_ARTISTS_LIMIT)?.map { it.name }
+            ?: listeningEventDao.getTopArtistsSince(since, TOP_ARTISTS_LIMIT)
+                .map { it.artist }
+                .ifEmpty { trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT) }
 
-        if (topArtists.isEmpty()) {
-            Log.d(TAG, "'${recipe.name}': no seeds — listening history and library both empty")
-            return
-        }
+        val seedTracks = personas.topTracksByPeriod[LastFmPeriod.ONE_MONTH]
+            ?.take(20)?.map { it.artist to it.title }
+            ?: emptyList()
 
-        val candidates = mutableListOf<MixGenerator.DiscoveryCandidate>()
-        for (seed in topArtists) {
-            val similar = runCatching {
-                lastFmApiClient.getSimilarArtists(seed, limit = SIMILAR_PER_SEED).getOrNull()
-            }.getOrNull().orEmpty()
-            for (sim in similar) {
-                val top = runCatching {
-                    lastFmApiClient.getArtistTopTracks(sim.name, limit = TRACKS_PER_SIMILAR).getOrNull()
-                }.getOrNull().orEmpty()
-                top.forEach { t ->
-                    candidates += MixGenerator.DiscoveryCandidate(
-                        artist = t.artist,
-                        title = t.title,
-                        seedArtist = seed,
-                    )
-                }
-                delay(SIMILAR_REQUEST_INTERVAL_MS)
-            }
-        }
+        val topTags = mixGenerator.computeUserTopTags(limit = 10)
+
+        val candidates = seedGenerator.generate(
+            strategy = strategy,
+            seedArtists = seedArtists,
+            topTags = topTags,
+            seedTracks = seedTracks,
+            personas = personas,
+        )
         if (candidates.isEmpty()) return
-        Log.i(TAG, "'${recipe.name}': queueing ${candidates.size} discovery candidates")
+        Log.i(TAG, "'${recipe.name}': ${candidates.size} candidates via $strategy")
         mixGenerator.queueDiscoveryCandidates(recipe, candidates)
     }
 

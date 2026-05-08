@@ -434,7 +434,13 @@ class MixGenerator @Inject constructor(
                 )) {
                 return@mapNotNull null
             }
-            val exists = discoveryQueueDao.existsForRecipe(recipe.id, cand.artist, cand.title)
+            // v0.9.16: 30-day TTL on dedup so candidates that failed download
+            // or were skipped/blocked previously can re-enter the funnel after
+            // a month — keeps the discovery surface fresh.
+            val dedupSinceMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+            val exists = discoveryQueueDao.existsForRecipeSince(
+                recipe.id, cand.artist, cand.title, dedupSinceMs,
+            )
             if (exists) null else DiscoveryQueueEntity(
                 recipeId = recipe.id,
                 artist = cand.artist,
