@@ -1,8 +1,10 @@
 package com.stash.data.download.lossless
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -199,6 +201,75 @@ class AggregatorRateLimiterTest {
         limiter.reportFailure("a")
         assertFalse(limiter.acquire("a"))     // a is broken
         assertTrue(limiter.acquire("b"))      // b is fine
+    }
+
+    @Test
+    fun `manual reset emits source id on circuitResetEvents`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        val emissions = mutableListOf<String>()
+        val job = launch { limiter.circuitResetEvents.toList(emissions) }
+        advanceUntilIdle() // ensure collector is subscribed before we emit
+        limiter.reset("squid_qobuz")
+        advanceUntilIdle()
+        assertEquals(listOf("squid_qobuz"), emissions)
+        job.cancel()
+    }
+
+    @Test
+    fun `breaker timeout-reset emits source id`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        limiter.configure(
+            "kennyy_qobuz",
+            AggregatorRateLimiter.Config(
+                tokensPerSecond = 10.0,
+                burstCapacity = 10.0,
+                circuitBreakAfter = 3,
+                circuitBreakDurationMs = 30 * 60_000L,
+            ),
+        )
+        // Trip the breaker
+        repeat(3) { limiter.reportFailure("kennyy_qobuz") }
+        // Confirm it's tripped
+        assertTrue(limiter.stateOf("kennyy_qobuz").isCircuitBroken)
+
+        val emissions = mutableListOf<String>()
+        val job = launch { limiter.circuitResetEvents.toList(emissions) }
+        advanceUntilIdle()
+
+        // Wait past the breaker timeout
+        advanceTimeBy(30 * 60_000L + 1)
+        // The next stateOf() observation crosses the transition (true → false)
+        // and emits.
+        assertFalse(limiter.stateOf("kennyy_qobuz").isCircuitBroken)
+        advanceUntilIdle()
+        assertTrue("expected kennyy_qobuz in $emissions", emissions.contains("kennyy_qobuz"))
+        job.cancel()
+    }
+
+    @Test
+    fun `breaker timeout-reset emits only once across repeated stateOf observations`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        limiter.configure(
+            "src",
+            AggregatorRateLimiter.Config(
+                tokensPerSecond = 10.0,
+                burstCapacity = 10.0,
+                circuitBreakAfter = 3,
+                circuitBreakDurationMs = 60_000L,
+            ),
+        )
+        repeat(3) { limiter.reportFailure("src") }
+        val emissions = mutableListOf<String>()
+        val job = launch { limiter.circuitResetEvents.toList(emissions) }
+        advanceUntilIdle()
+        advanceTimeBy(60_001)
+        // Multiple observations after the timeout — only the first should emit.
+        limiter.stateOf("src")
+        limiter.stateOf("src")
+        limiter.stateOf("src")
+        advanceUntilIdle()
+        assertEquals(listOf("src"), emissions)
+        job.cancel()
     }
 
     private fun kotlinx.coroutines.test.TestScope.virtualClock(): AggregatorRateLimiter.Clock {

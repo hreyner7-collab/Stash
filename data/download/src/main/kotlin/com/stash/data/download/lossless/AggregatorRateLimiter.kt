@@ -4,6 +4,9 @@ import android.util.Log
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -52,6 +55,15 @@ class AggregatorRateLimiter @Inject constructor() {
         var totalRateLimited: Long = 0L,
         /** Timestamps (ms) of recent 429s. Trimmed to last 60s in reportRateLimited. */
         val rateLimitTimestamps: MutableList<Long> = mutableListOf(),
+        /**
+         * Latch used to detect the circuit-broken → not-broken transition for
+         * [circuitResetEvents]. The actual breaker state is purely temporal
+         * (`now < blockedUntilMs`), so without a separate latch we'd either
+         * emit on every state read after the timeout or not at all. Set to
+         * true whenever the breaker trips, cleared (and the event emitted)
+         * the first time a state-reading call observes the timeout has passed.
+         */
+        var wasCircuitBroken: Boolean = false,
     )
 
     private val buckets = mutableMapOf<String, Bucket>()
@@ -59,6 +71,23 @@ class AggregatorRateLimiter @Inject constructor() {
     private val mutex = Mutex()
 
     private val defaultConfig = Config()
+
+    private val _circuitResetEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
+
+    /**
+     * Read-only stream of source-id emissions when a circuit breaker
+     * resets — either by [reset] or by the timeout-driven self-reset
+     * observed inside [stateOf] / [acquire]. v0.9.17+ consumers
+     * (LosslessRetryScheduler) use this to know when to re-attempt
+     * deferred tracks for sources the user can't manually un-stick
+     * (kennyy server outages that clear organically).
+     *
+     * Buffer of 8 with no replay: at most a small handful of resets
+     * happen in quick succession (manual reset + timeout-driven reset
+     * across 2 sources). Late subscribers don't see past resets;
+     * the scheduler subscribes once at app startup and is always live.
+     */
+    val circuitResetEvents: SharedFlow<String> = _circuitResetEvents.asSharedFlow()
 
     init {
         // Kennyy operator handles traffic from Monochrome's web UI users at
@@ -107,26 +136,38 @@ class AggregatorRateLimiter @Inject constructor() {
     suspend fun acquire(sourceId: String): Boolean {
         // Wait outside the mutex so other sources aren't blocked.
         var waitMs = 0L
+        var resetEventId: String? = null
+        var earlyResult: Boolean? = null
         mutex.withLock {
             val bucket = bucketFor(sourceId)
             val cfg = configFor(sourceId)
             val now = clock.nowMs()
 
             // Circuit-broken? Bail without consuming a token.
-            if (now < bucket.blockedUntilMs) return false
+            if (now < bucket.blockedUntilMs) {
+                earlyResult = false
+            } else {
+                // Detect the breaker timeout-reset transition the same way
+                // [stateOf] does. acquire() is the hot path during retries,
+                // so consumers expect the reset event whether they observed
+                // it via stateOf() or via a successful acquire.
+                resetEventId = consumeCircuitResetIfDue(sourceId, bucket, now)
 
-            // Refill since last visit.
-            refill(bucket, cfg, now)
+                // Refill since last visit.
+                refill(bucket, cfg, now)
 
-            if (bucket.tokens >= 1.0) {
-                bucket.tokens -= 1.0
-                bucket.totalAcquires++
-                return true
+                if (bucket.tokens >= 1.0) {
+                    bucket.tokens -= 1.0
+                    bucket.totalAcquires++
+                    earlyResult = true
+                } else {
+                    // Not enough tokens — compute wait, then loop after sleeping.
+                    waitMs = msToNextToken(bucket, cfg)
+                }
             }
-
-            // Not enough tokens — compute wait, then loop after sleeping.
-            waitMs = msToNextToken(bucket, cfg)
         }
+        resetEventId?.let { _circuitResetEvents.tryEmit(it) }
+        earlyResult?.let { return it }
 
         if (waitMs > 0) delay(waitMs)
         // Re-acquire (same source, fresh state). Recursion is fine here —
@@ -156,7 +197,13 @@ class AggregatorRateLimiter @Inject constructor() {
             bucket.consecutiveFailures = 0
             bucket.tokens = cfg.burstCapacity
             bucket.lastRefillMs = clock.nowMs()
+            // Clear the latch so the timeout-driven path doesn't double-emit
+            // for the same logical reset event.
+            bucket.wasCircuitBroken = false
         }
+        // Emit AFTER the state change so subscribers reading stateOf(sourceId)
+        // immediately after the emission observe isCircuitBroken = false.
+        _circuitResetEvents.tryEmit(sourceId)
     }
 
     /**
@@ -213,11 +260,13 @@ class AggregatorRateLimiter @Inject constructor() {
 
     /** Inspect current state. Used by the Settings UI for diagnostics. */
     suspend fun stateOf(sourceId: String): RateLimitState {
-        return mutex.withLock {
+        var resetEventId: String? = null
+        val state = mutex.withLock {
             val bucket = bucketFor(sourceId)
             val cfg = configFor(sourceId)
             val now = clock.nowMs()
             refill(bucket, cfg, now)
+            resetEventId = consumeCircuitResetIfDue(sourceId, bucket, now)
             RateLimitState(
                 tokensAvailable = bucket.tokens,
                 msUntilNextToken = if (bucket.tokens >= 1.0) 0L else msToNextToken(bucket, cfg),
@@ -226,6 +275,8 @@ class AggregatorRateLimiter @Inject constructor() {
                 recentFailures = bucket.consecutiveFailures,
             )
         }
+        resetEventId?.let { _circuitResetEvents.tryEmit(it) }
+        return state
     }
 
     // ── Internals ───────────────────────────────────────────────────────
@@ -257,12 +308,32 @@ class AggregatorRateLimiter @Inject constructor() {
     private fun maybeTripCircuitBreaker(bucket: Bucket, cfg: Config) {
         if (bucket.consecutiveFailures >= cfg.circuitBreakAfter) {
             bucket.blockedUntilMs = clock.nowMs() + cfg.circuitBreakDurationMs
+            // Latch the breaker-tripped state so the timeout-driven path in
+            // [stateOf] / [acquire] can detect the eventual transition back.
+            bucket.wasCircuitBroken = true
             // Reset counter so we don't re-trip immediately on the next
             // failure if the source is still down. Counter resets organically
             // on first success; on continued failure, we'll re-cross the
             // threshold and re-trip after another N failures.
             bucket.consecutiveFailures = 0
         }
+    }
+
+    /**
+     * Detect the circuit-broken → not-broken transition and return the
+     * source id if this call observed it. Caller must invoke under
+     * [mutex] and emit on the returned id AFTER releasing the lock so
+     * the SharedFlow buffer drains promptly without holding the mutex.
+     *
+     * Atomic-CAS pattern: the latch is cleared under the mutex, so under
+     * concurrent state-reading calls only one observer sees the transition.
+     */
+    private fun consumeCircuitResetIfDue(sourceId: String, bucket: Bucket, now: Long): String? {
+        if (bucket.wasCircuitBroken && now >= bucket.blockedUntilMs) {
+            bucket.wasCircuitBroken = false
+            return sourceId
+        }
+        return null
     }
 
     /**
