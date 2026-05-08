@@ -607,7 +607,7 @@ class DownloadManager @Inject constructor(
         val resolvedArtUrl: String? = best.thumbnailUrl
             ?: (if (lastFmCredentials.isConfigured) {
                 runCatching {
-                    lastFmApiClient.getTrackInfo(track.artist, track.title).getOrNull()
+                    lastFmApiClient.getTrackInfo(track.artist, track.title).getOrNull()?.bestImageUrl
                 }.getOrNull()
             } else null)
             ?: best.videoId.takeIf { it.isNotBlank() }?.let { vid ->

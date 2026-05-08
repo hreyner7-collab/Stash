@@ -175,7 +175,7 @@ class ArtBackfillWorker @AssistedInject constructor(
     ): String? {
         if (lastFmConfigured) {
             val lfm = runCatching {
-                lastFmApiClient.getTrackInfo(row.artist, row.title).getOrNull()
+                lastFmApiClient.getTrackInfo(row.artist, row.title).getOrNull()?.bestImageUrl
             }.getOrNull()
             if (!lfm.isNullOrBlank()) return lfm
         }
