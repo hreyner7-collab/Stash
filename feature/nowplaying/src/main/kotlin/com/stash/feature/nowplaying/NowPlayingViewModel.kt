@@ -5,8 +5,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.palette.graphics.Palette
+import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
+import com.stash.core.model.UpgradeResult
+import com.stash.core.model.isFlac
 import com.stash.core.ui.components.PlaylistInfo
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +45,7 @@ class NowPlayingViewModel @Inject constructor(
     private val playerRepository: PlayerRepository,
     private val musicRepository: MusicRepository,
     private val stashLikedRepository: com.stash.core.data.social.stash.StashLikedPlaylistRepository,
+    private val losslessUpgrader: LosslessUpgrader,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
@@ -253,6 +257,26 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     /**
+     * v0.9.18: upgrade the currently-playing track to FLAC if any
+     * lossless source can serve it. Fire-and-forget — emits a "looking"
+     * snackbar immediately, then a result snackbar when the resolve +
+     * download completes.
+     *
+     * No-op when nothing is playing or when the current track is already
+     * FLAC (UI hides the button in that case, but defensive guard here
+     * in case state changes mid-tap).
+     */
+    fun findInFlacForCurrentTrack() {
+        val track = _uiState.value.currentTrack ?: return
+        if (track.isFlac) return
+        viewModelScope.launch {
+            _userMessages.tryEmit("Looking for FLAC\u2026")
+            val result = losslessUpgrader.upgradeToLossless(track)
+            _userMessages.tryEmit(snackbarCopyFor(result))
+        }
+    }
+
+    /**
      * Destroy the currently-playing track. Deletes the audio file + row;
      * if [alsoBlock] is set, keeps the row as a blacklist tombstone so
      * future syncs skip the identity forever.
@@ -374,3 +398,15 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 }
+
+/**
+ * Pure mapping from [UpgradeResult] to the snackbar string shown after
+ * a Now Playing "Find in FLAC" attempt. Top-level + `internal` so the
+ * test in this module can call it without instantiating the ViewModel.
+ */
+internal fun snackbarCopyFor(result: UpgradeResult): String = when (result) {
+    UpgradeResult.Upgraded -> "Upgraded to FLAC"
+    UpgradeResult.NoMatch -> "No lossless match found"
+    UpgradeResult.Error -> "Couldn't check lossless sources"
+}
+
