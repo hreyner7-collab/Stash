@@ -183,6 +183,40 @@ class QobuzSourceTest {
         assertNull(source().resolve(query()))
     }
 
+    // ── lastKnownBadCookie flow ────────────────────────────────────────
+
+    @Test fun `lastKnownBadCookie flow starts null`() = runTest {
+        assertNull(source().lastKnownBadCookie.value)
+    }
+
+    @Test fun `captcha-required 403 publishes the offending cookie`() = runTest {
+        stubLimiterReady()
+        coEvery { losslessPrefs.captchaCookieValueNow() } returns "stale-cookie-value"
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } throws
+            QobuzApiException(status = 403, message = "Captcha required.")
+
+        val src = source()
+        src.resolve(query())
+
+        assertEquals("stale-cookie-value", src.lastKnownBadCookie.value)
+    }
+
+    @Test fun `non-captcha 403 does NOT publish to lastKnownBadCookie`() = runTest {
+        stubLimiterReady()
+        coEvery { losslessPrefs.captchaCookieValueNow() } returns "valid-cookie"
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } throws
+            QobuzApiException(status = 403, message = "region locked")
+
+        val src = source()
+        src.resolve(query())
+
+        assertNull(src.lastKnownBadCookie.value)
+    }
+
     // ── Rate limiter bookkeeping ───────────────────────────────────────
 
     @Test fun `successful API call reports success to rate limiter`() = runTest {

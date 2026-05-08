@@ -6,6 +6,7 @@ import com.stash.core.model.DownloadNetworkMode
 import com.stash.core.model.QualityTier
 import com.stash.core.model.ThemeMode
 import com.stash.data.download.lossless.LosslessQualityTier
+import com.stash.feature.settings.components.SquidCaptchaStatus
 
 /**
  * Immutable UI state for the Settings screen.
@@ -58,11 +59,26 @@ data class SettingsUiState(
     val losslessQualityTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
     /**
      * Manually-pasted `captcha_verified_at` cookie value from
-     * `qobuz.squid.wtf`. Bridges the captcha gate until WebView-based
-     * automation lands — user solves ALTCHA in their browser, copies
-     * the cookie value, pastes here. Empty string == not configured.
+     * `qobuz.squid.wtf`. Bridges the captcha gate when the user
+     * prefers manual paste over the in-app WebView solver — they
+     * solve ALTCHA in their browser, copy the cookie value, and
+     * paste here. Empty string == not configured.
      */
     val squidWtfCaptchaCookie: String = "",
+    /**
+     * Tri-state describing the squid.wtf captcha cookie's liveness,
+     * derived from the cookie value plus `QobuzSource.lastKnownBadCookie`.
+     * Drives the routing-status row's label ("active" / "expired" /
+     * "optional") and whether the "solve captcha →" link is shown.
+     *
+     * Why a tri-state instead of `cookie.isNotEmpty()`: the cookie has
+     * a ~30-min sliding-window expiry server-side. Once expired,
+     * QobuzSource records the offending value and `isEnabled()`
+     * returns false until the user re-pastes — but pre-fix the row
+     * still rendered as "active" with no action link, hiding the
+     * solver from the user. See `squidCaptchaStatus` mapping fn.
+     */
+    val squidCaptchaStatus: SquidCaptchaStatus = SquidCaptchaStatus.NotConfigured,
     val totalStorageBytes: Long = 0,
     val totalTracks: Int = 0,
     val showYouTubeCookieDialog: Boolean = false,

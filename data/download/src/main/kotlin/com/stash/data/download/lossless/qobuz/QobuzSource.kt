@@ -12,6 +12,9 @@ import com.stash.data.download.lossless.squid.CaptchaExpiredNotifier
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * [LosslessSource] backed by the Qobuz catalog via the public squid.wtf
@@ -45,12 +48,21 @@ class QobuzSource @Inject constructor(
     override val displayName: String = "Qobuz (via squid.wtf)"
 
     /**
-     * Set when an API call returns the captcha-required 403 — used by
-     * isEnabled to skip squid until the user pastes a fresh cookie.
-     * Implicit reset: when the user updates the cookie via Settings,
-     * the new value differs from this one and isEnabled returns true again.
+     * Backing flow for [lastKnownBadCookie]. Set when an API call
+     * returns the captcha-required 403 — used by isEnabled to skip
+     * squid until the user pastes a fresh cookie. Implicit reset:
+     * when the user updates the cookie via Settings, the new value
+     * differs from this one and isEnabled returns true again.
+     *
+     * Exposed as an observable [StateFlow] so the Settings UI can
+     * render an "expired" badge and re-surface the captcha solver
+     * link reactively (rather than the previous "non-empty cookie =
+     * active" approximation that lied after expiry).
      */
-    @Volatile private var lastKnownBadCookie: String? = null
+    private val _lastKnownBadCookie = MutableStateFlow<String?>(null)
+
+    /** Observable view of the most recently rejected captcha cookie. */
+    val lastKnownBadCookie: StateFlow<String?> = _lastKnownBadCookie.asStateFlow()
 
     override suspend fun isEnabled(): Boolean {
         // Circuit-broken via repeated failures? Skip.
@@ -60,7 +72,7 @@ class QobuzSource @Inject constructor(
         if (currentCookie.isNullOrBlank()) return false
         // Recently confirmed bad? Skip until user pastes a fresh cookie
         // (different value will not match lastKnownBadCookie).
-        if (currentCookie == lastKnownBadCookie) {
+        if (currentCookie == _lastKnownBadCookie.value) {
             return false
         }
         return true
@@ -182,7 +194,7 @@ class QobuzSource @Inject constructor(
                     // Mark the current cookie as bad so isEnabled() skips squid until
                     // the user pastes a new value. Prevents wasting ~16s/track on
                     // doomed squid attempts when the captcha is known stale.
-                    lastKnownBadCookie = losslessPrefs.captchaCookieValueNow()
+                    _lastKnownBadCookie.value = losslessPrefs.captchaCookieValueNow()
                     Log.i(TAG, "squid_qobuz: captcha cookie marked bad; will skip until user updates cookie via Settings")
                 }
                 else -> rateLimiter.reportFailure(id)

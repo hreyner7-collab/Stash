@@ -36,6 +36,7 @@ import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.qobuz.QobuzSource
+import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
 import com.stash.core.model.ThemeMode
@@ -86,6 +87,7 @@ class SettingsViewModel @Inject constructor(
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
     private val losslessRateLimiter: AggregatorRateLimiter,
+    private val qobuzSource: QobuzSource,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
@@ -144,6 +146,7 @@ class SettingsViewModel @Inject constructor(
         losslessPrefs.enabled,
         losslessPrefs.captchaCookieValue,
         losslessPrefs.qualityTier,
+        qobuzSource.lastKnownBadCookie,
         likePreferences.autoSaveEnabled,
         likePreferences.autoSaveThreshold,
         likePreferences.heartDefaultStash,
@@ -170,12 +173,13 @@ class SettingsViewModel @Inject constructor(
         val losslessEnabled = values[15] as Boolean
         val squidWtfCaptchaCookie = (values[16] as String?).orEmpty()
         val losslessQualityTier = values[17] as LosslessQualityTier
-        val autoSaveEnabled = values[18] as Boolean
-        val autoSaveThreshold = values[19] as Int
-        val heartDefaultStash = values[20] as Boolean
-        val heartDefaultSpotify = values[21] as Boolean
-        val heartDefaultYtMusic = values[22] as Boolean
-        val autoSavedCount7d = values[23] as Int
+        val lastKnownBadCookie = values[18] as String?
+        val autoSaveEnabled = values[19] as Boolean
+        val autoSaveThreshold = values[20] as Int
+        val heartDefaultStash = values[21] as Boolean
+        val heartDefaultSpotify = values[22] as Boolean
+        val heartDefaultYtMusic = values[23] as Boolean
+        val autoSavedCount7d = values[24] as Int
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -213,6 +217,7 @@ class SettingsViewModel @Inject constructor(
             ytPendingCount = ytPendingCount,
             losslessEnabled = losslessEnabled,
             squidWtfCaptchaCookie = squidWtfCaptchaCookie,
+            squidCaptchaStatus = squidCaptchaStatus(squidWtfCaptchaCookie, lastKnownBadCookie),
             losslessQualityTier = losslessQualityTier,
             autoSaveEnabled = autoSaveEnabled,
             autoSaveThreshold = autoSaveThreshold,

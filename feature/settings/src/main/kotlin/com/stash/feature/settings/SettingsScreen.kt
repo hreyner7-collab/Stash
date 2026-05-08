@@ -542,7 +542,7 @@ private fun SettingsContent(
                         // both sources and let the user solve the captcha
                         // inline if they want the redundancy.
                         LosslessRoutingStatus(
-                            squidConfigured = uiState.squidWtfCaptchaCookie.isNotEmpty(),
+                            squidStatus = uiState.squidCaptchaStatus,
                             onSolveCaptcha = onNavigateToSquidWtfCaptcha,
                         )
 
@@ -1395,11 +1395,22 @@ private fun StorageRow(label: String, value: String) {
  */
 @Composable
 private fun LosslessRoutingStatus(
-    squidConfigured: Boolean,
+    squidStatus: com.stash.feature.settings.components.SquidCaptchaStatus,
     onSolveCaptcha: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val mono = androidx.compose.ui.text.font.FontFamily.Monospace
+    val (squidConfigured, squidLabel, showSolveLink) = when (squidStatus) {
+        com.stash.feature.settings.components.SquidCaptchaStatus.NotConfigured ->
+            Triple(false, "optional", true)
+        com.stash.feature.settings.components.SquidCaptchaStatus.Active ->
+            Triple(true, "active", false)
+        com.stash.feature.settings.components.SquidCaptchaStatus.Expired ->
+            // Cookie present but server-rejected — keep the dot filled
+            // (user did set it up) but surface "expired" + the solver
+            // entry-point so they can re-verify in one tap.
+            Triple(true, "expired", true)
+    }
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = "ROUTING",
@@ -1419,9 +1430,9 @@ private fun LosslessRoutingStatus(
         RoutingRow(
             host = "squid.wtf",
             configured = squidConfigured,
-            statusLabel = if (squidConfigured) "active" else "optional",
-            actionLabel = if (squidConfigured) null else "solve captcha \u2192",
-            onAction = if (squidConfigured) null else onSolveCaptcha,
+            statusLabel = squidLabel,
+            actionLabel = if (showSolveLink) "solve captcha \u2192" else null,
+            onAction = if (showSolveLink) onSolveCaptcha else null,
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
