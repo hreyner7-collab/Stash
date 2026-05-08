@@ -68,4 +68,18 @@ class LastFmTrackInfoParserTest {
         val info = LastFmTrackInfo.parse(Json.parseToJsonElement(singleTag))
         assertEquals(listOf("only"), info.tags.map { it.name })
     }
+
+    @Test
+    fun `parse skips Last_fm star-logo placeholder and returns null when no real art`() {
+        val onlyPlaceholder = """
+            {"track":{"name":"x","artist":{"name":"y"},
+                "listeners":"0","playcount":"0",
+                "album":{"image":[
+                    {"size":"extralarge","#text":"https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png"}
+                ]},
+                "toptags":{"tag":[]}}}
+        """
+        val info = LastFmTrackInfo.parse(Json.parseToJsonElement(onlyPlaceholder))
+        assertNull(info.bestImageUrl)
+    }
 }

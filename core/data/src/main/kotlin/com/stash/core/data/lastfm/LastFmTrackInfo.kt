@@ -70,13 +70,22 @@ data class LastFmTrackInfo(
             for (size in sizes) {
                 val match = arr.firstOrNull { el ->
                     val obj = el.jsonObject
+                    val text = obj["#text"]?.jsonPrimitive?.contentOrNull
                     obj["size"]?.jsonPrimitive?.contentOrNull == size &&
-                        obj["#text"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true
+                        !text.isNullOrBlank() &&
+                        // Filter Last.fm's "no album art" star-logo placeholder
+                        // so callers can fall through to a real source (YT
+                        // thumbnail, MusicBrainz, etc.) instead of rendering
+                        // the generic Last.fm star image.
+                        !text.contains(PLACEHOLDER_HASH)
                 } ?: continue
                 return match.jsonObject["#text"]?.jsonPrimitive?.content
             }
             return null
         }
+
+        /** Last.fm's star-logo "no image" placeholder hash. */
+        private const val PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
 
         private fun parseTopTags(toptags: JsonObject?): List<TagCount> {
             val tagEl = toptags?.get("tag") ?: return emptyList()
