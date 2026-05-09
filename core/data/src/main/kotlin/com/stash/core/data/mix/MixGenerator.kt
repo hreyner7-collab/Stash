@@ -302,15 +302,32 @@ class MixGenerator @Inject constructor(
     /**
      * v0.9.16: Top-N user tags ordered by tag-affinity weight. Used by
      * [com.stash.core.data.sync.workers.StashMixRefreshWorker] to drive
-     * the TAG_GRAPH seed strategy. Returns empty list when the user has
-     * no listening history yet.
+     * the TAG_GRAPH seed strategy.
+     *
+     * v0.9.19: when the listening-affinity vector is empty (fresh install,
+     * recently played tracks not yet enriched, etc.) falls back to the
+     * library-wide tag histogram. The histogram represents "what kind of
+     * music this user collects" — the right anchor for First Listen's
+     * "wider net" semantics when there's no per-play signal yet. Returns
+     * an empty list ONLY when the user has zero tags anywhere in
+     * `track_tags` (truly fresh install, enrichment hasn't run a single
+     * batch yet) — at which point TAG_GRAPH-driven recipes correctly
+     * stay empty until the user's library has any tag data.
      */
     suspend fun computeUserTopTags(limit: Int = 10): List<String> {
         val vector = buildUserTagAffinityVector()
-        return vector.entries
-            .sortedByDescending { it.value }
+        if (vector.isNotEmpty()) {
+            return vector.entries
+                .sortedByDescending { it.value }
+                .take(limit)
+                .map { it.key }
+        }
+        return trackTagDao.getTagHistogram()
+            .asSequence()
+            .filter { it.tag != "__untaggable__" }
             .take(limit)
-            .map { it.key }
+            .map { it.tag }
+            .toList()
     }
 
     /**
