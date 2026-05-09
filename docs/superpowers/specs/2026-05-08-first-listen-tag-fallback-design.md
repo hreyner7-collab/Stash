@@ -104,6 +104,7 @@ The fallback's filter mirrors the same `__untaggable__` exclusion `buildUserTagA
 | `computeUserTopTags fallback filters out __untaggable__ sentinel` | When the histogram includes the sentinel row (which it always does once `TagEnrichmentWorker` has hit any unmatched track), the fallback filters it out — the seed loop must never iterate `__untaggable__` as a Last.fm tag. |
 | `computeUserTopTags returns empty when histogram is also empty` | Truly-fresh-install case (tag enrichment hasn't run any batch yet). Fallback gracefully returns empty rather than throwing. The `TAG_GRAPH` consumer's existing `if (candidates.isEmpty()) return` guard handles this case correctly. |
 | `computeUserTopTags respects the limit on the fallback path` | When the histogram has more than `limit` rows, only the top `limit` are returned. |
+| `computeUserTopTags fallback yields `limit` real tags even when `__untaggable__` appears in the histogram top` | Combined-case regression guard. Histogram `[__untaggable__(top), tag1, tag2, …]` with `limit = 10` must yield 10 real tags (the implementation must filter BEFORE take, not AFTER, otherwise the sentinel consumes a slot). The existing implementation chains `.filter { … }.take(limit)`; this test pins that order. |
 
 The first test guards against a regression where the histogram fallback "always runs" — if the listening-affinity signal exists, it should be the source of truth.
 
