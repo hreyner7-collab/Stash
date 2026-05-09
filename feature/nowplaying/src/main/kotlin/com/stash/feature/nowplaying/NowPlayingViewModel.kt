@@ -52,7 +52,15 @@ class NowPlayingViewModel @Inject constructor(
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
 
     private val _userMessages = MutableSharedFlow<String>(
-        extraBufferCapacity = 1,
+        // v0.9.18: bumped from 1 → 8. The Find-in-FLAC action emits TWO
+        // messages back-to-back ("Looking for FLAC…" → result), and a
+        // capacity-of-1 + DROP_OLDEST race meant the first message could
+        // get dropped before the Toast collector drained it (especially
+        // on fast-fail paths like a known-bad captcha cookie + circuit-
+        // broken kennyy, where both emits land within microseconds).
+        // Existing single-emit actions (flag, delete) are unaffected by
+        // the larger capacity.
+        extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     /** One-shot snackbar messages (e.g. "Track flagged as wrong match"). */
