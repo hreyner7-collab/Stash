@@ -4,23 +4,24 @@ import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.entity.StashMixRecipeEntity
 
 /**
- * Ships Stash's built-in mix recipes. v0.9.16 expands the surface from
- * the single "Stash Discover" flagship to a three-recipe set that exercises
- * each [com.stash.core.data.mix.MixSeedStrategy]:
+ * Ships Stash's built-in mix recipes. As of v0.9.20, all three builtins
+ * are recommendation-substrate-with-library-seasoning — Daily Discover
+ * and Deep Cuts at 85% discovery, First Listen at 100% discovery. Each
+ * uses a distinct [com.stash.core.data.mix.MixSeedStrategy] so their
+ * discovery-survivor pools are naturally differentiated:
  *
- *  - **Daily Discover** — affinity-biased blend of library + new finds
- *    seeded from `artist.getSimilar`.
- *  - **Deep Cuts** — pure-library rediscovery, library-only (no
- *    discovery), surfaces tracks the user used to love but hasn't heard
- *    in a while.
- *  - **First Listen** — pure-discovery, seeded from the user's top tags
- *    via the tag-graph generator. Wider net than Daily Discover.
+ *  - **Daily Discover** — ARTIST_SIMILAR; recommendations from artists
+ *    similar to your top artists.
+ *  - **Deep Cuts** — TRACK_SIMILAR; recommendations from tracks similar
+ *    to your top tracks (deeper-dive flavor).
+ *  - **First Listen** — TAG_GRAPH; top tracks across your taste tags
+ *    (widest net).
  *
  * Only seeds when [StashMixRecipeDao.countBuiltins] is zero, so users
- * don't get defaults re-inserted every launch. Upgrades from pre-0.9.16
- * installs that already have the old single-recipe builtin go through
- * `StashApplication.maybeReseedStashMixes` which clears the old set
- * first and then runs this seed.
+ * don't get defaults re-inserted every launch. Upgrades from earlier
+ * installs that already have the previous builtin set go through
+ * `StashApplication.maybeRetuneStashMixes` which non-destructively
+ * updates the rows in place via [StashMixRecipeDao.retuneBuiltin].
  */
 object StashMixDefaults {
 
@@ -32,22 +33,22 @@ object StashMixDefaults {
     val ALL: List<StashMixRecipeEntity> = listOf(
         StashMixRecipeEntity(
             name = "Daily Discover",
-            description = "Personalized blend of your library + fresh finds.",
-            affinityBias = 0.3f,
+            description = "Mostly fresh finds via similar-artists. A pinch of your library.",
+            affinityBias = 0.0f,
             freshnessWindowDays = 7,
-            discoveryRatio = 0.4f,
-            targetLength = 50,
+            discoveryRatio = 0.85f,
+            targetLength = 40,
             seedStrategy = "ARTIST_SIMILAR",
             isBuiltin = true,
         ),
         StashMixRecipeEntity(
             name = "Deep Cuts",
-            description = "Tracks you used to love that haven't been on rotation.",
-            affinityBias = 0.6f,
+            description = "Mostly fresh finds via similar-tracks. A pinch of your library.",
+            affinityBias = 0.0f,
             freshnessWindowDays = 90,
-            discoveryRatio = 0f,
-            targetLength = 50,
-            seedStrategy = "NONE",
+            discoveryRatio = 0.85f,
+            targetLength = 40,
+            seedStrategy = "TRACK_SIMILAR",
             isBuiltin = true,
         ),
         StashMixRecipeEntity(
