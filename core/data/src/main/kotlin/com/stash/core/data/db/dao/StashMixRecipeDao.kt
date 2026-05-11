@@ -82,13 +82,19 @@ interface StashMixRecipeDao {
      * cascading its discovery_queue. Used when we ship a new default
      * (e.g. bumping discovery_ratio) and want existing installs to pick
      * it up without wiping the user's accumulated discovery state.
+     *
+     * v0.9.20: extended from 4 to 6 fields. The recipe-pivot migration
+     * needs to change affinityBias + seedStrategy alongside the original
+     * three knobs in a single atomic UPDATE.
      */
     @Query(
         """
         UPDATE stash_mix_recipes
         SET discovery_ratio = :discoveryRatio,
             freshness_window_days = :freshnessWindowDays,
-            target_length = :targetLength
+            target_length = :targetLength,
+            affinity_bias = :affinityBias,
+            seed_strategy = :seedStrategy
         WHERE is_builtin = 1 AND name = :name
         """
     )
@@ -97,5 +103,7 @@ interface StashMixRecipeDao {
         discoveryRatio: Float,
         freshnessWindowDays: Int,
         targetLength: Int,
+        affinityBias: Float,
+        seedStrategy: String,
     ): Int
 }

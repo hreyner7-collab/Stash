@@ -341,6 +341,8 @@ class StashApplication : Application(), Configuration.Provider {
                 discoveryRatio = 1.0f,
                 freshnessWindowDays = 14,
                 targetLength = 50,
+                affinityBias = 0.0f,
+                seedStrategy = "TAG_GRAPH",
             )
             if (updated > 0) {
                 Log.i(
