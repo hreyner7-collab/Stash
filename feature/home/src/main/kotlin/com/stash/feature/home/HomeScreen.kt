@@ -81,6 +81,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.animation.Crossfade
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -131,6 +132,13 @@ fun HomeScreen(
     var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
     // Controls the "New Playlist" naming dialog launched from the Playlists section.
     var showCreateDialog by remember { mutableStateOf(false) }
+
+    val toastContext = LocalContext.current
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { msg ->
+            android.widget.Toast.makeText(toastContext, msg, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     // Pre-computed 2-column chunking for the Playlists grid. Hoisted out
     // of the LazyColumn's item{} so the chunked() + buildList{} only runs
