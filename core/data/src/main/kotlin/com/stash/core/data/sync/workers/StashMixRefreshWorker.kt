@@ -220,8 +220,22 @@ class StashMixRefreshWorker @AssistedInject constructor(
             }
         } else LastFmPersonas.EMPTY
 
-        for (recipe in active) {
-            val tracks = mixGenerator.generate(recipe)
+        // v0.9.20: pre-sort by dedup priority so the most-restrictive
+        // recipes claim their natural picks before more-permissive ones
+        // see them. excludeIds accumulates library + discovery ids
+        // across iterations and is threaded into both generate() and
+        // materializeMix() — guarantees no track appears in two
+        // playlists in a single refresh run.
+        val orderedRecipes = active.sortedBy { recipeDedupPriority(it) }
+        val excludeIds = mutableSetOf<Long>()
+        for (recipe in orderedRecipes) {
+            // Snapshot to an immutable Set per iteration so callees can't
+            // observe (or accidentally mutate) the accumulator, and so
+            // tests / future tracing can see exactly what was excluded
+            // at the moment of the call.
+            val excludeSnapshot = excludeIds.toSet()
+            val tracks = mixGenerator.generate(recipe, excludeSnapshot)
+
             // Empty-tracks skip is only safe for library-only recipes
             // (discoveryRatio == 0). Pure-discovery recipes like "Stash
             // Discover" (ratio = 1.0) produce an empty generator result
@@ -234,9 +248,13 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 continue
             }
 
-            val playlistId = materializeMix(recipe, tracks, now)
-            recipeDao.setPlaylistId(recipe.id, playlistId)
+            val result = materializeMix(recipe, tracks, now, excludeSnapshot)
+            recipeDao.setPlaylistId(recipe.id, result.playlistId)
             recipeDao.setLastRefreshedAt(recipe.id, now)
+
+            // v0.9.20: accumulate so the next recipe in the ordering doesn't re-pick these.
+            excludeIds += tracks.map { it.id }
+            excludeIds += result.discoveryIds
 
             // Discovery — opportunistic. Don't block refresh success on it.
             if (recipe.discoveryRatio > 0f && lastFmConfigured) {
@@ -248,14 +266,52 @@ class StashMixRefreshWorker @AssistedInject constructor(
     }
 
     /**
+     * Output of [materializeMix]. Carries the just-created/updated
+     * playlist id (existing return) AND the discovery-survivor track ids
+     * the materialization inserted, so [doWork]'s outer cross-mix dedup
+     * loop can add them to its accumulating excludeIds set.
+     */
+    private data class MaterializeResult(
+        val playlistId: Long,
+        val discoveryIds: List<Long>,
+    )
+
+    /**
+     * Cross-mix track-dedup priority. Most-restrictive recipes go first
+     * so they claim their natural picks; most-permissive last so it
+     * picks up the leftovers.
+     *
+     *  - First Listen (1.0 discovery, library-blind) — has no opinion on
+     *    the library pool; claims TAG_GRAPH survivors first.
+     *  - Deep Cuts (0.85 discovery) — claims TRACK_SIMILAR survivors and
+     *    a sparse library slice next.
+     *  - Daily Discover (0.85 discovery) — most permissive on the
+     *    library slice; claims ARTIST_SIMILAR survivors last.
+     *  - Non-builtins / unknown — last (99).
+     *
+     * Keyed by name rather than id because builtin id values aren't
+     * stable across reseeds.
+     */
+    private fun recipeDedupPriority(recipe: StashMixRecipeEntity): Int = when (recipe.name) {
+        "First Listen" -> 1
+        "Deep Cuts" -> 2
+        "Daily Discover" -> 3
+        else -> 99
+    }
+
+    /**
      * Find-or-create a playlist row for this recipe, then replace its
-     * tracklist with [tracks] in correct order. Returns the playlist_id.
+     * tracklist with [tracks] in correct order. Returns a
+     * [MaterializeResult] with the playlist_id and the discovery-survivor
+     * track ids actually inserted, so the caller can fold those into the
+     * cross-mix excludeIds accumulator for subsequent recipes.
      */
     private suspend fun materializeMix(
         recipe: StashMixRecipeEntity,
         tracks: List<TrackEntity>,
         now: Long,
-    ): Long {
+        excludeIds: Set<Long>,
+    ): MaterializeResult {
         // Existing playlist: verify it's still there (could have been
         // deleted by the user). If gone, fall through to re-create.
         val existing = recipe.playlistId?.let { playlistDao.getById(it) }
@@ -318,14 +374,22 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // Library shortfall-fill in MixGenerator is intentionally untouched —
         // total playlist size for Daily Discover settles at up-to-50 (library)
         // + up-to-20 (discovery) = <=70, replacing the previous unbounded growth.
+        //
+        // v0.9.20: filter via excludeIds; over-fetch so post-filter still
+        // fills the cap. Worst case: every excluded id was a survivor — we
+        // still come back with `discoveryCap` distinct ids. Bounded — the
+        // DAO's ORDER BY completed_at DESC + LIMIT means we just slide the
+        // window further down the survivor list.
         val discoveryCap = (recipe.targetLength * recipe.discoveryRatio)
             .roundToInt()
             .coerceAtLeast(0)
-        val candidateIds = discoveryQueueDao
-            .getDoneTrackIdsForRecipe(recipe.id, limit = discoveryCap)
-            .filter { it !in librarySet }
+        val rawCandidateIds = discoveryQueueDao
+            .getDoneTrackIdsForRecipe(recipe.id, limit = discoveryCap + excludeIds.size)
+        val filteredCandidateIds = rawCandidateIds
+            .filter { it !in librarySet && it !in excludeIds }
+            .take(discoveryCap)
         val discoveryTrackIds = buildList {
-            for (trackId in candidateIds) {
+            for (trackId in filteredCandidateIds) {
                 if (!blocklistGuard.isBlockedByTrackId(trackId)) add(trackId)
             }
         }
@@ -349,7 +413,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
             playlistDao.updateArtUrl(playlistId, coverUrl)
         }
         playlistDao.updateTrackCount(playlistId, totalCount)
-        return playlistId
+        return MaterializeResult(playlistId, discoveryTrackIds)
     }
 
     /**
