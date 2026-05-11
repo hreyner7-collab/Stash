@@ -109,14 +109,24 @@ class MixGenerator @Inject constructor(
      * Produces the finalized track list for [recipe]. The worker calling
      * this replaces the playlist_tracks rows for [recipe.playlistId] with
      * this ordering.
+     *
+     * v0.9.20: [excludeIds] is the cross-mix dedup primitive — when the
+     * refresh worker iterates multiple recipes back-to-back, it accumulates
+     * track ids already claimed by earlier recipes and passes them here so
+     * the current recipe can't re-pick them.
      */
-    suspend fun generate(recipe: StashMixRecipeEntity): List<TrackEntity> {
+    suspend fun generate(
+        recipe: StashMixRecipeEntity,
+        excludeIds: Set<Long> = emptySet(),
+    ): List<TrackEntity> {
         // Step 1: candidate pool — start from every downloaded,
-        // non-blacklisted track in the library.
+        // non-blacklisted track in the library. v0.9.20: filter through
+        // excludeIds first (cheap O(n) set lookup, before any other filtering).
         val rawPool = trackDao.getAllDownloaded()
+        val pool0 = if (excludeIds.isEmpty()) rawPool else rawPool.filter { it.id !in excludeIds }
 
         // Step 2: era filter (cheap, done in-memory).
-        var pool = filterByEra(rawPool, recipe)
+        var pool = filterByEra(pool0, recipe)
 
         // Step 3: include-tag filter (one DAO hit if recipe has tags).
         val includeTags = recipe.includeTagsCsv.splitTrim()
