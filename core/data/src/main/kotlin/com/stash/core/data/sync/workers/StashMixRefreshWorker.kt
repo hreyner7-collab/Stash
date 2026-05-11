@@ -116,9 +116,13 @@ class StashMixRefreshWorker @AssistedInject constructor(
             )
                 .setConstraints(constraints)
                 .build()
+            // v0.9.20: UPDATE (not KEEP) so existing installs reschedule against
+            // the current worker spec on the next cold start. KEEP previously meant
+            // constraint changes / class changes were ignored across upgrades —
+            // a credible cause of "periodic refresh hasn't fired in 3 days" reports.
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 work,
             )
         }
