@@ -33,8 +33,11 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -78,6 +81,16 @@ class HomeViewModel @Inject constructor(
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
+
+    private val _userMessages = MutableSharedFlow<String>(
+        // Bumped to 8 to mirror NowPlayingViewModel — actions that emit two
+        // back-to-back messages (refresh start → done, lossless retry start →
+        // result) need headroom against the Toast collector's drain rate.
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    /** One-shot snackbar messages (e.g. "Refreshing Daily Discover…"). */
+    val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
     init {
         // v0.9.13: warm the tip-jar cache on cold-start, then trigger a
