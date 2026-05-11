@@ -193,13 +193,14 @@ class MixGenerator @Inject constructor(
         )
 
         // Step 8: shortfall backfill from the remaining library pool.
-        // Gated on discoveryRatio < 1.0 — pure-discovery recipes like
-        // "Stash Discover" (ratio = 1.0) must NEVER fall back to library
-        // tracks, even at the cost of a sparser mix until Discovery
-        // downloads more candidates. The user has explicitly asked for
-        // zero familiarity; respecting that beats the old "better to
-        // repeat a little than look broken" heuristic.
-        if (recipe.discoveryRatio < 1.0f) {
+        // v0.9.20: gate raised from `< 1.0f` to `< 0.5f`. Recipes that should
+        // be substantially discovery-driven (>= 50% by ratio) must not silently
+        // degrade to library when discovery is sparse — that's exactly what
+        // produced the "library-heavy mixes" symptom on existing installs.
+        // A sparser-but-honest mix is better than a deceptively library-filled
+        // one. Library-only recipes (ratio == 0) and lightly-discovery recipes
+        // (< 0.5) still get the original full-fill behavior.
+        if (recipe.discoveryRatio < 0.5f) {
             val shortfall = recipe.targetLength - picked.size
             if (shortfall > 0 && picked.size < pool.size) {
                 val extra = ordered.filter { it !in picked }.take(shortfall)
