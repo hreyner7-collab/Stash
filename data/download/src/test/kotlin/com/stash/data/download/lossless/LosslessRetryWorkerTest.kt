@@ -48,16 +48,17 @@ class LosslessRetryWorkerTest {
     )
 
     @Test
-    fun `resolved row flips to PENDING`() = runTest {
+    fun `resolved row flips to PENDING and reports resolved=1 total=1`() = runTest {
         coEvery { downloadQueueDao.waitingForLosslessTracks() } returns listOf(
             entry(id = 100L, trackId = 1L),
         )
         coEvery { trackDao.getById(1L) } returns stubTrackEntity(1L)
         coEvery { registry.resolve(any()) } returns stubSourceResult()
 
-        val result = newWorker().doWork()
+        val result = newWorker().doWork() as androidx.work.ListenableWorker.Result.Success
 
-        assertEquals(androidx.work.ListenableWorker.Result.success(), result)
+        assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
+        assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 1) {
             downloadQueueDao.updateStatus(
                 id = 100L,
@@ -67,30 +68,53 @@ class LosslessRetryWorkerTest {
     }
 
     @Test
-    fun `still-null row stays WAITING_FOR_LOSSLESS`() = runTest {
+    fun `unresolved row stays WAITING_FOR_LOSSLESS and reports resolved=0 total=1`() = runTest {
         coEvery { downloadQueueDao.waitingForLosslessTracks() } returns listOf(
             entry(id = 100L, trackId = 1L),
         )
         coEvery { trackDao.getById(1L) } returns stubTrackEntity(1L)
         coEvery { registry.resolve(any()) } returns null
 
-        newWorker().doWork()
+        val result = newWorker().doWork() as androidx.work.ListenableWorker.Result.Success
 
+        assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
+        assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 0) {
             downloadQueueDao.updateStatus(any(), any(), any(), any(), any(), any())
         }
     }
 
     @Test
-    fun `empty deferred set returns success without DB writes`() = runTest {
+    fun `empty deferred set returns resolved=0 total=0`() = runTest {
         coEvery { downloadQueueDao.waitingForLosslessTracks() } returns emptyList()
 
-        val result = newWorker().doWork()
+        val result = newWorker().doWork() as androidx.work.ListenableWorker.Result.Success
 
-        assertEquals(androidx.work.ListenableWorker.Result.success(), result)
+        assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
+        assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 0) {
             downloadQueueDao.updateStatus(any(), any(), any(), any(), any(), any())
         }
+    }
+
+    @Test
+    fun `partial match across 3 rows reports resolved=2 total=3`() = runTest {
+        coEvery { downloadQueueDao.waitingForLosslessTracks() } returns listOf(
+            entry(id = 100L, trackId = 1L),
+            entry(id = 101L, trackId = 2L),
+            entry(id = 102L, trackId = 3L),
+        )
+        coEvery { trackDao.getById(1L) } returns stubTrackEntity(1L)
+        coEvery { trackDao.getById(2L) } returns stubTrackEntity(2L)
+        coEvery { trackDao.getById(3L) } returns stubTrackEntity(3L)
+        coEvery { registry.resolve(match { it.title == "Track 1" }) } returns stubSourceResult()
+        coEvery { registry.resolve(match { it.title == "Track 2" }) } returns null
+        coEvery { registry.resolve(match { it.title == "Track 3" }) } returns stubSourceResult()
+
+        val result = newWorker().doWork() as androidx.work.ListenableWorker.Result.Success
+
+        assertEquals(2, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
+        assertEquals(3, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
     }
 
     private fun entry(id: Long, trackId: Long) = DownloadQueueEntity(
