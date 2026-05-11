@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.model.DownloadStatus
@@ -43,8 +44,16 @@ class LosslessRetryWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result {
         val deferred = downloadQueueDao.waitingForLosslessTracks()
-        if (deferred.isEmpty()) return Result.success()
+        if (deferred.isEmpty()) {
+            return Result.success(
+                androidx.work.workDataOf(
+                    KEY_RESOLVED to 0,
+                    KEY_TOTAL to 0,
+                ),
+            )
+        }
 
+        var resolvedCount = 0
         for (entry in deferred) {
             val track = trackDao.getById(entry.trackId) ?: continue
             // runCatching mirrors DownloadManager's defensive pattern:
@@ -67,12 +76,24 @@ class LosslessRetryWorker @AssistedInject constructor(
                     id = entry.id,
                     status = DownloadStatus.PENDING,
                 )
+                resolvedCount++
             }
         }
-        return Result.success()
+        return Result.success(
+            androidx.work.workDataOf(
+                KEY_RESOLVED to resolvedCount,
+                KEY_TOTAL to deferred.size,
+            ),
+        )
     }
 
     companion object {
         const val UNIQUE_WORK_NAME = "lossless-retry"
+
+        /** Output-data key: how many WAITING_FOR_LOSSLESS rows were flipped to PENDING this sweep. */
+        const val KEY_RESOLVED = "lossless_retry_resolved"
+
+        /** Output-data key: how many WAITING_FOR_LOSSLESS rows existed when the sweep started. */
+        const val KEY_TOTAL = "lossless_retry_total"
     }
 }
