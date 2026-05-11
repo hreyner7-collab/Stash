@@ -88,14 +88,21 @@ interface DiscoveryQueueDao {
      * `DESC`, so any pathological NULL `completed_at` rows fall to the
      * end naturally, but they're already excluded by the status filter
      * since worker DONE transitions stamp the timestamp.
+     *
+     * v0.9.20 follow-up: INNER JOIN tracks filters out orphan rows whose
+     * track_id no longer points at a live row in `tracks` (deleted by the
+     * orphan sweeper, user delete, or stale state from migrations). Without
+     * this JOIN, materializeMix's insertCrossRef into playlist_tracks throws
+     * SQLITE_CONSTRAINT_FOREIGNKEY because the FK on tracks(id) is enforced.
      */
     @Query(
         """
-        SELECT track_id FROM discovery_queue
-        WHERE recipe_id = :recipeId
-          AND status = 'DONE'
-          AND track_id IS NOT NULL
-        ORDER BY completed_at DESC
+        SELECT dq.track_id FROM discovery_queue dq
+        INNER JOIN tracks t ON t.id = dq.track_id
+        WHERE dq.recipe_id = :recipeId
+          AND dq.status = 'DONE'
+          AND dq.track_id IS NOT NULL
+        ORDER BY dq.completed_at DESC
         LIMIT :limit
         """
     )

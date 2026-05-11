@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.stash.core.data.db.StashDatabase
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.StashMixRecipeEntity
+import com.stash.core.data.db.entity.TrackEntity
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -23,8 +24,11 @@ import org.robolectric.annotation.Config
  *
  * Note: [DiscoveryQueueEntity] has a foreign key to
  * [StashMixRecipeEntity], so each test seeds a recipe row up front. There
- * is no FK from `discovery_queue.track_id` to `tracks.id`, so the tests
- * insert arbitrary track ids without seeding parent track rows.
+ * is no FK from `discovery_queue.track_id` to `tracks.id` — orphan rows
+ * are physically possible — but the DAO query INNER JOINs `tracks` so
+ * that only track_ids with a live parent row are returned. Each test
+ * therefore seeds the corresponding [TrackEntity] rows it expects to see
+ * surface back through the DAO.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -54,6 +58,7 @@ class DiscoveryQueueDaoCapTest {
     @Test fun `respects limit when DONE rows exceed it`() = runTest {
         // Insert 5 DONE rows with distinct track_ids and increasing completedAt.
         for (i in 1..5) {
+            db.trackDao().insert(trackEntity(id = i.toLong()))
             dao.insertIfNew(doneRow(recipeId, trackId = i.toLong(), completedAt = 1000L * i))
         }
 
@@ -63,6 +68,8 @@ class DiscoveryQueueDaoCapTest {
     }
 
     @Test fun `orders by completed_at DESC (newest-DONE first)`() = runTest {
+        db.trackDao().insert(trackEntity(id = 1L))
+        db.trackDao().insert(trackEntity(id = 2L))
         dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))   // older
         dao.insertIfNew(doneRow(recipeId, trackId = 2L, completedAt = 5000L))   // newer
 
@@ -72,6 +79,7 @@ class DiscoveryQueueDaoCapTest {
     }
 
     @Test fun `filters status to DONE only`() = runTest {
+        db.trackDao().insert(trackEntity(id = 1L))
         dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))
         dao.insertIfNew(pendingRow(recipeId, trackId = 2L))   // PENDING — must NOT appear
 
@@ -83,6 +91,7 @@ class DiscoveryQueueDaoCapTest {
     @Test fun `excludes rows with null track_id even when status is DONE`() = runTest {
         // Transient state: a worker may set status=DONE just before linking the
         // canonical track_id. Such a row must NOT consume a cap slot.
+        db.trackDao().insert(trackEntity(id = 1L))
         dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))
         dao.insertIfNew(doneRow(recipeId, trackId = null, completedAt = 2000L))
 
@@ -92,12 +101,34 @@ class DiscoveryQueueDaoCapTest {
     }
 
     @Test fun `limit zero returns empty list`() = runTest {
+        db.trackDao().insert(trackEntity(id = 1L))
         dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))
 
         val result = dao.getDoneTrackIdsForRecipe(recipeId, limit = 0)
 
         assertTrue("expected empty, got $result", result.isEmpty())
     }
+
+    @Test fun `excludes rows whose track_id points to a deleted track`() = runTest {
+        // trackId=1 exists in tracks; trackId=999 is orphan (no parent row).
+        // Pre-fix: the DAO returned both, then materializeMix's
+        // insertCrossRef threw a FOREIGN KEY constraint failure on trackId=999.
+        db.trackDao().insert(trackEntity(id = 1L))
+        dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))
+        dao.insertIfNew(doneRow(recipeId, trackId = 999L, completedAt = 2000L))
+
+        val result = dao.getDoneTrackIdsForRecipe(recipeId, limit = 99)
+
+        assertEquals(listOf(1L), result)
+    }
+
+    private fun trackEntity(id: Long) = TrackEntity(
+        id = id,
+        title = "Track $id",
+        artist = "Artist $id",
+        canonicalTitle = "track $id",
+        canonicalArtist = "artist $id",
+    )
 
     private fun doneRow(recipeId: Long, trackId: Long?, completedAt: Long?) = DiscoveryQueueEntity(
         recipeId = recipeId,
