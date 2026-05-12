@@ -3,8 +3,10 @@ package com.stash.core.data.sync.workers
 import android.content.Context
 import android.util.Log
 import androidx.hilt.work.HiltWorker
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -144,6 +146,18 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 errorMessage = result.error,
             )
         }
+
+        // v0.9.20: after queueing/processing discoveries, kick the downloader
+        // so the new tracks become playable in this charging+WiFi window.
+        // Mirror this worker's own constraints (charging + batteryNotLow +
+        // NetworkType.UNMETERED) — discovery downloads should respect the same
+        // posture that gated the discovery itself.
+        val downloadConstraints = Constraints.Builder()
+            .setRequiresCharging(true)
+            .setRequiresBatteryNotLow(true)
+            .setRequiredNetworkType(NetworkType.UNMETERED)
+            .build()
+        DiscoveryDownloadWorker.enqueueOneTime(applicationContext, downloadConstraints)
         return Result.success()
     }
 
