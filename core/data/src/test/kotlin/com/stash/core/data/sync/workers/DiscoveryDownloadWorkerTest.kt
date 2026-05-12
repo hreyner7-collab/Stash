@@ -1,4 +1,4 @@
-package com.stash.data.download
+package com.stash.core.data.sync.workers
 
 import android.content.Context
 import androidx.work.WorkerParameters
