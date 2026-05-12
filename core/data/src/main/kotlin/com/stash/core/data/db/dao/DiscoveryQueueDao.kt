@@ -32,13 +32,22 @@ interface DiscoveryQueueDao {
      * Count of discovery entries completed within [sinceMillis] for a
      * specific recipe — enforces the per-recipe weekly cap so discovery
      * doesn't spiral.
+     *
+     * v0.9.21: Aligned with [getDoneTrackIdsForRecipe] — only count DONE
+     * rows whose track actually landed on disk (`is_downloaded = 1`). The
+     * cap exists to bound real disk usage; counting unmaterialized stubs
+     * trapped recipes in a "100 intended but 0 downloaded" loop where
+     * fresh PENDING candidates could never drain. See conversation
+     * 2026-05-12: Deep Cuts had ~100 DONE rows but 0 in the mix.
      */
     @Query(
         """
-        SELECT COUNT(*) FROM discovery_queue
-        WHERE recipe_id = :recipeId
-          AND status = 'DONE'
-          AND completed_at >= :sinceMillis
+        SELECT COUNT(*) FROM discovery_queue dq
+        INNER JOIN tracks t ON t.id = dq.track_id
+        WHERE dq.recipe_id = :recipeId
+          AND dq.status = 'DONE'
+          AND dq.completed_at >= :sinceMillis
+          AND t.is_downloaded = 1
         """
     )
     suspend fun countRecentCompletedForRecipe(recipeId: Long, sinceMillis: Long): Int
