@@ -2,8 +2,10 @@
 package com.stash.core.media.equalizer
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -15,7 +17,10 @@ import org.json.JSONArray
 
 // Uses the same DataStore name as the legacy EqualizerStore so it reads
 // the real on-device data written by the old code.
-private val Context.legacyEqDataStore by preferencesDataStore("equalizer_prefs")
+private val Context.legacyEqDataStore by preferencesDataStore(
+  name = "equalizer_prefs",
+  corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 @Singleton
 class LegacyEqualizerStoreImpl @Inject constructor(

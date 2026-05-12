@@ -2,8 +2,10 @@ package com.stash.core.data.prefs
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.model.ThemeMode
@@ -16,6 +18,7 @@ import javax.inject.Singleton
 /** Singleton DataStore for theme preferences, separate from other preference stores. */
 private val Context.themeDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "theme_preferences",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /**

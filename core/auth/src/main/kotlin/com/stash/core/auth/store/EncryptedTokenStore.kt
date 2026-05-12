@@ -2,7 +2,9 @@ package com.stash.core.auth.store
 
 import android.content.Context
 import android.util.Base64
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.auth.crypto.TinkEncryptionManager
@@ -17,7 +19,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** Single DataStore instance scoped to the application process. */
-private val Context.authDataStore by preferencesDataStore(name = "auth_tokens")
+private val Context.authDataStore by preferencesDataStore(
+    name = "auth_tokens",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 /**
  * Internal serializable representation that combines token data and basic user profile

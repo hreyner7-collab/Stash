@@ -2,8 +2,10 @@ package com.stash.core.media
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -12,7 +14,10 @@ import kotlinx.coroutines.flow.first
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val Context.playbackDataStore: DataStore<Preferences> by preferencesDataStore(name = "playback_state")
+private val Context.playbackDataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "playback_state",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 data class SavedPlaybackState(
     val trackId: Long,

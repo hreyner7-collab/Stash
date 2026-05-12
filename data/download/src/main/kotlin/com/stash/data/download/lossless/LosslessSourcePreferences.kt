@@ -2,9 +2,11 @@ package com.stash.data.download.lossless
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.data.db.dao.DownloadQueueDao
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.map
 /** DataStore for lossless-source preferences (priority order, min quality, etc). */
 private val Context.losslessDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "lossless_source_preferences",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /**

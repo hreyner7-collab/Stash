@@ -2,8 +2,10 @@ package com.stash.core.data.youtube
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -17,6 +19,7 @@ import javax.inject.Singleton
 /** Dedicated DataStore for YT scrobbler kill-switch + failure-counter state. */
 private val Context.youtubeScrobblerStateDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "youtube_scrobbler_state",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /**

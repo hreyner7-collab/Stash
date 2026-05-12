@@ -2,9 +2,11 @@ package com.stash.core.data.prefs
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.map
 // Top-level Context extension — mirrors LosslessSourcePreferences.kt:18-20.
 private val Context.likeDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "like_preferences",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /**

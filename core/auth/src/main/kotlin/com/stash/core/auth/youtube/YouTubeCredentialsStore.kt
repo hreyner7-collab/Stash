@@ -1,7 +1,9 @@
 package com.stash.core.auth.youtube
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -85,4 +87,7 @@ class YouTubeCredentialsStore @Inject constructor(
 }
 
 /** Singleton DataStore instance for YouTube credentials. */
-private val Context.youTubeCredentials by preferencesDataStore(name = "youtube_credentials")
+private val Context.youTubeCredentials by preferencesDataStore(
+    name = "youtube_credentials",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)

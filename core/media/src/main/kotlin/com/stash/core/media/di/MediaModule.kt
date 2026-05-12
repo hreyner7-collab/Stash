@@ -1,6 +1,8 @@
 package com.stash.core.media.di
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.PlayerRepositoryImpl
@@ -17,7 +19,10 @@ import javax.inject.Singleton
 
 // File-scope extension for the new EqStore DataStore (name differs from the
 // legacy "equalizer_prefs" store so the two DataStore instances never collide).
-private val Context.eqDataStore by preferencesDataStore(name = "eq_state_v1")
+private val Context.eqDataStore by preferencesDataStore(
+    name = "eq_state_v1",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 /**
  * Hilt module that provides the [PlayerRepository] binding for the app.

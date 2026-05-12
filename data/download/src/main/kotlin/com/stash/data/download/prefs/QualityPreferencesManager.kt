@@ -2,8 +2,10 @@ package com.stash.data.download.prefs
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stash.core.data.prefs.QualityPreference
@@ -17,6 +19,7 @@ import javax.inject.Singleton
 /** Extension property providing a singleton DataStore for quality preferences. */
 private val Context.qualityDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "quality_preferences",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /**

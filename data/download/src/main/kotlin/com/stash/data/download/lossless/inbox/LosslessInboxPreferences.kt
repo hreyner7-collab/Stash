@@ -3,8 +3,10 @@ package com.stash.data.download.lossless.inbox
 import android.content.Context
 import android.net.Uri
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -17,7 +19,10 @@ import kotlinx.coroutines.flow.map
 
 /** DataStore for the inbox config — separate file from other lossless prefs
  *  so the schema can evolve in isolation. */
-private val Context.losslessInboxDataStore by preferencesDataStore(name = "lossless_inbox_prefs")
+private val Context.losslessInboxDataStore by preferencesDataStore(
+    name = "lossless_inbox_prefs",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 /**
  * Persists the user's "Lossless Inbox" configuration:
