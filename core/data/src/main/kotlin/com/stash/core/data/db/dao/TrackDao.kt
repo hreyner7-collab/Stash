@@ -176,6 +176,31 @@ interface TrackDao {
     )
     suspend fun getTopArtistsByTrackCount(limit: Int): List<String>
 
+    /**
+     * Top downloaded tracks by Last.fm scrobble count, returned as
+     * (artist, title) pairs ready for [com.stash.core.data.mix.MixSeedGenerator]'s
+     * TRACK_SIMILAR seed source. Used as the third tier (final fallback)
+     * of the seedTracks fallback chain — for users with no recent listening
+     * events but who have been scrobbling to Last.fm for a while, the LFM
+     * playcount carries meaningful taste signal.
+     *
+     * Filters to is_downloaded = 1 because the seed needs to actually be a
+     * library track (not a stub); and lastfm_user_playcount > 0 to ensure
+     * meaningful signal (NULL or 0 means "never scrobbled / no LFM data").
+     */
+    @Query(
+        """
+        SELECT artist AS artist, title AS title
+        FROM tracks
+        WHERE is_downloaded = 1
+          AND lastfm_user_playcount IS NOT NULL
+          AND lastfm_user_playcount > 0
+        ORDER BY lastfm_user_playcount DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTopTracksByLfmPlaycount(limit: Int): List<TrackArtistTitle>
+
     // ── List queries (all reactive) ─────────────────────────────────────
 
     /** All tracks ordered by most-recently-added first. v0.9.15: filters blocked. */

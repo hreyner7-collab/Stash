@@ -235,4 +235,24 @@ interface ListeningEventDao {
     suspend fun getTopArtistsSince(sinceEpochMs: Long, limit: Int = 20): List<ArtistPlayCount>
 
     data class ArtistPlayCount(val artist: String, val plays: Int)
+
+    /**
+     * Top tracks by in-app play count within the time window, returned as
+     * (artist, title) pairs ready for [com.stash.core.data.mix.MixSeedGenerator]'s
+     * TRACK_SIMILAR seed source. Used as the second tier of the seedTracks
+     * fallback chain (Last.fm persona top tracks → local listening events →
+     * library top by LFM playcount).
+     */
+    @Query(
+        """
+        SELECT t.artist AS artist, t.title AS title
+        FROM listening_events e
+        INNER JOIN tracks t ON t.id = e.track_id
+        WHERE e.started_at >= :sinceEpochMs
+        GROUP BY e.track_id
+        ORDER BY COUNT(*) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTopTracksByLocalPlays(sinceEpochMs: Long, limit: Int): List<TrackArtistTitle>
 }
