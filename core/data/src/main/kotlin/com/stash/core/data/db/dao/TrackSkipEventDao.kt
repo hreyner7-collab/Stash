@@ -39,4 +39,37 @@ interface TrackSkipEventDao {
         """
     )
     suspend fun getSkipStatsSince(trackIds: List<Long>, sinceMs: Long): List<TrackSkipStats>
+
+    /**
+     * Returns canonical-key set ("$canonicalArtist|$canonicalTitle") for
+     * tracks that have been "early-skipped" at least [minSkips] times since
+     * [sinceMs], where "early" means within the first [maxPositionMs]
+     * milliseconds of playback. Used by [com.stash.core.data.sync.workers.StashMixRefreshWorker]'s
+     * discovery pre-filter to ban candidates the user has repeatedly
+     * rejected.
+     *
+     * Position-aware: a skip 90% of the way through a song is "finished
+     * listening, moving on," not a verdict. Only skips in the first
+     * [maxPositionMs] count.
+     *
+     * Joins to `tracks` to look up the canonical key. Tracks deleted from
+     * the library are naturally excluded (INNER JOIN) — acceptable; if a
+     * track is gone we don't need to ban it from future re-discovery.
+     */
+    @Query(
+        """
+        SELECT (t.canonical_artist || '|' || t.canonical_title) AS k
+        FROM track_skip_events s
+        INNER JOIN tracks t ON t.id = s.track_id
+        WHERE s.skipped_at >= :sinceMs
+          AND s.position_ms <= :maxPositionMs
+        GROUP BY k
+        HAVING COUNT(*) >= :minSkips
+        """
+    )
+    suspend fun getEarlySkipBannedCanonicalKeys(
+        minSkips: Int,
+        sinceMs: Long,
+        maxPositionMs: Long,
+    ): List<String>
 }
