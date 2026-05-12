@@ -8,6 +8,7 @@ import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.lastfm.LastFmApiClient
@@ -15,6 +16,7 @@ import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.MixSeedGenerator
+import com.stash.core.data.sync.TrackMatcher
 import io.mockk.coEvery
 import io.mockk.mockk
 import io.mockk.slot
@@ -50,12 +52,15 @@ class StashMixRefreshWorkerDedupTest {
     private val blocklistGuard: BlocklistGuard = mockk {
         coEvery { isBlockedByTrackId(any()) } returns false
     }
+    private val trackSkipEventDao: TrackSkipEventDao = mockk(relaxed = true)
+    private val trackMatcher: TrackMatcher = mockk(relaxed = true)
 
     private fun newWorker() = StashMixRefreshWorker(
         appContext, workerParams,
         recipeDao, playlistDao, discoveryQueueDao, listeningEventDao,
         trackDao, mixGenerator, seedGenerator, lastFmApiClient,
         lastFmCredentials, sessionPreference, blocklistGuard,
+        trackSkipEventDao, trackMatcher,
     )
 
     @Test fun `excludeIds accumulates across recipes — no track appears in two playlists`() = runTest {
