@@ -16,6 +16,7 @@ import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.StashMixRecipeEntity
@@ -31,6 +32,7 @@ import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.MixSeedGenerator
 import com.stash.core.data.mix.MixSeedStrategy
 import com.stash.core.data.mix.StashMixDefaults
+import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
 import dagger.assisted.Assisted
@@ -81,6 +83,8 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val lastFmCredentials: LastFmCredentials,
     private val sessionPreference: LastFmSessionPreference,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val trackSkipEventDao: TrackSkipEventDao,
+    private val trackMatcher: TrackMatcher,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -90,6 +94,35 @@ class StashMixRefreshWorker @AssistedInject constructor(
         private const val TOP_ARTISTS_LIMIT = 8
         private const val SIMILAR_REQUEST_INTERVAL_MS = 220L
         private const val AFFINITY_LOOKBACK_DAYS = 180L
+
+        /**
+         * Floor for the filtered discovery pool. Below this, the TAG_GRAPH
+         * fallback fires.
+         *
+         * Why 20 and not the recipe's discoveryCap (e.g. 34 for an 85%-discovery
+         * recipe with targetLength 40)? Downstream attrition: not every queued
+         * candidate becomes a viable survivor. StashDiscoveryWorker.handle()
+         * applies an additional blocklist check; some candidates fail at the
+         * download stage (yt-dlp can't match, no audio available, etc.); and
+         * some get canonical-deduped against tracks added to the library AFTER
+         * the seed-gen filter ran. Twenty pre-filter survivors typically yields
+         * ~10-15 actually-downloaded DONE rows — enough to fill a 6-slot mix
+         * slot AND leave a queue buffer for tomorrow's refresh. The fallback
+         * is a viability gate, not a precise capacity match.
+         */
+        private const val MIN_DISCOVERY_POOL_AFTER_FILTER = 20
+
+        /** Skip-event ban threshold: this many "early" skips in the time window → ban. */
+        private const val DISCOVERY_SKIP_BAN_MIN_COUNT = 3
+
+        /** Skip-event ban time window in milliseconds. */
+        private val DISCOVERY_SKIP_BAN_WINDOW_MS = TimeUnit.DAYS.toMillis(90)
+
+        /** Skip-position cutoff: skips in the first this-many ms count as rejection. */
+        private const val DISCOVERY_SKIP_BAN_MAX_POSITION_MS = 30_000L
+
+        /** Timeout for the TAG_GRAPH fallback Last.fm call. */
+        private const val SEED_FALLBACK_TIMEOUT_MS = 30_000L
 
         /**
          * Input-data key for [enqueueOneTime] (single-recipe overload).
@@ -477,9 +510,80 @@ class StashMixRefreshWorker @AssistedInject constructor(
             personas = personas,
         )
         if (candidates.isEmpty()) return
-        Log.i(TAG, "'${recipe.name}': ${candidates.size} candidates via $strategy")
-        mixGenerator.queueDiscoveryCandidates(recipe, candidates)
+
+        // v0.9.20: pre-filter against library + skip-ban so discovery_queue
+        // PENDING rows represent genuinely-new music, not "rediscovery" hits.
+        val libraryKeys = trackDao.getLibraryCanonicalKeys().toHashSet()
+        val skipBannedKeys = trackSkipEventDao
+            .getEarlySkipBannedCanonicalKeys(
+                minSkips = DISCOVERY_SKIP_BAN_MIN_COUNT,
+                sinceMs = System.currentTimeMillis() - DISCOVERY_SKIP_BAN_WINDOW_MS,
+                maxPositionMs = DISCOVERY_SKIP_BAN_MAX_POSITION_MS,
+            )
+            .toHashSet()
+
+        val filtered = candidates.filter { candidate ->
+            val key = canonicalKey(candidate.artist, candidate.title)
+            key !in libraryKeys && key !in skipBannedKeys
+        }
+
+        val final = if (filtered.size >= MIN_DISCOVERY_POOL_AFTER_FILTER) {
+            filtered
+        } else {
+            // Fallback: top off with TAG_GRAPH candidates (different strategy
+            // typically yields different artists, so library overlap is lower).
+            // Same filters applied. withTimeout protects WorkManager's 10-minute
+            // budget — mirrors the existing 30s persona-fetch timeout.
+            val tagFallback = runCatching {
+                withTimeout(SEED_FALLBACK_TIMEOUT_MS) {
+                    seedGenerator.generate(
+                        strategy = MixSeedStrategy.TAG_GRAPH,
+                        seedArtists = emptyList(),
+                        topTags = topTags,
+                        seedTracks = emptyList(),
+                        personas = personas,
+                    )
+                }
+            }.getOrElse {
+                Log.w(TAG, "'${recipe.name}': TAG_GRAPH fallback timed out / failed", it)
+                emptyList()
+            }.filter { candidate ->
+                val key = canonicalKey(candidate.artist, candidate.title)
+                key !in libraryKeys && key !in skipBannedKeys
+            }
+            Log.i(
+                TAG,
+                "'${recipe.name}': filtered pool (${filtered.size}) below floor; " +
+                    "appending ${tagFallback.size} TAG_GRAPH fallback candidates",
+            )
+            filtered + tagFallback
+        }
+
+        if (final.isEmpty()) {
+            Log.w(TAG, "'${recipe.name}': all candidates filtered out (library + skips); skipping queue")
+            return
+        }
+
+        Log.i(
+            TAG,
+            "'${recipe.name}': ${final.size} candidates via $strategy " +
+                "(${candidates.size - filtered.size} filtered as library/banned)",
+        )
+        mixGenerator.queueDiscoveryCandidates(recipe, final)
     }
+
+    /**
+     * Canonical key used by the discovery pre-filter — must match the
+     * format the DAOs store and return: TrackMatcher's normalization
+     * applied to artist and title, joined with "|".
+     *
+     * The sync writer uses this same TrackMatcher instance to populate
+     * tracks.canonical_artist / canonical_title, so the keys produced
+     * here match the keys returned by getLibraryCanonicalKeys() and
+     * getEarlySkipBannedCanonicalKeys().
+     */
+    private fun canonicalKey(artist: String, title: String): String =
+        "${trackMatcher.canonicalArtist(artist)}|${trackMatcher.canonicalTitle(title)}"
 
     /**
      * v0.9.16: Snapshot the user's period-sliced top tracks/artists once
