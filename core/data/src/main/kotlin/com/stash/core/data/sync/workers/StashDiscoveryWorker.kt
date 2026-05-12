@@ -114,37 +114,40 @@ class StashDiscoveryWorker @AssistedInject constructor(
         val pending = discoveryQueueDao.getPending(BATCH_SIZE)
         if (pending.isEmpty()) {
             Log.d(TAG, "no pending discoveries")
-            return Result.success()
-        }
-        Log.i(TAG, "draining ${pending.size} discovery candidates")
+            // Don't return early — fall through to the chain. download_queue
+            // is a separate table and may hold orphan PENDING or retry-
+            // eligible FAILED rows from prior runs that still need draining.
+        } else {
+            Log.i(TAG, "draining ${pending.size} discovery candidates")
 
-        val now = System.currentTimeMillis()
-        val weekAgo = now - WEEK_MS
+            val now = System.currentTimeMillis()
+            val weekAgo = now - WEEK_MS
 
-        // Per-recipe caps — counted lazily to avoid a DAO hit per candidate.
-        val recipeBudget = HashMap<Long, Int>()
+            // Per-recipe caps — counted lazily to avoid a DAO hit per candidate.
+            val recipeBudget = HashMap<Long, Int>()
 
-        for (entry in pending) {
-            val used = recipeBudget.getOrPut(entry.recipeId) {
-                discoveryQueueDao.countRecentCompletedForRecipe(entry.recipeId, weekAgo)
+            for (entry in pending) {
+                val used = recipeBudget.getOrPut(entry.recipeId) {
+                    discoveryQueueDao.countRecentCompletedForRecipe(entry.recipeId, weekAgo)
+                }
+                if (used >= PER_RECIPE_WEEKLY_CAP) {
+                    // Leave as PENDING so next week's cycle can pick it up.
+                    Log.d(TAG, "recipe ${entry.recipeId} hit weekly cap — deferring")
+                    continue
+                }
+
+                val result = handle(entry, now)
+                if (result.trackId != null) {
+                    recipeBudget[entry.recipeId] = used + 1
+                }
+                discoveryQueueDao.updateStatus(
+                    id = entry.id,
+                    status = result.status,
+                    trackId = result.trackId,
+                    completedAt = now,
+                    errorMessage = result.error,
+                )
             }
-            if (used >= PER_RECIPE_WEEKLY_CAP) {
-                // Leave as PENDING so next week's cycle can pick it up.
-                Log.d(TAG, "recipe ${entry.recipeId} hit weekly cap — deferring")
-                continue
-            }
-
-            val result = handle(entry, now)
-            if (result.trackId != null) {
-                recipeBudget[entry.recipeId] = used + 1
-            }
-            discoveryQueueDao.updateStatus(
-                id = entry.id,
-                status = result.status,
-                trackId = result.trackId,
-                completedAt = now,
-                errorMessage = result.error,
-            )
         }
 
         // v0.9.20: after queueing/processing discoveries, kick the downloader
@@ -152,6 +155,10 @@ class StashDiscoveryWorker @AssistedInject constructor(
         // Mirror this worker's own constraints (charging + batteryNotLow +
         // NetworkType.UNMETERED) — discovery downloads should respect the same
         // posture that gated the discovery itself.
+        //
+        // Always chain — even when discovery_queue was empty this run. Prior
+        // runs may have queued download_queue rows that haven't been drained
+        // yet (FAILED-with-retry, leftover PENDING, app crash mid-drain).
         val downloadConstraints = Constraints.Builder()
             .setRequiresCharging(true)
             .setRequiresBatteryNotLow(true)
