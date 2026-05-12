@@ -32,3 +32,23 @@ fun constraintsFor(mode: DownloadNetworkMode): Constraints = Constraints.Builder
         }
     }
 }.build()
+
+/**
+ * Constraints for **manual triggers** — when the user explicitly taps
+ * "Refresh this mix" or the app boots and we want to drain orphan
+ * discovery downloads. Same network discipline as [constraintsFor]
+ * (we still respect the user's [DownloadNetworkMode] pref for cellular)
+ * but DROPS the charging requirement: the user is actively asking for
+ * content; honoring that beats waiting for them to plug in.
+ *
+ * `setRequiresBatteryNotLow(true)` stays on — a 5% battery + manual
+ * refresh is still a bad combination.
+ */
+fun constraintsForManualTrigger(mode: DownloadNetworkMode): Constraints = Constraints.Builder().apply {
+    setRequiresBatteryNotLow(true)
+    when (mode) {
+        DownloadNetworkMode.WIFI_AND_CHARGING -> setRequiredNetworkType(NetworkType.UNMETERED)
+        DownloadNetworkMode.WIFI_ANY -> setRequiredNetworkType(NetworkType.UNMETERED)
+        DownloadNetworkMode.ANY_NETWORK -> setRequiredNetworkType(NetworkType.CONNECTED)
+    }
+}.build()
