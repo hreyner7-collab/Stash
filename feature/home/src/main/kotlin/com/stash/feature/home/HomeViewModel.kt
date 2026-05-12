@@ -11,8 +11,10 @@ import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
+import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
@@ -88,6 +90,7 @@ class HomeViewModel @Inject constructor(
     private val downloadQueueDao: DownloadQueueDao,
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -665,6 +668,17 @@ class HomeViewModel @Inject constructor(
             val uniqueName = "${StashMixRefreshWorker.ONE_SHOT_WORK_NAME}_${recipe.id}"
             WorkManager.getInstance(context)
                 .enqueueUniqueWork(uniqueName, ExistingWorkPolicy.REPLACE, request)
+
+            // v0.9.20: fire the full discovery pipeline. queueDiscoveryForRecipe
+            // inside the mix refresh worker enqueues new Last.fm candidates into
+            // discovery_queue PENDING; this trigger processes them right now (subject
+            // to user's DownloadNetworkMode pref) instead of waiting up to 24h for
+            // the periodic schedule. The chain in StashDiscoveryWorker's tail will
+            // fire DiscoveryDownloadWorker, which fires StashMixRefreshWorker again
+            // at the end — the mix re-materializes with newly-downloaded survivors
+            // without the user lifting another finger.
+            val mode = downloadNetworkPreference.current()
+            StashDiscoveryWorker.enqueueOneTime(context, mode)
 
             // Observe the unique-work Flow; filter to OUR enqueued request's id
             // so historical entries from earlier taps (or earlier sessions)
