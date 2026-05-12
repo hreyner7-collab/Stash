@@ -233,6 +233,17 @@ class StashMixRefreshWorker @AssistedInject constructor(
             "refreshing ${active.size} Stash Mix(es)" +
                 if (targetId > 0L) " (single: ${active.first().name})" else "",
         )
+        // v0.9.21: diagnostic snapshot of every active recipe so we can rule
+        // out duplicate-recipe / mismatched-id pathologies when a mix
+        // mysteriously fails to link survivors.
+        recipeDao.getActive().forEach { r ->
+            Log.i(
+                TAG,
+                "  active recipe: id=${r.id} name='${r.name}' " +
+                    "playlistId=${r.playlistId} ratio=${r.discoveryRatio} " +
+                    "target=${r.targetLength} seed=${r.seedStrategy}",
+            )
+        }
 
         val now = System.currentTimeMillis()
         val lastFmConfigured = lastFmCredentials.isConfigured
@@ -432,16 +443,50 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val discoveryCap = (recipe.targetLength * recipe.discoveryRatio)
             .roundToInt()
             .coerceAtLeast(0)
+        // Generous over-fetch: in pathological pool-overlap cases (e.g. Deep
+        // Cuts' TRACK_SIMILAR pool ~95% overlapping First Listen's TAG_GRAPH
+        // pool because a user's top-tracks naturally share tags with the
+        // wider taste graph) the older limit could exhaust before we found
+        // discoveryCap survivors. Headroom is bounded by the total recipe
+        // backlog — DAO query has its own LIMIT clause.
         val rawCandidateIds = discoveryQueueDao
-            .getDoneTrackIdsForRecipe(recipe.id, limit = discoveryCap + excludeIds.size)
-        val filteredCandidateIds = rawCandidateIds
-            .filter { it !in librarySet && it !in excludeIds }
-            .take(discoveryCap)
+            .getDoneTrackIdsForRecipe(recipe.id, limit = discoveryCap * 2 + excludeIds.size)
+        val nonLibraryCandidates = rawCandidateIds.filter { it !in librarySet }
+        // v0.9.21: soft cross-mix dedup. Prefer survivors not already claimed
+        // by an earlier-ordered mix; if dedup leaves us below the cap, backfill
+        // from the shared pool rather than ship an empty discovery section.
+        // Without this, recipes that draw from overlapping Last.fm pools
+        // (TRACK_SIMILAR ∩ TAG_GRAPH ≈ everywhere) silently collapsed to
+        // library-only when refreshed after their peers had already grabbed
+        // the shared candidates. See conversation 2026-05-12: Deep Cuts had
+        // 102 recipe-4 downloaded tracks but 0 discovery survivors.
+        val (preferredIds, sharedIds) = nonLibraryCandidates
+            .partition { it !in excludeIds }
+        val survivorCandidates = if (preferredIds.size >= discoveryCap) {
+            preferredIds.take(discoveryCap)
+        } else {
+            val backfill = sharedIds.take(discoveryCap - preferredIds.size)
+            if (backfill.isNotEmpty()) {
+                Log.i(
+                    TAG,
+                    "'${recipe.name}': dedup left ${preferredIds.size}/$discoveryCap unique survivors; " +
+                        "backfilled ${backfill.size} from cross-mix pool",
+                )
+            }
+            preferredIds + backfill
+        }
         val discoveryTrackIds = buildList {
-            for (trackId in filteredCandidateIds) {
+            for (trackId in survivorCandidates) {
                 if (!blocklistGuard.isBlockedByTrackId(trackId)) add(trackId)
             }
         }
+        Log.i(
+            TAG,
+            "'${recipe.name}' (id=${recipe.id}) link: raw=${rawCandidateIds.size} " +
+                "nonLib=${nonLibraryCandidates.size} preferred=${preferredIds.size} " +
+                "shared=${sharedIds.size} cap=$discoveryCap linked=${discoveryTrackIds.size} " +
+                "excludeIds.size=${excludeIds.size}",
+        )
         discoveryTrackIds.forEachIndexed { offset, trackId ->
             playlistDao.insertCrossRef(
                 PlaylistTrackCrossRef(
