@@ -14,27 +14,12 @@ import org.junit.Test
  */
 class DownloadConstraintsTest {
 
-    @Test fun `constraintsForManualTrigger WIFI_AND_CHARGING requires WiFi but NOT charging`() {
-        val constraints = constraintsForManualTrigger(DownloadNetworkMode.WIFI_AND_CHARGING)
-
-        assertEquals(NetworkType.UNMETERED, constraints.requiredNetworkType)
-        assertFalse("manual trigger drops charging requirement", constraints.requiresCharging())
-        assertTrue("battery-not-low always required", constraints.requiresBatteryNotLow())
-    }
-
-    @Test fun `constraintsForManualTrigger WIFI_ANY requires WiFi but NOT charging`() {
-        val constraints = constraintsForManualTrigger(DownloadNetworkMode.WIFI_ANY)
-
-        assertEquals(NetworkType.UNMETERED, constraints.requiredNetworkType)
-        assertFalse(constraints.requiresCharging())
-        assertTrue(constraints.requiresBatteryNotLow())
-    }
-
-    @Test fun `constraintsForManualTrigger ANY_NETWORK requires any network and NOT charging`() {
-        val constraints = constraintsForManualTrigger(DownloadNetworkMode.ANY_NETWORK)
-
-        assertEquals(NetworkType.CONNECTED, constraints.requiredNetworkType)
-        assertFalse(constraints.requiresCharging())
-        assertTrue(constraints.requiresBatteryNotLow())
+    @Test fun `constraintsForManualTrigger ignores mode — always CONNECTED + battery-not-low + no charging`() {
+        for (mode in DownloadNetworkMode.values()) {
+            val constraints = constraintsForManualTrigger(mode)
+            assertEquals("mode=$mode", NetworkType.CONNECTED, constraints.requiredNetworkType)
+            assertFalse("mode=$mode", constraints.requiresCharging())
+            assertTrue("mode=$mode", constraints.requiresBatteryNotLow())
+        }
     }
 }
