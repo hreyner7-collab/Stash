@@ -3,17 +3,16 @@ package com.stash.core.data.sync.workers
 import android.content.Context
 import android.util.Log
 import androidx.hilt.work.HiltWorker
-import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.model.DownloadNetworkMode
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
@@ -62,6 +61,7 @@ class StashDiscoveryWorker @AssistedInject constructor(
     private val recipeDao: StashMixRecipeDao,
     private val trackMatcher: TrackMatcher,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -174,20 +174,24 @@ class StashDiscoveryWorker @AssistedInject constructor(
         }
 
         // v0.9.20: after queueing/processing discoveries, kick the downloader
-        // so the new tracks become playable in this charging+WiFi window.
-        // Mirror this worker's own constraints (charging + batteryNotLow +
-        // NetworkType.UNMETERED) — discovery downloads should respect the same
-        // posture that gated the discovery itself.
+        // so the new tracks become playable.
         //
         // Always chain — even when discovery_queue was empty this run. Prior
         // runs may have queued download_queue rows that haven't been drained
         // yet (FAILED-with-retry, leftover PENDING, app crash mid-drain).
-        val downloadConstraints = Constraints.Builder()
-            .setRequiresCharging(true)
-            .setRequiresBatteryNotLow(true)
-            .setRequiredNetworkType(NetworkType.UNMETERED)
-            .build()
-        DiscoveryDownloadWorker.enqueueOneTime(applicationContext, downloadConstraints)
+        //
+        // Use manual-trigger constraints (drop charging, respect user network
+        // pref) regardless of whether THIS worker invocation was periodic or
+        // manual. For the periodic path, the parent's own charging requirement
+        // already gated this worker from running — by the time we chain, we
+        // know the device is charging + on WiFi, so dropping the charging req
+        // on the chain is a no-op. For the manual path, dropping charging is
+        // the whole point: the user is actively asking for content; honor that.
+        val mode = downloadNetworkPreference.current()
+        DiscoveryDownloadWorker.enqueueOneTime(
+            applicationContext,
+            constraintsForManualTrigger(mode),
+        )
         return Result.success()
     }
 
