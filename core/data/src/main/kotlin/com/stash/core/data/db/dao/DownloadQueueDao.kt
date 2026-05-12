@@ -81,6 +81,7 @@ interface DownloadQueueDao {
             OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
             OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
         WHERE dq.status = 'PENDING'
+          AND dq.sync_id IS NOT NULL
           AND t.source IN (:sources)
           AND bl.canonical_key IS NULL
           AND EXISTS (
@@ -110,6 +111,7 @@ interface DownloadQueueDao {
             OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
             OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
         WHERE dq.status = 'FAILED' AND dq.retry_count < 3
+          AND dq.sync_id IS NOT NULL
           AND t.source IN (:sources)
           AND bl.canonical_key IS NULL
           AND EXISTS (
@@ -122,6 +124,29 @@ interface DownloadQueueDao {
         ORDER BY (CASE WHEN dq.youtube_url IS NULL THEN 0 ELSE 1 END) ASC, dq.created_at ASC
     """)
     suspend fun getRetryableBySources(sources: List<String>): List<DownloadQueueEntity>
+
+    /**
+     * Discovery rows queued for download — `sync_id IS NULL` partitions
+     * them away from sync-chain [com.stash.core.data.sync.workers.TrackDownloadWorker]
+     * (which after the v0.9.20 predicate update only touches rows with
+     * non-null sync_id).
+     *
+     * Includes FAILED rows with retry_count < 3 so a transient network
+     * blip doesn't permanently sideline a discovery candidate — matches
+     * the retry posture of [getRetryableBySources].
+     *
+     * Filtered to exclude WAITING_FOR_LOSSLESS (owned by LosslessRetryWorker)
+     * and IN_PROGRESS / COMPLETED (already running or done).
+     */
+    @Query(
+        """
+        SELECT * FROM download_queue
+        WHERE sync_id IS NULL
+          AND (status = 'PENDING' OR (status = 'FAILED' AND retry_count < 3))
+        ORDER BY created_at ASC
+        """
+    )
+    suspend fun pendingDiscoveryDownloads(): List<DownloadQueueEntity>
 
     // ── Updates ─────────────────────────────────────────────────────────
 
