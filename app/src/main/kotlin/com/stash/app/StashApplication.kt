@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
+import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
@@ -89,6 +90,9 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var stashMixRecipeDao: StashMixRecipeDao
+
+    @Inject
+    lateinit var discoveryQueueDao: DiscoveryQueueDao
 
     @Inject
     lateinit var trackDao: TrackDao
@@ -172,6 +176,7 @@ class StashApplication : Application(), Configuration.Provider {
             StashMixDefaults.seedIfNeeded(stashMixRecipeDao)
             maybeRetuneStashDiscover()
             maybeRetuneStashMixes()
+            maybeCleanupDiscoveryLibraryHits()
             // Fire a one-shot refresh on first launch so mixes populate
             // without waiting for the 24-hour periodic cycle. Subsequent
             // one-shots are safe (unique-work policy = REPLACE).
@@ -404,6 +409,35 @@ class StashApplication : Application(), Configuration.Provider {
     }
 
     /**
+     * PR 7 one-time cleanup: delete pre-PR-6 era "library-hit" discovery
+     * DONE rows from `discovery_queue`. Pre-PR-6 StashDiscoveryWorker.handle()
+     * canonical-deduped Last.fm candidates against the user's library and
+     * linked existing library tracks instead of creating discovery stubs —
+     * those rows then surfaced in mixes as "discovery survivors" despite
+     * being library content. PR 6's seed-stage pre-filter prevents new
+     * library-hits; this migration cleans up the backlog.
+     *
+     * Gated by [STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION] so the
+     * migration runs exactly once per install. Fresh installs after PR 7
+     * have nothing to clean up — the query is a fast no-op.
+     */
+    private suspend fun maybeCleanupDiscoveryLibraryHits() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("stash_discovery_library_hit_cleanup_version", 0)
+        if (stored >= STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION) return
+
+        val deleted = discoveryQueueDao.deleteLibraryHitDoneRows()
+        Log.i(
+            "StashMigration",
+            "Cleaned up $deleted pre-PR-6 library-hit discovery rows " +
+                "(v$STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION)",
+        )
+        prefs.edit()
+            .putInt("stash_discovery_library_hit_cleanup_version", STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION)
+            .apply()
+    }
+
+    /**
      * Retroactively enables `sync_enabled = 1` on every YouTube playlist in
      * the local DB exactly once. Fixes the parity gap where YouTube
      * playlists discovered before the Sync-preferences UI was extended to
@@ -550,6 +584,18 @@ class StashApplication : Application(), Configuration.Provider {
          *    strategy from NONE to TRACK_SIMILAR.
          */
         private const val STASH_MIX_RECIPE_TUNING_VERSION = 1
+
+        /**
+         * Bump when [maybeCleanupDiscoveryLibraryHits] should run again.
+         *  - v1 = PR 7 one-time cleanup: removes pre-PR-6 era discovery_queue
+         *    DONE rows whose linked track has source != YOUTUBE. Pre-PR-6
+         *    StashDiscoveryWorker.handle() canonical-deduped Last.fm
+         *    candidates against the library and linked existing library
+         *    tracks instead of creating stubs; those rows surfaced in mixes
+         *    as "discovery survivors" despite being library content. PR 6's
+         *    seed-stage pre-filter prevents new ones from being created.
+         */
+        private const val STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION = 1
 
         /**
          * v0.9.13: bump when [maybeBackfillCodecsFromExtension] should run

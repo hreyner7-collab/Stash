@@ -177,4 +177,30 @@ interface DiscoveryQueueDao {
         """
     )
     suspend fun deleteStalePending(cutoffMillis: Long): Int
+
+    /**
+     * One-time PR 7 cleanup: delete discovery_queue DONE rows whose linked
+     * track has `source != 'YOUTUBE'`. Such rows were created pre-PR-6 by
+     * StashDiscoveryWorker.handle()'s canonical-dedup branch — Last.fm
+     * candidates that matched an existing library track got linked to that
+     * track instead of producing a real discovery stub. They surface in
+     * mixes as "discovery survivors" despite being library content.
+     *
+     * Heuristic: real discovery stubs have `source = MusicSource.YOUTUBE`
+     * (set by StashDiscoveryWorker.handle's stub-creation branch). Library
+     * tracks have other sources (`SPOTIFY`, `LOCAL`, `BOTH`).
+     *
+     * PR 6's seed-stage pre-filter prevents new library-hit rows from being
+     * created; this query cleans up the accumulated backlog.
+     *
+     * @return number of rows deleted.
+     */
+    @Query(
+        """
+        DELETE FROM discovery_queue
+        WHERE status = 'DONE'
+          AND track_id IN (SELECT id FROM tracks WHERE source != 'YOUTUBE')
+        """
+    )
+    suspend fun deleteLibraryHitDoneRows(): Int
 }
