@@ -496,9 +496,21 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 .map { it.artist }
                 .ifEmpty { trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT) }
 
-        val seedTracks = personas.topTracksByPeriod[LastFmPeriod.ONE_MONTH]
+        // v0.9.20 PR 8: seedTracks gets the same three-tier fallback chain as
+        // seedArtists. When Last.fm persona top-tracks is empty (sparse
+        // scrobbles, persona fetch race, or 1-month window without enough
+        // data), fall back to local in-app listening events, then to library
+        // top-by-LFM-playcount. Prevents the silent zero-candidate failure
+        // that left Deep Cuts stuck on its library slice in PR 3+.
+        val seedTracks: List<Pair<String, String>> = personas.topTracksByPeriod[LastFmPeriod.ONE_MONTH]
+            ?.takeIf { it.isNotEmpty() }
             ?.take(20)?.map { it.artist to it.title }
-            ?: emptyList()
+            ?: listeningEventDao.getTopTracksByLocalPlays(since, 20)
+                .map { it.artist to it.title }
+                .ifEmpty {
+                    trackDao.getTopTracksByLfmPlaycount(20)
+                        .map { it.artist to it.title }
+                }
 
         val topTags = mixGenerator.computeUserTopTags(limit = 10)
 
