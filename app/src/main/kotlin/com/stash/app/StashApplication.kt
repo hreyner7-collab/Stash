@@ -22,12 +22,14 @@ import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
+import com.stash.core.data.sync.workers.DiscoveryDownloadWorker
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.data.sync.workers.TagEnrichmentWorker
 import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
+import com.stash.core.data.sync.workers.constraintsForManualTrigger
 import com.stash.core.media.preview.LosslessUrlPrefetcher
 import com.stash.data.download.lossless.LosslessRetryScheduler
 import com.stash.data.download.ytdlp.YtDlpUpdateWorker
@@ -174,6 +176,16 @@ class StashApplication : Application(), Configuration.Provider {
             // without waiting for the 24-hour periodic cycle. Subsequent
             // one-shots are safe (unique-work policy = REPLACE).
             StashMixRefreshWorker.enqueueOneTime(this@StashApplication)
+            // v0.9.20: drain orphan discovery download rows from prior version
+            // installs (stubs that StashDiscoveryWorker created in PR 3 era but
+            // were never downloaded because the sync-chain TrackDownloadWorker
+            // was always sync-gated). Respects user's network preference; runs
+            // when constraints are satisfied.
+            val mode = downloadNetworkPreference.current()
+            DiscoveryDownloadWorker.enqueueOneTime(
+                this@StashApplication,
+                constraintsForManualTrigger(mode),
+            )
         }
         StashMixRefreshWorker.schedulePeriodic(this)
         // Tag enrichment + discovery worker constraints come from the
