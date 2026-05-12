@@ -118,6 +118,18 @@ data class DurationBackfillRow(
 )
 
 /**
+ * Minimal projection for the startup file-integrity sweep — only needs id
+ * and the stored path so we can verify the file actually exists on disk.
+ * `file_path` is nullable in the schema; rows with `is_downloaded=1` and
+ * `file_path IS NULL` are themselves a corrupt state we want to repair.
+ */
+data class DownloadedFileRef(
+    val id: Long,
+    @androidx.room.ColumnInfo(name = "file_path")
+    val filePath: String?,
+)
+
+/**
  * Data-access object for [TrackEntity].
  *
  * Provides CRUD operations, various sorted/filtered queries, full-text
@@ -969,6 +981,40 @@ interface TrackDao {
         """
     )
     suspend fun resetForReDownload(trackId: Long)
+
+    /**
+     * All `is_downloaded=1` rows with their stored `file_path`. Drives the
+     * startup file-integrity sweep that verifies every "downloaded" track
+     * actually has a readable file on disk. A track whose file vanished
+     * (user file-manager delete, SAF grant revoked, external storage
+     * unmounted at the wrong moment) keeps `is_downloaded=1` until something
+     * notices the file is gone — this query produces the candidate set.
+     */
+    @Query(
+        """
+        SELECT id, file_path FROM tracks
+        WHERE is_downloaded = 1
+        """
+    )
+    suspend fun getDownloadedFileRefs(): List<DownloadedFileRef>
+
+    /**
+     * Bulk-reset rows to undownloaded state. Companion to
+     * [resetForReDownload] but takes a list — used by the startup integrity
+     * sweep which collects all missing-file ids and resets them in one
+     * statement. `quality_kbps`/`file_format` deliberately untouched: the
+     * row may still hold useful metadata for a future re-download attempt.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_downloaded = 0,
+            file_path = NULL,
+            file_size_bytes = 0
+        WHERE id IN (:trackIds)
+        """
+    )
+    suspend fun bulkResetForReDownload(trackIds: List<Long>)
 
     /**
      * YT-source tracks the Quick-scan backfill should verify. Two routes
