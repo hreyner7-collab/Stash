@@ -196,6 +196,16 @@ class DiscoveryDownloadWorker @AssistedInject constructor(
             }
         }
 
+        // v0.9.21: Discovery downloads start as stubs with duration_ms=0
+        // (no Spotify metadata to seed from). Without this fill, every
+        // discovery track shows 0:00 in playlist UI and contributes 0 to
+        // the header's total-length sum. The sync path's TrackDownloadWorker
+        // has its own duration update; this is the discovery equivalent.
+        if (meta != null && meta.durationMs > 0) {
+            runCatching { trackDao.fillMissingDuration(trackEntity.id, meta.durationMs) }
+                .onFailure { Log.w(TAG, "fillMissingDuration failed for ${trackEntity.id}", it) }
+        }
+
         downloadQueueDao.updateStatus(
             id = queueItem.id,
             status = DownloadStatus.COMPLETED,
