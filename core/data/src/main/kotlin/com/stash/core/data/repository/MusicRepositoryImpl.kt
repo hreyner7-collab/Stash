@@ -121,11 +121,70 @@ class MusicRepositoryImpl @Inject constructor(
         // overwrote all Spotify tracks' date_added with the same timestamp, making
         // "Recently Added" show arbitrary tracks instead of actual recent downloads.
 
+        // v0.9.21: file integrity sweep — finds tracks marked is_downloaded=1
+        // whose file has vanished from disk and resets them to undownloaded.
+        // Without this, getDoneTrackIdsForRecipe surfaces them as mix
+        // survivors (they pass the is_downloaded=1 filter) but playback fails
+        // because the file is gone. Run BEFORE cleanOrphanedMixTracks so the
+        // sweep itself doesn't choke on stale paths. See conversation
+        // 2026-05-12: tracks with FLAC quality + album art + no audible
+        // playback because the file was missing.
+        reconcileMissingDownloadedFiles()
+
         // Clean up orphaned mix tracks — downloaded tracks whose playlist was
         // refreshed and that no longer belong to any playlist. Deletes their
         // audio files and DB rows to free storage. Safe to run every startup;
         // becomes a no-op when there are no orphans.
         cleanOrphanedMixTracks()
+    }
+
+    /**
+     * Verifies every `is_downloaded=1` row's file is actually readable.
+     * Handles both regular filesystem paths and SAF `content://` URIs.
+     * Rows with missing files have `is_downloaded`, `file_path`, and
+     * `file_size_bytes` cleared so the rest of the system stops treating
+     * them as playable.
+     *
+     * Skipped: rows whose path is already null (they're a separate kind
+     * of corrupt state that bulkResetForReDownload will also clean —
+     * captured in `nullPath`).
+     */
+    private suspend fun reconcileMissingDownloadedFiles() {
+        val refs = trackDao.getDownloadedFileRefs()
+        if (refs.isEmpty()) return
+
+        val missing = mutableListOf<Long>()
+        var nullPath = 0
+        for (ref in refs) {
+            val path = ref.filePath
+            if (path.isNullOrBlank()) {
+                missing += ref.id
+                nullPath++
+                continue
+            }
+            val exists = runCatching {
+                if (path.startsWith("content://")) {
+                    DocumentFile.fromSingleUri(context, Uri.parse(path))?.exists() == true
+                } else {
+                    java.io.File(path).exists()
+                }
+            }.getOrDefault(false)
+            if (!exists) missing += ref.id
+        }
+
+        if (missing.isEmpty()) {
+            android.util.Log.d("StashMigrations", "file integrity: all ${refs.size} downloaded files present")
+            return
+        }
+        // Bulk update in chunks to stay under SQLite's parameter ceiling.
+        missing.chunked(500).forEach { chunk ->
+            trackDao.bulkResetForReDownload(chunk)
+        }
+        android.util.Log.i(
+            "StashMigrations",
+            "file integrity: scanned ${refs.size} downloaded rows, " +
+                "reset ${missing.size} with missing files (nullPath=$nullPath)",
+        )
     }
 
     // ── Track queries ───────────────────────────────────────────────────
