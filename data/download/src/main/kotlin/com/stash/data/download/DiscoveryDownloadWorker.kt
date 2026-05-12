@@ -90,6 +90,7 @@ class DiscoveryDownloadWorker @AssistedInject constructor(
      */
     private suspend fun safeUpdateForeground(title: String, text: String, progress: Float) {
         runCatching { setForeground(buildForegroundInfo(title, text, progress)) }
+            .onFailure { Log.w(TAG, "setForeground failed (likely test env or foreground-restricted): $title / $text", it) }
     }
 
     override suspend fun doWork(): Result {
@@ -242,6 +243,7 @@ class DiscoveryDownloadWorker @AssistedInject constructor(
      */
     private fun chainRefresh() {
         runCatching { StashMixRefreshWorker.enqueueOneTime(applicationContext) }
+            .onFailure { Log.w(TAG, "mix refresh chain failed \u2014 mixes may show stale content until next refresh", it) }
     }
 
     /**
