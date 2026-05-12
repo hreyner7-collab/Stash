@@ -122,12 +122,24 @@ class DiscoveryQueueDaoCapTest {
         assertEquals(listOf(1L), result)
     }
 
-    private fun trackEntity(id: Long) = TrackEntity(
+    @Test fun `excludes rows whose track is not yet downloaded`() = runTest {
+        db.trackDao().insert(trackEntity(id = 1L, isDownloaded = true))
+        db.trackDao().insert(trackEntity(id = 2L, isDownloaded = false))  // stub
+        dao.insertIfNew(doneRow(recipeId, trackId = 1L, completedAt = 1000L))
+        dao.insertIfNew(doneRow(recipeId, trackId = 2L, completedAt = 2000L))
+
+        val result = dao.getDoneTrackIdsForRecipe(recipeId, limit = 99)
+
+        assertEquals(listOf(1L), result)
+    }
+
+    private fun trackEntity(id: Long, isDownloaded: Boolean = true) = TrackEntity(
         id = id,
         title = "Track $id",
         artist = "Artist $id",
         canonicalTitle = "track $id",
         canonicalArtist = "artist $id",
+        isDownloaded = isDownloaded,
     )
 
     private fun doneRow(recipeId: Long, trackId: Long?, completedAt: Long?) = DiscoveryQueueEntity(

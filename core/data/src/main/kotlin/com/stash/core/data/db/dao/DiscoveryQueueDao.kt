@@ -94,6 +94,14 @@ interface DiscoveryQueueDao {
      * orphan sweeper, user delete, or stale state from migrations). Without
      * this JOIN, materializeMix's insertCrossRef into playlist_tracks throws
      * SQLITE_CONSTRAINT_FOREIGNKEY because the FK on tracks(id) is enforced.
+     *
+     * v0.9.20 follow-up: AND t.is_downloaded = 1 ensures the mix never
+     * surfaces a stub TrackEntity (a discovery row that was marked DONE
+     * by StashDiscoveryWorker but whose file hasn't landed on disk yet).
+     * Without this filter, a transient window between StashDiscoveryWorker
+     * completion and DiscoveryDownloadWorker completion would put unplayable
+     * tracks in the playlist. DiscoveryDownloadWorker fixes the underlying
+     * issue (downloads run promptly); this filter is defense-in-depth.
      */
     @Query(
         """
@@ -102,6 +110,7 @@ interface DiscoveryQueueDao {
         WHERE dq.recipe_id = :recipeId
           AND dq.status = 'DONE'
           AND dq.track_id IS NOT NULL
+          AND t.is_downloaded = 1
         ORDER BY dq.completed_at DESC
         LIMIT :limit
         """
