@@ -14,18 +14,15 @@ import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.model.DownloadNetworkMode
 import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.db.dao.DownloadQueueDao
-import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
-import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /**
@@ -57,7 +54,6 @@ class StashDiscoveryWorker @AssistedInject constructor(
     private val discoveryQueueDao: DiscoveryQueueDao,
     private val downloadQueueDao: DownloadQueueDao,
     private val trackDao: TrackDao,
-    private val playlistDao: PlaylistDao,
     private val recipeDao: StashMixRecipeDao,
     private val trackMatcher: TrackMatcher,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
@@ -299,20 +295,15 @@ class StashDiscoveryWorker @AssistedInject constructor(
             newId
         }
 
-        // Link to the mix's playlist at the end of the current ordering.
-        // The Home card surfaces these as they become playable; until
-        // download completes they're present-but-unplayable.
-        val currentCount = playlistDao.getById(playlistId)?.trackCount ?: 0
-        playlistDao.insertCrossRef(
-            PlaylistTrackCrossRef(
-                playlistId = playlistId,
-                trackId = trackId,
-                position = currentCount,
-                addedAt = Instant.ofEpochMilli(now),
-            )
-        )
-        playlistDao.updateTrackCount(playlistId, currentCount + 1)
-
+        // v0.9.21: Do NOT insert into playlist_tracks here. Earlier versions
+        // inserted a cross-ref at this point so the mix would "show" stubs
+        // before downloads completed, but the UI hides non-downloaded
+        // tracks anyway AND a concurrent StashMixRefreshWorker's
+        // clearPlaylistTracks would race-wipe these inserts (user-visible
+        // 5 → 13 → 5 flash, conversation 2026-05-12). Linking is owned
+        // solely by materializeMix() via getDoneTrackIdsForRecipe(), which
+        // only sees is_downloaded=1 tracks — eliminates the race and the
+        // phantom-stub flash.
         return HandledResult(
             status = DiscoveryQueueEntity.STATUS_DONE,
             trackId = trackId,
