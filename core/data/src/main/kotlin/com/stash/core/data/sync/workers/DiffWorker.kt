@@ -330,6 +330,36 @@ class DiffWorker @AssistedInject constructor(
                     position = trackSnapshot.position,
                 )
 
+                // v0.9.21 enrichment: if the new snapshot has a youtube_id
+                // and the existing track doesn't, fill it in — and stamp
+                // any pending download_queue row with the YT URL. Without
+                // this, a track originally created by a Spotify sync stays
+                // `youtube_id=null` forever; even after a YT Music sync
+                // brings the same track in with its videoId, DownloadManager
+                // still routes it through the slow Spotify → YT match path
+                // because `preResolvedUrl` is null. See conversation
+                // 2026-05-12: 4 tracks downloading via Spotify even after
+                // Spotify playlists were deselected.
+                val snapshotYtId = trackSnapshot.youtubeId
+                if (!snapshotYtId.isNullOrBlank() && existingTrack.youtubeId.isNullOrBlank()) {
+                    trackDao.updateYoutubeId(existingTrack.id, snapshotYtId)
+                    val ytUrl = "https://music.youtube.com/watch?v=$snapshotYtId"
+                    downloadQueueDao.fillMissingYoutubeUrlForTrack(existingTrack.id, ytUrl)
+                }
+
+                // v0.9.21 enrichment: refresh album-art URL when the
+                // incoming snapshot differs from what's stored. Snapshot
+                // URLs flow through ArtUrlUpgrader at write time, so when
+                // the upgrader gains support for a new CDN, the next
+                // re-sync of a playlist rewrites stale rows in place. No
+                // backfill migration needed. See conversation 2026-05-13:
+                // 228 yt3.googleusercontent.com tracks frozen at 120×120
+                // because they synced before the upgrader knew that CDN.
+                val snapshotArt = trackSnapshot.albumArtUrl
+                if (!snapshotArt.isNullOrBlank() && snapshotArt != existingTrack.albumArtUrl) {
+                    trackDao.updateAlbumArtUrl(existingTrack.id, snapshotArt)
+                }
+
                 // Auto-reconciliation: if this track is undownloaded,
                 // check if a manually-downloaded track with the same
                 // canonical identity exists. This handles cases where a

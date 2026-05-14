@@ -142,6 +142,7 @@ class SyncViewModel @Inject constructor(
     private val tokenManager: TokenManager,
     private val syncHistoryDao: SyncHistoryDao,
     private val playlistDao: com.stash.core.data.db.dao.PlaylistDao,
+    private val downloadQueueDao: com.stash.core.data.db.dao.DownloadQueueDao,
     private val musicRepository: com.stash.core.data.repository.MusicRepository,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
 ) : ViewModel() {
@@ -198,6 +199,23 @@ class SyncViewModel @Inject constructor(
     fun onTogglePlaylistSync(playlistId: Long, enabled: Boolean) {
         viewModelScope.launch {
             playlistDao.updateSyncEnabled(playlistId, enabled)
+            // v0.9.21: when DISABLING, sweep pending download_queue rows
+            // whose tracks no longer belong to any sync-enabled playlist.
+            // Without this, deselecting a playlist leaves its in-flight
+            // downloads draining — confusing because the user expects
+            // "deselect" to actually stop downloads. The query is
+            // DELETE-with-NOT-IN so tracks shared with another enabled
+            // playlist (e.g. same track in Liked Songs on both services)
+            // stay queued.
+            if (!enabled) {
+                val cancelled = downloadQueueDao.cancelDownloadsWithNoEnabledPlaylist()
+                if (cancelled > 0) {
+                    android.util.Log.i(
+                        "SyncToggle",
+                        "cancelled $cancelled orphan PENDING download(s) after disable",
+                    )
+                }
+            }
         }
     }
 

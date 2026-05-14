@@ -3,7 +3,6 @@ package com.stash.core.data.repository
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
-import com.stash.core.common.ArtUrlUpgrader
 import com.stash.core.data.db.dao.AlbumSummary
 import com.stash.core.data.db.dao.ArtistSummary
 import com.stash.core.data.db.dao.PlaylistDao
@@ -111,11 +110,13 @@ class MusicRepositoryImpl @Inject constructor(
         // (playlist_id, track_id) pair and removes the rest.
         deduplicatePlaylistTracks()
 
-        // One-time upgrade: replace low-res album art URLs (60px YouTube thumbnails)
-        // with high-res equivalents. The ArtUrlUpgrader rewrites lh3 CDN URLs to
-        // request 544px instead of 60px, and Spotify URLs to 640px instead of 300px.
-        // Safe to run on every startup — already-upgraded URLs pass through unchanged.
-        upgradeAlbumArtUrls()
+        // v0.9.21: removed the periodic art-URL upgrade passes. ArtUrlUpgrader
+        // now runs at every sync write site (PlaylistFetchWorker for both
+        // tracks and playlists, DiffWorker for the new-row path) so URLs land
+        // already-upgraded. A re-process on every launch is dead weight —
+        // bandwidth + compute the user doesn't want to pay. Users on
+        // pre-fix builds get HQ art on their next sync; clearing app data
+        // forces an immediate refresh.
 
         // NOTE: backfillSpotifyDateAdded() was removed — it ran on every startup and
         // overwrote all Spotify tracks' date_added with the same timestamp, making
@@ -136,6 +137,19 @@ class MusicRepositoryImpl @Inject constructor(
         // audio files and DB rows to free storage. Safe to run every startup;
         // becomes a no-op when there are no orphans.
         cleanOrphanedMixTracks()
+
+        // v0.9.21: cancel pending download_queue rows whose tracks no
+        // longer belong to any sync-enabled playlist. Catches the
+        // pre-fix-install case where a user deselected a playlist before
+        // SyncViewModel learned to clean up — those queue rows would
+        // drain indefinitely otherwise. Idempotent.
+        val cancelledOrphans = downloadQueueDao.cancelDownloadsWithNoEnabledPlaylist()
+        if (cancelledOrphans > 0) {
+            android.util.Log.i(
+                "StashMigrations",
+                "cancelled $cancelledOrphans orphan PENDING download(s) — tracks have no enabled playlist",
+            )
+        }
     }
 
     /**
@@ -632,25 +646,6 @@ class MusicRepositoryImpl @Inject constructor(
         if (cleaned > 0) {
             android.util.Log.i("StashMigrations", "Cleaned $cleaned playlists with duplicate track entries. Next sync will rebuild.")
         }
-    }
-
-    /**
-     * Upgrades low-res album art URLs to high-res equivalents.
-     * On first run: upgrades all tracks with low-res URLs (~2800 updates).
-     * On subsequent runs: `toUpdate` is empty so it returns immediately
-     * after a single DB read. The read itself is fast (~50ms for 3000 rows).
-     */
-    private suspend fun upgradeAlbumArtUrls() {
-        val allTracks = trackDao.getAllByDateAdded().first()
-        val toUpdate = allTracks.mapNotNull { track ->
-            val original = track.albumArtUrl ?: return@mapNotNull null
-            val better = ArtUrlUpgrader.upgrade(original) ?: return@mapNotNull null
-            if (better != original) track.copy(albumArtUrl = better) else null
-        }
-        if (toUpdate.isEmpty()) return
-
-        toUpdate.forEach { trackDao.update(it) }
-        android.util.Log.i("StashMigrations", "Upgraded ${toUpdate.size} album art URLs to high-res")
     }
 
     companion object {

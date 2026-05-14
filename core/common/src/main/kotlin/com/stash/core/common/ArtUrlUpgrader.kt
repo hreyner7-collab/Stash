@@ -30,19 +30,53 @@ package com.stash.core.common
  */
 object ArtUrlUpgrader {
 
+    // lh3.googleusercontent.com (YT Music album art) and
+    // yt3.googleusercontent.com (YT channel art, playlist art) share the
+    // same `=wN-hN-…` size-token format. Both upgrade to 1024x1024.
     private val LH3_SIZE_REGEX = Regex("""=w\d+-h\d+""")
     private const val LH3_TARGET_SIZE = "=w1024-h1024"
+
+    // yt3.ggpht.com uses a single-dimension square token `=sN`. Bump to
+    // 1080 — fits anything we'd render at 3x density.
+    private val GGPHT_SIZE_REGEX = Regex("""=s\d+""")
+    private const val GGPHT_TARGET_SIZE = "=s1080"
 
     private const val SPOTIFY_64 = "ab67616d00004851"
     private const val SPOTIFY_300 = "ab67616d00001e02"
     private const val SPOTIFY_640 = "ab67616d0000b273"
 
+    // i.ytimg.com filenames in increasing order of quality.
+    //   `default`      → 120x90
+    //   `mqdefault`    → 320x180
+    //   `hqdefault`    → 480x360
+    //   `sddefault`    → 640x480
+    //   `maxresdefault`→ 1280x720 (404s for low-popularity uploads)
+    //
+    // We upgrade everything < sddefault to `sddefault`. 640x480 is sharp
+    // enough for the mosaic tile / playlist-cover surfaces at typical
+    // high-DPI sizes and is available for ~99% of YT videos. We don't
+    // chase `maxresdefault` because the 404 rate is non-trivial and
+    // Coil doesn't fall back on broken URLs.
+    //
+    // We ALSO strip `?sqp=…&rs=…` query parameters: those are Google's
+    // server-side downscale tokens that shrink the served image even
+    // when the URL points at a high-res `*default.jpg`. Without
+    // stripping, an `hqdefault.jpg?sqp=…` URL arrives at ~320px wide.
+    private val YTIMG_LOW_RES = listOf("default", "mqdefault", "hqdefault")
+    private const val YTIMG_TARGET = "sddefault"
+    private val YTIMG_PATH_REGEX = Regex(
+        """(/vi[a-z_]*/[^/]+/)(?:default|mqdefault|hqdefault)(\.(?:jpg|webp))""",
+    )
+
     fun upgrade(url: String?): String? {
         if (url == null) return null
 
         return when {
-            // YouTube Music album art (lh3.googleusercontent.com)
-            "lh3.googleusercontent.com" in url -> {
+            // YouTube Music album art (lh3.googleusercontent.com) AND
+            // YouTube channel/playlist art (yt3.googleusercontent.com).
+            // Same `=wN-hN-…` token format; same upgrade target.
+            "lh3.googleusercontent.com" in url ||
+                "yt3.googleusercontent.com" in url -> {
                 if (LH3_SIZE_REGEX.containsMatchIn(url)) {
                     LH3_SIZE_REGEX.replace(url, LH3_TARGET_SIZE)
                 } else if (url.contains("=")) {
@@ -54,13 +88,45 @@ object ArtUrlUpgrader {
                 }
             }
 
+            // YouTube channel art (yt3.ggpht.com) uses `=sN` single-dim
+            // square sizing. Upgrade to 1080.
+            "yt3.ggpht.com" in url -> {
+                if (GGPHT_SIZE_REGEX.containsMatchIn(url)) {
+                    GGPHT_SIZE_REGEX.replace(url, GGPHT_TARGET_SIZE)
+                } else if (url.contains("=")) {
+                    url.substringBefore("=") + GGPHT_TARGET_SIZE
+                } else {
+                    "$url$GGPHT_TARGET_SIZE"
+                }
+            }
+
             // Spotify album art (i.scdn.co)
             "i.scdn.co/image/" in url -> {
                 url.replace(SPOTIFY_64, SPOTIFY_640)
                     .replace(SPOTIFY_300, SPOTIFY_640)
             }
 
-            // Everything else (ytimg, other CDNs) — leave as-is
+            // YouTube video thumbnails (i.ytimg.com). Two upgrades:
+            //   1. Strip `?sqp=…&rs=…` query — Google's server-side
+            //      downscale tokens; they shrink the served image even
+            //      when the URL already points at `hqdefault.jpg`.
+            //   2. Rewrite `default.jpg` (120x90) and `mqdefault.jpg`
+            //      (320x180) up to `hqdefault.jpg` (480x360).
+            // `sddefault` / `maxresdefault` pass through filename-wise
+            // since they're already good — but they still get the query
+            // strip.
+            "i.ytimg.com" in url -> {
+                val stripped = url.substringBefore("?")
+                if (YTIMG_LOW_RES.any { "/$it." in stripped }) {
+                    YTIMG_PATH_REGEX.replace(stripped) { match ->
+                        "${match.groupValues[1]}$YTIMG_TARGET${match.groupValues[2]}"
+                    }
+                } else {
+                    stripped
+                }
+            }
+
+            // Everything else — leave as-is
             else -> url
         }
     }

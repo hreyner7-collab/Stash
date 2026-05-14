@@ -180,6 +180,49 @@ interface DownloadQueueDao {
     @Query("UPDATE download_queue SET retry_count = retry_count + 1 WHERE id = :id")
     suspend fun incrementRetryCount(id: Long)
 
+    /**
+     * Stamp a YouTube URL onto a pending queue row that doesn't have one
+     * yet. Used by DiffWorker enrichment: when a YT Music sync deduplicates
+     * a track snapshot against a Spotify-source row whose queue entry has
+     * `youtube_url IS NULL`, we fill it in so DownloadManager skips the
+     * Spotify → YT match path and uses the YT URL directly. Guarded by
+     * `youtube_url IS NULL` so already-stamped rows aren't overwritten.
+     */
+    @Query(
+        """
+        UPDATE download_queue
+        SET youtube_url = :url
+        WHERE track_id = :trackId
+          AND status = 'PENDING'
+          AND youtube_url IS NULL
+        """
+    )
+    suspend fun fillMissingYoutubeUrlForTrack(trackId: Long, url: String): Int
+
+    /**
+     * Cancel-by-delete: drop PENDING queue rows for tracks that no
+     * longer belong to any sync-enabled playlist. Run as a defensive
+     * cleanup so deselecting a playlist eventually stops its leftover
+     * downloads. Tracks linked to at least one enabled playlist (any
+     * source) are preserved. `is_active = 1` excludes archived
+     * playlists from the membership check.
+     *
+     * Returns the number of queue rows deleted.
+     */
+    @Query(
+        """
+        DELETE FROM download_queue
+        WHERE status = 'PENDING'
+          AND track_id NOT IN (
+            SELECT DISTINCT pt.track_id
+            FROM playlist_tracks pt
+            INNER JOIN playlists p ON p.id = pt.playlist_id
+            WHERE p.sync_enabled = 1 AND p.is_active = 1
+          )
+        """
+    )
+    suspend fun cancelDownloadsWithNoEnabledPlaylist(): Int
+
     // ── Cleanup ─────────────────────────────────────────────────────────
 
     /** Delete all completed download entries to free up space. */

@@ -902,6 +902,19 @@ interface TrackDao {
     suspend fun fillMissingAlbumArtUrl(trackId: Long, albumArtUrl: String)
 
     /**
+     * Unconditional album-art URL overwrite for the existing-track branch
+     * in DiffWorker. Used when a re-sync brings a snapshot whose
+     * `albumArtUrl` differs from what's stored — typically because the
+     * upgrader gained new CDN support and stale rows still hold the
+     * pre-upgrade URL. Companion to [fillMissingAlbumArtUrl] but without
+     * the "only-if-blank" guard. Caller is responsible for not passing
+     * a downgrade (e.g. only call when the incoming URL has flowed
+     * through [com.stash.core.common.ArtUrlUpgrader]).
+     */
+    @Query("UPDATE tracks SET album_art_url = :albumArtUrl WHERE id = :trackId")
+    suspend fun updateAlbumArtUrl(trackId: Long, albumArtUrl: String)
+
+    /**
      * Duration-only sibling of [fillMissingMetadata]. Used by the primary
      * download path post-markAsDownloaded and by [ArtBackfillWorker]'s
      * duration pass. Guarded by `duration_ms = 0` so known-good durations
