@@ -94,6 +94,20 @@ class DownloadExecutor @Inject constructor(
                     // Download EJS challenge solver scripts from GitHub on first use.
                     addOption("--remote-components", "ejs:github")
                 }
+
+                // Diagnostic: have yt-dlp print the actual selected format to
+                // stdout. Without this we can't tell whether 141 (AAC 256kbps,
+                // premium) or 140 (AAC 128kbps, free-tier) was served — both
+                // land as .m4a. Parsed back in the stdout-log below.
+                //
+                // CRITICAL: prefix with `after_video:` so the print fires
+                // AFTER the download. Bare `--print TEMPLATE` defaults to
+                // WHEN=video which implies --simulate and breaks downloads.
+                addOption(
+                    "--print",
+                    "after_video:STASHDL_FMT|id=%(format_id)s|abr=%(abr)s|" +
+                        "acodec=%(acodec)s|ext=%(ext)s|height=%(height)s",
+                )
             }
 
             // Pass cookies so YouTube doesn't bot-detect us.
@@ -106,6 +120,9 @@ class DownloadExecutor @Inject constructor(
                 cookieFile.setWritable(false, false)
                 cookieFile.setWritable(true, true)
                 request.addOption("--cookies", cookieFile.absolutePath)
+                Log.i(TAG, "download: cookies attached (len=${cookie.length})")
+            } else {
+                Log.w(TAG, "download: NO COOKIE attached — yt-dlp will run anonymously")
             }
 
             Log.d(TAG, "download: starting url=$url, output=$outputTemplate, args=$qualityArgs")
@@ -121,6 +138,11 @@ class DownloadExecutor @Inject constructor(
             val stderr = response.err.orEmpty()
             Log.d(TAG, "download: yt-dlp exit=${response.exitCode}, " +
                 "stdoutLen=${stdout.length}, stderrLen=${stderr.length}")
+
+            // Surface the format selection diagnostic line from stdout.
+            stdout.lineSequence()
+                .firstOrNull { it.startsWith("STASHDL_FMT|") }
+                ?.let { Log.i(TAG, "download: picked $it") }
 
             // Find the output file — yt-dlp determines the extension based on format
             val result = outputDir.listFiles()?.firstOrNull { it.nameWithoutExtension == filename }

@@ -112,6 +112,16 @@ fun SettingsScreen(
         return // Full-screen WebView replaces the Settings content
     }
 
+    // YouTube Music WebView login (full-screen overlay) — Phase 1 spike
+    if (uiState.showYouTubeWebLogin) {
+        com.stash.feature.settings.components.YouTubeLoginWebView(
+            onCookieExtracted = viewModel::onYouTubeWebLoginCookieExtracted,
+            onDismiss = viewModel::onDismissYouTubeWebLogin,
+            onManualFallback = viewModel::onConnectYouTubeManual,
+        )
+        return // Full-screen WebView replaces the Settings content
+    }
+
     // Spotify sp_dc cookie input dialog (manual fallback)
     if (uiState.showSpotifyCookieDialog) {
         SpotifyCookieDialog(
