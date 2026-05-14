@@ -202,6 +202,7 @@ class SettingsViewModel @Inject constructor(
             totalStorageBytes = storageBytes,
             totalTracks = trackCount,
             showSpotifyWebLogin = local.showSpotifyWebLogin,
+            showYouTubeWebLogin = local.showYouTubeWebLogin,
             showYouTubeCookieDialog = local.showYouTubeCookieDialog,
             showSpotifyCookieDialog = local.showSpotifyCookieDialog,
             spotifyCookieError = local.spotifyCookieError,
@@ -483,16 +484,49 @@ class SettingsViewModel @Inject constructor(
     // -- YouTube actions ------------------------------------------------------
 
     /**
-     * Opens the YouTube Music cookie input dialog.
+     * Opens the YouTube Music WebView login flow. The user signs in via
+     * Google's own page inside the WebView and the app extracts the full
+     * cookie string (SAPISID + LOGIN_INFO at minimum) automatically.
+     *
+     * Phase 1 spike: this is the new primary entry point. The manual
+     * cookie paste dialog stays available via [onConnectYouTubeManual]
+     * for users who hit the Google "browser not secure" block.
      */
     fun onConnectYouTube() {
         _localState.update {
+            it.copy(showYouTubeWebLogin = true)
+        }
+    }
+
+    /**
+     * Fallback: opens the manual cookie paste dialog. Triggered from
+     * the WebView's "Paste cookie" toolbar action when the WebView path
+     * is blocked or otherwise unwanted.
+     */
+    fun onConnectYouTubeManual() {
+        _localState.update {
             it.copy(
+                showYouTubeWebLogin = false,
                 showYouTubeCookieDialog = true,
                 youTubeCookieError = null,
                 isYouTubeCookieValidating = false,
             )
         }
+    }
+
+    /** Dismisses the YouTube WebView login screen. */
+    fun onDismissYouTubeWebLogin() {
+        _localState.update { it.copy(showYouTubeWebLogin = false) }
+    }
+
+    /**
+     * Called by the WebView login when the YouTube session cookies are
+     * successfully harvested. Validates and persists via the same flow
+     * the manual paste path uses.
+     */
+    fun onYouTubeWebLoginCookieExtracted(cookies: String) {
+        _localState.update { it.copy(showYouTubeWebLogin = false) }
+        onConnectYouTubeWithCookie(cookies)
     }
 
     /**
@@ -749,6 +783,7 @@ class SettingsViewModel @Inject constructor(
      */
     private data class LocalState(
         val showSpotifyWebLogin: Boolean = false,
+        val showYouTubeWebLogin: Boolean = false,
         val showYouTubeCookieDialog: Boolean = false,
         val showSpotifyCookieDialog: Boolean = false,
         val spotifyCookieError: String? = null,
