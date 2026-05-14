@@ -70,7 +70,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackBlocklistEntity::class,
         TrackSkipEventEntity::class,
     ],
-    version = 22,
+    version = 23,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -636,6 +636,27 @@ abstract class StashDatabase : RoomDatabase() {
         val MIGRATION_21_22 = object : Migration(21, 22) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // No-op DDL: TEXT columns accept new enum names natively.
+            }
+        }
+
+        /**
+         * v0.9.23 — track which playlist_tracks rows were added by the user
+         * (vs. by a sync run). Drives REFRESH-mode survival so a user's
+         * manual additions to an imported Spotify/YT Music playlist persist
+         * across re-syncs. See issue #42.
+         *
+         * Default 0 (FALSE) on existing rows is correct: every pre-fix row
+         * was either sync-added (CUSTOM playlists never go through REFRESH
+         * so the flag is moot for them) or added via the existing
+         * MusicRepositoryImpl.addTrackToPlaylist path which only targeted
+         * CUSTOM playlists — those don't hit clearPlaylistTracks anyway.
+         */
+        val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE playlist_tracks " +
+                        "ADD COLUMN locally_added INTEGER NOT NULL DEFAULT 0",
+                )
             }
         }
     }

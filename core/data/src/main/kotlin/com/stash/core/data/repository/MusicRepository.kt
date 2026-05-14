@@ -203,6 +203,13 @@ interface MusicRepository {
     /** Get all user-created custom playlists. */
     fun getUserCreatedPlaylists(): Flow<List<Playlist>>
 
+    /**
+     * Playlists the user can pick as a "Save to Playlist" destination:
+     * custom playlists plus imported Spotify / YT Music playlists.
+     * Excludes Stash Mix / Downloads Mix / daily-mix surfaces.
+     */
+    fun getPickablePlaylists(): Flow<List<Playlist>>
+
     // ── Unmatched tracks ────────────────────────────────────────────────
 
     /** Unmatched tracks (matching failures, not dismissed). */

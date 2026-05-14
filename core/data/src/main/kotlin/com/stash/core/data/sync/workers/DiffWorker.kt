@@ -300,8 +300,13 @@ class DiffWorker @AssistedInject constructor(
         // ensurePlaylistMembership stops user-removed tracks from coming
         // back, and duplicates fall out naturally since existing rows are
         // re-stamped by the same (playlistId, trackId) primary key.
+        //
+        // v0.9.23 — only wipe SYNC-added rows. User-added tracks
+        // (locally_added = 1) survive REFRESH so manual additions to
+        // imported Spotify / YT Music playlists persist across re-syncs.
+        // See issue #42.
         if (syncMode == SyncMode.REFRESH) {
-            playlistDao.clearPlaylistTracks(localPlaylist.id)
+            playlistDao.clearSyncedPlaylistTracks(localPlaylist.id)
         }
 
         var newTrackCount = 0

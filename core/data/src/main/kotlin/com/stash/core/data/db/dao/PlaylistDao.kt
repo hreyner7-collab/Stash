@@ -239,14 +239,26 @@ interface PlaylistDao {
     suspend fun getActivePlaylistsBySource(source: MusicSource): List<PlaylistEntity>
 
     /**
-     * Hard-delete all track associations for a playlist. Called before
-     * re-inserting the current track set during sync. Without this,
-     * the playlist_tracks table accumulates entries from every sync run
-     * with overlapping position values (e.g., two tracks both at position 1),
-     * which scrambles the display order in the playlist detail view.
+     * Hard-delete all track associations for a playlist. Called by
+     * StashMixRefreshWorker on each refresh — the mix's tracks are
+     * regenerated from scratch every time, so wiping locally-added rows
+     * along with sync-added ones is intentional.
+     *
+     * **NOT used by DiffWorker (sync) anymore** — use
+     * [clearSyncedPlaylistTracks] instead so user-added tracks survive
+     * REFRESH-mode re-sync of an imported playlist.
      */
     @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId")
     suspend fun clearPlaylistTracks(playlistId: Long)
+
+    /**
+     * v0.9.23 — hard-delete only the SYNC-added playlist_tracks rows.
+     * User-added rows (locally_added = 1) are preserved across REFRESH
+     * so manual additions to imported Spotify/YT Music playlists persist.
+     * See issue #42.
+     */
+    @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId AND locally_added = 0")
+    suspend fun clearSyncedPlaylistTracks(playlistId: Long)
 
     /**
      * Remove a single track's membership from a specific playlist. Used by
@@ -396,6 +408,27 @@ interface PlaylistDao {
     /** All user-created custom playlists (source = BOTH means local). */
     @Query("SELECT * FROM playlists WHERE type = 'CUSTOM' AND source = 'BOTH' AND is_active = 1 ORDER BY name ASC")
     fun getUserCreatedPlaylists(): Flow<List<PlaylistEntity>>
+
+    /**
+     * v0.9.23 — playlists the user can pick as a destination for
+     * "Save to Playlist." Includes custom playlists AND imported
+     * Spotify / YT Music CUSTOM playlists (issue #42), excludes
+     * system surfaces the user shouldn't add tracks to directly
+     * (Stash Mix recipes, Downloads Mix, daily mixes/liked songs).
+     * LIKED_SONGS is intentionally not pickable here — Like is a
+     * separate first-class action.
+     */
+    @Query(
+        """
+        SELECT * FROM playlists
+        WHERE is_active = 1
+          AND type IN ('CUSTOM')
+        ORDER BY
+          CASE WHEN source = 'BOTH' THEN 0 ELSE 1 END,
+          name ASC
+        """
+    )
+    fun getPickablePlaylists(): Flow<List<PlaylistEntity>>
 
     /** Soft-delete a single track from a playlist. */
     @Query("UPDATE playlist_tracks SET removed_at = CURRENT_TIMESTAMP WHERE playlist_id = :playlistId AND track_id = :trackId AND removed_at IS NULL")

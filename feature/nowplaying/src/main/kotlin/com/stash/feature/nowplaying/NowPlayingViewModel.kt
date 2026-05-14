@@ -127,11 +127,15 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     /**
-     * Observes user-created playlists and maps them to lightweight
-     * [PlaylistInfo] models for the "Save to Playlist" bottom sheet.
+     * Observes the "Save to Playlist" picker destination list — custom
+     * playlists AND imported Spotify / YT Music playlists.
+     * v0.9.23 (issue #42): manual addition of Stash-downloaded tracks
+     * to imported playlists is now supported. The new locally_added
+     * flag on the cross-ref makes the addition survive REFRESH-mode
+     * re-sync of the underlying Spotify / YT Music playlist.
      */
     private fun observeUserPlaylists() {
-        musicRepository.getUserCreatedPlaylists()
+        musicRepository.getPickablePlaylists()
             .onEach { playlists ->
                 _uiState.update { current ->
                     current.copy(
