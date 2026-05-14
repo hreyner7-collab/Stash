@@ -368,7 +368,30 @@ class PlaylistFetchWorker @AssistedInject constructor(
         // Fetch user-created/saved playlists from the Spotify library.
         var userPlaylistCount = 0
         try {
-            val userPlaylists = spotifyApiClient.getUserPlaylists(limit = 50)
+            // v0.9.21: paginate libraryV3 instead of a single 50-item fetch.
+            // The previous single-call path silently capped users at ≤50
+            // playlists (often <50 since the parser drops non-Playlist
+            // library "feature" rows like LIKED_SONGS / YOUR_EPISODES on
+            // page 1). Issue #49: user with hundreds of playlists saw only
+            // 46. Loop bound is a 2000-playlist safety cap — at that scale
+            // the user likely has bigger problems than missing playlists.
+            val userPlaylists = mutableListOf<com.stash.data.spotify.model.SpotifyPlaylistItem>()
+            val pageSize = 50
+            val pageCap = 40
+            var offset = 0
+            var pagesFetched = 0
+            while (pagesFetched < pageCap) {
+                val page = spotifyApiClient.getUserPlaylists(limit = pageSize, offset = offset)
+                pagesFetched++
+                if (page.isEmpty()) break
+                userPlaylists += page
+                if (page.size < pageSize) break // last page short of limit
+                offset += pageSize
+            }
+            Log.i(
+                TAG,
+                "fetchSpotifyPlaylists: paged ${userPlaylists.size} playlists across $pagesFetched page(s)",
+            )
             // Filter out daily mixes (already handled above) and any Spotify-owned playlists
             val customPlaylists = userPlaylists.filter { playlist ->
                 !playlist.owner.id.equals("spotify", ignoreCase = true) &&
@@ -386,7 +409,9 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             playlistName = playlist.name,
                             playlistType = PlaylistType.CUSTOM,
                             trackCount = playlist.tracks?.total ?: 0,
-                            artUrl = playlist.images?.firstOrNull()?.url,
+                            artUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+                                playlist.images?.firstOrNull()?.url,
+                            ),
                         )
                     )
 
@@ -707,7 +732,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             playlistName = playlist.title,
                             playlistType = PlaylistType.CUSTOM,
                             trackCount = trackedPaged.tracks.size,
-                            artUrl = playlist.thumbnailUrl,
+                            artUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(playlist.thumbnailUrl),
                             partial = trackedPaged.partial,
                             expectedCount = trackedPaged.expectedCount,
                         )

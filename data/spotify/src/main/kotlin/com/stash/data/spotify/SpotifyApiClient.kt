@@ -568,13 +568,22 @@ class SpotifyApiClient @Inject constructor(
                 hash = SpotifyAuthConfig.HASH_FETCH_PLAYLIST,
             ) ?: break
 
-            val tracks = parsePlaylistTracksGraphQLResponse(responseJson)
-            Log.d(TAG, "tryGetPlaylistTracksViaGraphQL: offset=$currentOffset, got ${tracks.size} tracks")
+            val page = parsePlaylistTracksGraphQLResponse(responseJson)
+            Log.d(
+                TAG,
+                "tryGetPlaylistTracksViaGraphQL: offset=$currentOffset, " +
+                    "parsed=${page.tracks.size}/raw=${page.rawItemCount} tracks",
+            )
 
-            if (tracks.isEmpty()) break
-            allTracks.addAll(tracks)
+            allTracks.addAll(page.tracks)
 
-            if (tracks.size < pageSize) break
+            // Terminate on raw item count, NOT parsed count. A page with
+            // any filtered item (local tracks, podcast episodes, region-
+            // blocked URIs) has parsed.size < pageSize even when Spotify
+            // has more pages to give us. Using rawItemCount catches the
+            // true "last page" condition. 2026-05-13: this is the fix
+            // for users whose private playlists capped at ~99 tracks.
+            if (page.rawItemCount < pageSize) break
             currentOffset += pageSize
         }
 
@@ -873,9 +882,17 @@ class SpotifyApiClient @Inject constructor(
     }
 
     /**
-     * Parses the `fetchPlaylist` GraphQL response into [SpotifyTrackItem] objects.
+     * Parses the `fetchPlaylist` GraphQL response into [SpotifyTrackItem]s.
+     *
+     * Returns a [PlaylistTracksPage]: the parsed tracks (post-filter) AND
+     * the raw item count from Spotify (pre-filter). Callers MUST use
+     * `rawItemCount` — not `tracks.size` — as the page-end signal, otherwise
+     * any per-page filtered item (local tracks, podcast episodes, region-
+     * blocked URIs) prematurely terminates pagination. Issue: a user with
+     * 850 tracks saw 99 because one item on page 1 got filtered and
+     * `tracks.size (99) < pageSize (100)` broke the loop early.
      */
-    private fun parsePlaylistTracksGraphQLResponse(responseJson: JsonObject): List<SpotifyTrackItem> {
+    private fun parsePlaylistTracksGraphQLResponse(responseJson: JsonObject): PlaylistTracksPage {
         return try {
             val items = responseJson["data"]
                 ?.jsonObject?.get("playlistV2")
@@ -887,10 +904,11 @@ class SpotifyApiClient @Inject constructor(
                 Log.w(TAG, "parsePlaylistTracksGraphQLResponse: could not find data.playlistV2.content.items")
                 val dataKeys = responseJson["data"]?.jsonObject?.keys
                 Log.d(TAG, "parsePlaylistTracksGraphQLResponse: data keys: $dataKeys")
-                return emptyList()
+                return PlaylistTracksPage(emptyList(), 0)
             }
 
-            Log.d(TAG, "parsePlaylistTracksGraphQLResponse: found ${items.size} items")
+            val rawItemCount = items.size
+            Log.d(TAG, "parsePlaylistTracksGraphQLResponse: found $rawItemCount items")
 
             items.mapNotNull { element ->
                 try {
@@ -975,14 +993,30 @@ class SpotifyApiClient @Inject constructor(
                     Log.w(TAG, "parsePlaylistTracksGraphQLResponse: failed to parse track item", e)
                     null
                 }
-            }.also { tracks ->
-                Log.d(TAG, "parsePlaylistTracksGraphQLResponse: parsed ${tracks.size} tracks")
+            }.let { parsed ->
+                Log.d(
+                    TAG,
+                    "parsePlaylistTracksGraphQLResponse: parsed ${parsed.size}/$rawItemCount tracks",
+                )
+                PlaylistTracksPage(parsed, rawItemCount)
             }
         } catch (e: Exception) {
             Log.e(TAG, "parsePlaylistTracksGraphQLResponse: failed to parse response", e)
-            emptyList()
+            PlaylistTracksPage(emptyList(), 0)
         }
     }
+
+    /**
+     * Single GraphQL pagination page: the tracks that parsed plus the
+     * raw item count returned by Spotify. The raw count is the only
+     * reliable signal for "is this the last page?" — using
+     * `tracks.size < pageSize` mis-fires whenever an item gets filtered
+     * by the parser (local tracks, podcast episodes, non-Track URIs).
+     */
+    private data class PlaylistTracksPage(
+        val tracks: List<SpotifyTrackItem>,
+        val rawItemCount: Int,
+    )
 
     /**
      * Parses the `fetchLibraryTracks` GraphQL response into [SpotifyTrackItem] objects.
