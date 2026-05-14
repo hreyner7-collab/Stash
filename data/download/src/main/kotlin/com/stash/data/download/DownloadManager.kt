@@ -129,38 +129,50 @@ class DownloadManager @Inject constructor(
     private suspend fun executeDownload(track: Track, preResolvedUrl: String?): TrackDownloadResult {
         emitProgress(track.id, 0f, DownloadStatus.MATCHING)
 
-        // Step 0: Lossless source attempt. Skipped when a preResolvedUrl
-        // is supplied (caller already chose a specific YouTube id).
-        // Otherwise we attempt lossless when EITHER:
-        //   - the global lossless toggle is on, OR
-        //   - this track belongs to a Stash Mix (locally-curated
-        //     rotating playlist). Mix tracks are the small, curated
-        //     surface where bandwidth/storage cost is worth eating
-        //     even if the user hasn't opted into lossless globally —
-        //     they'll get FLAC for the ~30 mix tracks and yt-dlp for
-        //     the rest of their library.
-        // On success we short-circuit the YouTube pipeline and return
-        // a finalised path. On any failure we fall through to the
-        // YouTube path — same behaviour as before this feature shipped.
-        if (preResolvedUrl == null) {
-            val forceLossless = isStashMixTrack(track.id)
-            if (forceLossless || losslessPrefs.enabledNow()) {
-                val losslessResult = tryLosslessDownload(track, forced = forceLossless)
-                if (losslessResult != null) return losslessResult
-                // v0.9.17 strict-FLAC: when lossless returned null AND
-                // fallback is off, defer instead of falling through to
-                // yt-dlp. Stash-mix tracks (forceLossless=true) are
-                // exempt — they're a small curated rotating playlist
-                // and would silently empty if stuck in deferral, so
-                // they keep the legacy "fall back to yt-dlp on failure"
-                // semantics regardless of the global toggle.
-                if (!forceLossless && !losslessPrefs.youtubeFallbackEnabledNow()) {
-                    Log.i(
-                        TAG,
-                        "deferring '${track.artist} - ${track.title}': lossless unavailable, fallback off",
-                    )
-                    return TrackDownloadResult.Deferred
-                }
+        // Step 0: Lossless source attempt. Attempted whenever lossless
+        // is enabled (or the track belongs to a Stash Mix), regardless
+        // of whether the caller supplied a preResolvedUrl. Stash Mix
+        // tracks are a small curated surface where lossless is worth
+        // eating bandwidth even when the user hasn't opted in globally.
+        //
+        // Historical note: this block used to be wrapped in
+        // `if (preResolvedUrl == null)`, which meant YT-Music synced
+        // tracks (which always arrive with their video URL preset by
+        // DiffWorker) silently bypassed lossless and downloaded as
+        // 128kbps m4a. Spotify tracks happened to work because Spotify
+        // doesn't expose YouTube ids, so their preResolvedUrl was null.
+        // Lifting the guard means "Find in Lossless" semantics now
+        // apply to the initial sync path too — see 2026-05-12.
+        //
+        // On success we short-circuit the YouTube pipeline. On null /
+        // failure we fall through to the YouTube path (or defer when
+        // fallback is off, per v0.9.17 strict-FLAC).
+        val forceLossless = isStashMixTrack(track.id)
+        if (forceLossless || losslessPrefs.enabledNow()) {
+            val losslessResult = tryLosslessDownload(track, forced = forceLossless)
+            if (losslessResult != null) return losslessResult
+            // v0.9.17 strict-FLAC: when lossless returned null AND
+            // fallback is off, defer instead of falling through to
+            // yt-dlp. Two exemptions:
+            //  - Stash-mix tracks (forceLossless=true) — small curated
+            //    rotating playlist would silently empty if stuck in
+            //    deferral, so they keep legacy fall-through semantics.
+            //  - Tracks with a preResolvedUrl already set (YT-Music
+            //    direct sync, lossless-upgrade callers, etc.) — the
+            //    caller already opted into YouTube as the source; the
+            //    fallback toggle was designed for Spotify tracks with
+            //    no source-of-truth audio, not for "I synced a YT
+            //    playlist." Without this carve-out, an entire YT-Music
+            //    playlist defers en-masse the first time lossless can't
+            //    match (2026-05-12).
+            if (preResolvedUrl == null && !forceLossless &&
+                !losslessPrefs.youtubeFallbackEnabledNow()
+            ) {
+                Log.i(
+                    TAG,
+                    "deferring '${track.artist} - ${track.title}': lossless unavailable, fallback off",
+                )
+                return TrackDownloadResult.Deferred
             }
         }
 
