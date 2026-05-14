@@ -114,7 +114,7 @@ UI layer (additions to existing files):
 
 ### Files modified
 
-- `core/media/.../equalizer/StashRenderersFactory.kt` — append the two new processors to the processor array.
+- `core/media/.../equalizer/StashRenderersFactory.kt` — append the two new processors to the processor array, gated by a build-time constant `enableLoudness` (default `true`) that lets a hotfix drop both processors from the chain without a code edit (see §Rollout & Risk).
 - `data/download/.../shared/TrackFinalizer.kt` — invoke `LoudnessMeasurer.measure()` after final file is in place.
 - `app/.../StashApplication.kt` — enqueue `LoudnessBackfillWorker` periodic work at startup, alongside existing workers.
 - `core/data/.../db/StashDatabase.kt` — bump version, add `MIGRATION_X_Y`.
@@ -129,9 +129,9 @@ Three nullable columns added to the `track` table:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `loudness_lufs` | `REAL` (nullable) | Integrated LUFS from BS.1770 measurement. `NULL` = not measured. Sentinel `NaN` = "tried, gave up" (corrupt file). |
+| `loudness_lufs` | `REAL` (nullable) | Integrated LUFS from BS.1770 measurement. `NULL` = not measured (pick up in backfill). `Float.NaN` = sentinel for "measurement attempted, failed" (corrupt file). |
 | `true_peak_dbfs` | `REAL` (nullable) | Sample-peak in dBFS (negative number). Used by `computeGain` to prevent clip. |
-| `loudness_measured_at` | `INTEGER` (nullable) | Epoch ms timestamp of the measurement. Lets us identify stale measurements if the algorithm ever changes. |
+| `loudness_measured_at` | `INTEGER` (nullable) | Epoch ms timestamp of the measurement (or failed-attempt timestamp). Lets the worker query for stale measurements if the algorithm ever changes; lets a weekly-resurrection query identify NaN sentinels older than a week. |
 
 ```kotlin
 val MIGRATION_X_Y = object : Migration(X, Y) {
@@ -143,7 +143,20 @@ val MIGRATION_X_Y = object : Migration(X, Y) {
 }
 ```
 
-All three additive — existing rows survive untouched and naturally enter the backfill queue.
+**Plan-time resolution:** `X` and `Y` are placeholders. The implementation plan must read the current `StashDatabase.version` from `core/data/.../db/StashDatabase.kt` and set `Y = X + 1`. There may be other pending migrations in flight — the planner verifies first.
+
+**Sentinel encoding:** `Float.NaN` for "measurement attempted, failed." SQLite `REAL` round-trips NaN cleanly, and Kotlin's `Float.isNaN()` is the unambiguous predicate. The DAO query becomes:
+```sql
+-- tracksNeedingLoudness: rows where we haven't measured yet (NULL) only.
+SELECT * FROM track WHERE loudness_measured_at IS NULL LIMIT :limit
+
+-- weekly resurrection: NaN sentinels older than 7 days.
+SELECT * FROM track WHERE loudness_lufs = 0/0
+    AND loudness_measured_at < :sevenDaysAgo LIMIT :limit
+```
+(SQLite expresses NaN as `0/0`. If that's awkward in Room, use `WHERE typeof(loudness_lufs) = 'real' AND loudness_lufs != loudness_lufs` — NaN is the only float that isn't equal to itself.)
+
+All three columns additive — existing rows survive untouched and naturally enter the backfill queue.
 
 **No `album_gain` column.** Album gain is derived at playback time from per-track LUFS values inside the album, weighted by track duration. Avoids a separate measurement pass and a separate column.
 
@@ -161,6 +174,8 @@ data class LoudnessState(
 The processor reads `currentTrackGainDb` per buffer; the controller updates it in-place during the 10–20 ms ramp at track transitions.
 
 ### Gain computation
+
+Top-level pure function in `LoudnessState.kt` (alongside the state class — no class wrapping needed). Called by `LoudnessController` on each `Player.Listener.onMediaItemTransition`.
 
 ```kotlin
 fun computeGain(
@@ -342,6 +357,8 @@ FFmpeg's `ebur128` filter summary is plain text, deterministic format:
 
 ### `LoudnessMeasurer` interface
 
+`FFmpegBridge` is a **new** thin adapter (one new file: `core/data/.../audio/FFmpegBridge.kt`) wrapping `com.yausername.ffmpeg.FFmpeg`. It exposes a single `suspend fun runWithStderrCapture(args: List<String>): String` so we can unit-test the parser against canned stderr without spawning a real ffmpeg process. No new dependency — just a thin Kotlin wrapper around an existing one.
+
 ```kotlin
 @Singleton
 class LoudnessMeasurer @Inject constructor(
@@ -396,6 +413,7 @@ class LoudnessBackfillWorker @AssistedInject constructor(
         val batch = trackDao.tracksNeedingLoudness(limit = 20)
         if (batch.isEmpty()) return Result.success(workDataOf(KEY_DONE to true))
 
+        var batchCompleted = 0
         for (track in batch) {
             if (isStopped || budget.expired) break
             val file = File(track.localPath).takeIf { it.exists() } ?: continue
@@ -403,8 +421,11 @@ class LoudnessBackfillWorker @AssistedInject constructor(
                 is Success -> trackDao.updateLoudness(track.id, r.lufs, r.truePeakDbfs, now())
                 is Failed -> trackDao.markLoudnessFailed(track.id, now())
             }
-            progressStore.increment()
+            batchCompleted++
         }
+        // One DataStore write per worker run, not per track — keeps IPC cost negligible
+        // and matches the "numbers update once per worker run" UI promise.
+        progressStore.recordBatchComplete(completed = batchCompleted, at = now())
         return Result.success()
     }
 }
