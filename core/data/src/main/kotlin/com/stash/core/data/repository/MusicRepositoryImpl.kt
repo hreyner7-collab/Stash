@@ -356,6 +356,10 @@ class MusicRepositoryImpl @Inject constructor(
                 playlistId = playlistId,
                 trackId = trackId,
                 position = position,
+                // v0.9.23: mark as user-added so REFRESH-mode sync of
+                // imported Spotify / YT Music playlists doesn't wipe it.
+                // See issue #42.
+                locallyAdded = true,
             )
         )
         val count = trackDao.getByPlaylist(playlistId).first().size
@@ -389,6 +393,9 @@ class MusicRepositoryImpl @Inject constructor(
 
     override fun getUserCreatedPlaylists(): Flow<List<com.stash.core.model.Playlist>> =
         playlistDao.getUserCreatedPlaylists().map { entities -> entities.map { it.toDomain() } }
+
+    override fun getPickablePlaylists(): Flow<List<com.stash.core.model.Playlist>> =
+        playlistDao.getPickablePlaylists().map { entities -> entities.map { it.toDomain() } }
 
     // ── Unmatched tracks ────────────────────────────────────────────────
 

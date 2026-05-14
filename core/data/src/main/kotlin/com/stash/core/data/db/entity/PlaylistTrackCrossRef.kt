@@ -47,4 +47,15 @@ data class PlaylistTrackCrossRef(
 
     @ColumnInfo(name = "removed_at")
     val removedAt: Instant? = null,
+
+    /**
+     * True when this membership was added by the user from within Stash
+     * (e.g. "Save to Playlist" on a downloaded track), false when added
+     * by a sync run from Spotify or YouTube Music. Drives REFRESH-mode
+     * survival: [com.stash.core.data.db.dao.PlaylistDao.clearSyncedPlaylistTracks]
+     * deletes only sync-added rows so user-added tracks persist across
+     * re-syncs. See issue #42.
+     */
+    @ColumnInfo(name = "locally_added", defaultValue = "0")
+    val locallyAdded: Boolean = false,
 )
