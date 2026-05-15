@@ -55,8 +55,13 @@ import javax.inject.Singleton
 @Singleton
 class LoudnessMeasurer @Inject constructor(
     private val bridge: FFmpegBridge,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    // NOT a constructor parameter — Hilt doesn't honour Kotlin default values,
+    // so injecting CoroutineDispatcher would require a project-wide @Qualifier
+    // binding the codebase doesn't currently have. Keep the dispatcher as a
+    // private property so production always uses Dispatchers.IO; tests that
+    // need a different dispatcher can construct via a future overload.
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO
     private val mutex = Mutex()
 
     /**
