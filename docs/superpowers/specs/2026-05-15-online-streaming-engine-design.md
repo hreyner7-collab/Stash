@@ -35,6 +35,7 @@ These are out of scope for the v1 streaming engine. Most are deferred to later r
 - **Spotify Connect equivalent** / cast-to-other-device.
 - **Online-only playlists from Monochrome itself** (e.g., Tidal-curated mixes). Stream-only access to the user's own synced library is the scope.
 - **YouTube fallback for streaming.** Download via YT remains as today; streaming via YT does not. YouTube's anti-bot measures plus mid-stream URL signing make it unreliable for streaming.
+- **YouTube recovery for unavailable tracks.** When Monochrome lacks a track, the row stays greyed-out and uninteractable. No "Search YouTube to download…" affordance in v1 — that opens a match-confidence design problem (wrong-song risk vs UI surface) that's worth doing properly in its own follow-up rather than shipping a rough cut.
 - **Stash Mixes via streaming.** Daily Discover / Deep Cuts / First Listen stay download-based for v1.
 - **Album / artist drill-in via Monochrome catalog** ("show me all this artist's albums on Tidal"). Limit Online mode to the user's own synced library + downloads for v1.
 - **First-toggle tooltip / onboarding card.** Polish; pickable for v1 follow-up.
@@ -226,7 +227,7 @@ The `StreamingPreference.enabled = true` state requires an active entitlement. F
 - **DAO query audits** — every "library content" query gets a `includeStreamable: Boolean` parameter. Callers pass `streamingPreference.enabled.first()`.
 - **`HomeScreen`** — add `StreamingModeToggle` row above the existing "Recently played" section.
 - **Library track rows** — small download arrow on downloaded rows (existing visual treatment, keep); greyed-out style for unavailable streamable rows.
-- **Long-press track menu** — add "Download for offline" (when row is streamable-only) / "Remove download" (when row is downloaded) / "Search YouTube to download…" (when row is unavailable).
+- **Long-press track menu** — add "Download for offline" (when row is streamable-only) / "Remove download" (when row is downloaded). Unavailable rows show no streaming-specific menu items in v1.
 - **Search results** — in Online mode, the tap action is "stream now," with "Download" demoted to a long-press option. In Offline mode, current behavior unchanged.
 - **`NowPlayingScreen`** — small wifi-icon prefix on the existing quality text when playing a streamed source.
 - **`StashApplication.onCreate`** — enqueue `AvailabilityCheckWorker` for every downloaded-zero, never-checked row at first launch after the v25→v26 migration.
@@ -380,7 +381,7 @@ When `Player.Listener.onPositionDiscontinuity` fires AND the current track is >6
 Track with `is_streamable = 0 AND is_streamable_checked_at IS NOT NULL`:
 
 - **Library row**: renders greyed-out at 50% opacity. No tap action.
-- **Long-press menu**: shows "Search YouTube to download…" — opens the Search tab with the artist + title prefilled. User picks a match (existing flow) and downloads. After download, the row becomes downloaded and plays normally.
+- **Long-press menu**: no streaming-specific action. The row behaves the same as today's unplayable rows. Recovering an unavailable track via YouTube (one-tap or pre-filled search) is deferred — see Non-goals.
 
 ### Subscription-lapsed transition (interface for Subproject B)
 
