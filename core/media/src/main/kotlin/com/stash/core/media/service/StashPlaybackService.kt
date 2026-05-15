@@ -21,6 +21,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.social.stash.StashLikedPlaylistRepository
 import com.stash.core.media.R
 import com.stash.core.media.equalizer.EqController
+import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +49,7 @@ import javax.inject.Inject
 class StashPlaybackService : MediaSessionService() {
 
     @Inject lateinit var eqController: EqController
+    @Inject lateinit var loudnessController: LoudnessController
     @Inject lateinit var trackDao: TrackDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
 
@@ -101,7 +103,7 @@ class StashPlaybackService : MediaSessionService() {
             .build()
 
         val player = ExoPlayer.Builder(this)
-            .setRenderersFactory(StashRenderersFactory(this, eqController))
+            .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
