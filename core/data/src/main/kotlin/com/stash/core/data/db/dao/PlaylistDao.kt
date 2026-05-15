@@ -417,12 +417,19 @@ interface PlaylistDao {
      * (Stash Mix recipes, Downloads Mix, daily mixes/liked songs).
      * LIKED_SONGS is intentionally not pickable here — Like is a
      * separate first-class action.
+     *
+     * v0.9.25 fix — only imported playlists with sync turned ON are
+     * pickable. Sync-disabled imports won't be re-downloaded after a
+     * refresh; surfacing them in the picker is misleading. Stash-native
+     * CUSTOM playlists (source = 'BOTH') pass unconditionally because
+     * sync_enabled is moot for user-created surfaces.
      */
     @Query(
         """
         SELECT * FROM playlists
         WHERE is_active = 1
           AND type IN ('CUSTOM')
+          AND (source = 'BOTH' OR sync_enabled = 1)
         ORDER BY
           CASE WHEN source = 'BOTH' THEN 0 ELSE 1 END,
           name ASC
