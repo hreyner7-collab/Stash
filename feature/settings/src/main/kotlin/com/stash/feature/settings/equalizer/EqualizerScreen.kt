@@ -22,8 +22,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -164,6 +166,46 @@ fun EqualizerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.widthIn(min = 52.dp),
                         textAlign = TextAlign.End,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ── Loudness Normalization card ────────────────────────────────────
+        // NOTE: this card is intentionally NOT alpha-dimmed by `state.enabled`
+        // — loudness operates independently from the EQ master toggle.
+        val loudnessState by viewModel.loudnessUiState.collectAsStateWithLifecycle()
+        GlassCard {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionLabel("Loudness Normalization")
+                    Spacer(Modifier.weight(1f))
+                    Switch(
+                        checked = loudnessState.enabled,
+                        onCheckedChange = viewModel::onLoudnessToggle,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.primary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Plays every track at a consistent volume.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (loudnessState.backfillRemaining > 0) {
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                    Spacer(Modifier.height(10.dp))
+                    LoudnessBackfillBlock(
+                        remaining = loudnessState.backfillRemaining,
+                        total = loudnessState.backfillTotal,
                     )
                 }
             }
@@ -487,6 +529,40 @@ private fun SectionLabel(text: String) {
         ),
         color = MaterialTheme.colorScheme.primary,
     )
+}
+
+/**
+ * Progress block shown inside the Loudness card while the backfill worker is
+ * still measuring un-analysed tracks. Renders an "X of Y tracks" headline, a
+ * [LinearProgressIndicator], and a subtitle explaining when the work runs.
+ */
+@Composable
+private fun LoudnessBackfillBlock(
+    remaining: Int,
+    total: Int,
+) {
+    val done = (total - remaining).coerceAtLeast(0)
+    val progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "$done of $total tracks",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Continues automatically while charging.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**
