@@ -164,7 +164,11 @@ Every existing query that returns "the user's library" filters `WHERE is_downloa
 1. **Two query variants per DAO method** — `getAllAlbumsDownloaded` / `getAllAlbumsStreaming` etc. Simple but doubles the surface area.
 2. **One query parameterised on a mode flag** — pass `includeStreamable: Boolean` to each method. Easier to evolve.
 
-The implementation plan picks one (recommendation: pattern 2, single parameterised query) and applies it consistently. Methods to audit and update:
+The implementation plan picks one (recommendation: pattern 2, single parameterised query) and applies it consistently.
+
+**Where is `includeStreamable` read from?** The `StreamingPreference.enabled` flow is read once at the ViewModel / Repository layer (whichever owns the screen's state) and threaded down to the DAO call as a Boolean. DAOs are pure — they don't read preferences. ViewModels and repository methods that already accept other state arguments accept this one too. This keeps preference access centralized at the state-owner layer and avoids ad-hoc preference reads scattered across the data tier.
+
+Methods to audit and update:
 
 - `getAllAlbums`
 - `getAllArtists`
@@ -172,7 +176,7 @@ The implementation plan picks one (recommendation: pattern 2, single parameteris
 - `getByPlaylist`
 - `getTotalCount`
 - `searchTracks` (FTS)
-- Library-Health-related queries (the format/quality buckets only count downloaded tracks — keep them downloaded-only)
+- Library-Health-related queries (the format/quality buckets only count downloaded tracks — keep them downloaded-only). The Health tab's "X tracks" total likewise stays as "X downloaded" regardless of mode — that screen is about on-disk audit, not library size.
 - Playlist visibility (`getAllVisible`) — already filters by `is_active`; needs to also include streamable when mode is on
 
 ## Preferences
@@ -210,7 +214,7 @@ The `StreamingPreference.enabled = true` state requires an active entitlement. F
 | `core/media/.../streaming/StreamUrlCache.kt` | In-memory `Map<Long, CachedStreamUrl(url, expiresAt)>` with TTL eviction |
 | `core/media/.../streaming/MonochromeStreamResolver.kt` | Reuses the existing `MonochromeSource` to fetch a stream URL + TTL for a given track |
 | `core/media/.../streaming/RefreshingDataSourceFactory.kt` | Media3 `DataSource.Factory` that catches 403/410 and re-resolves transparently |
-| `core/media/.../streaming/StreamCache.kt` | Hilt-bound `SimpleCache` instance (500 MB LRU) for streamed bytes |
+| `core/media/.../streaming/StreamCache.kt` | Hilt-bound `SimpleCache` instance (500 MB LRU) for streamed bytes. Additive to the existing `PreviewCache` — separate disk directory, separate eviction. Combined ceiling on disk: existing PreviewCache size + 500 MB. |
 | `core/data/.../sync/workers/AvailabilityCheckWorker.kt` | Per-track Monochrome availability probe; writes `is_streamable` |
 | `feature/home/.../StreamingModeToggle.kt` | Compose composable for the top-of-Home switch |
 | `feature/home/.../StreamingModePrompt.kt` | Compose dialog for the mode-transition prompts (delete-downloads / download-everything) |
@@ -280,7 +284,7 @@ The user sees the library populate immediately with metadata + art (via existing
 
 ### Availability check
 
-`AvailabilityCheckWorker` runs continuously while there are rows with `is_streamable_checked_at IS NULL`. It:
+`AvailabilityCheckWorker` is a `CoroutineWorker` that drains rows with `is_streamable_checked_at IS NULL`. It:
 
 1. Pulls a batch of 50 such rows.
 2. For each, calls `MonochromeSource.resolve(TrackQuery(...))` via the existing rate-limited path.
@@ -288,6 +292,8 @@ The user sees the library populate immediately with metadata + art (via existing
 4. Throttled to 1 request per second (Monochrome respects).
 5. Backs off (60s) on `429 / circuit_open`.
 6. **Does NOT cache the resolved URL** — it would expire before the user taps. The worker only writes a Boolean.
+
+**Lifecycle.** The worker is a `OneTimeWorkRequest`-based `CoroutineWorker` (not periodic). When it finishes a batch, if more `IS NULL` rows remain, it re-enqueues itself via `WorkManager.enqueueUniqueWork(REPLACE)` so progress survives WorkManager's 10-minute soft cap. `DiffWorker` enqueues a fresh `AvailabilityCheckWorker` at the end of each sync that produced new metadata rows. A separate periodic worker re-checks rows older than `RECHECK_AGE_MS = 30 days` to catch operator delistings / catalog additions.
 
 A monthly periodic worker re-checks rows older than 30 days to catch operator delistings / catalog additions.
 
@@ -362,6 +368,8 @@ class RefreshingDataSource(
 ```
 
 The re-open happens at the same byte offset (Range header carried over via `DataSpec.position`). User experiences a brief pause (the refresh round-trip), then playback resumes.
+
+The `runBlocking { resolver.resolve(...) }` call inside `open()` is intentional and safe: Media3 invokes `DataSource.open` on its own loader thread (never the main thread), so blocking inside is the correct pattern. The synchronous bridge avoids exposing a suspending API across Media3's DataSource interface.
 
 ### Pre-fetch next queue item
 
