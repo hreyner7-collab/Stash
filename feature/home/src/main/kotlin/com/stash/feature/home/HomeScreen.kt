@@ -109,6 +109,7 @@ import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.theme.LocalIsDarkTheme
 import com.stash.feature.home.streaming.StreamingModeToggle
+import kotlinx.coroutines.launch
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
@@ -132,6 +133,18 @@ fun HomeScreen(
     // kill-switch (`StashConstants.STREAMING_ENGINE_ENABLED`) is off, so
     // observing this flow is essentially free until the engine ships.
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
+
+    // Streaming-toggle prompt state. The user's tap on the
+    // StreamingModeToggle sets this to Off→On or On→Off; the
+    // matching StreamingModePrompt then renders over the Home
+    // content with real counts/bytes fetched on demand. The
+    // dialog's button taps clear the state and call the
+    // confirmed-toggle handler with the appropriate side-effect
+    // flags. See StreamingModePrompt.kt for dialog contracts.
+    var pendingToggle by remember {
+        mutableStateOf<com.stash.feature.home.streaming.PendingStreamingToggle?>(null)
+    }
+    val toggleScope = androidx.compose.runtime.rememberCoroutineScope()
 
     // Playlist selected for the context-menu bottom sheet (shared across daily mixes + grid).
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
@@ -393,7 +406,25 @@ fun HomeScreen(
         item {
             StreamingModeToggle(
                 enabled = streamingEnabled,
-                onToggle = viewModel::onStreamingToggle,
+                onToggle = { requested ->
+                    // Intercept the toggle so the confirmation prompt
+                    // renders before any side-effects fire. The dialog
+                    // routes button taps through onStreamingToggleConfirmed.
+                    toggleScope.launch {
+                        val data = viewModel.fetchStreamingTogglePromptData()
+                        pendingToggle =
+                            if (requested) {
+                                com.stash.feature.home.streaming.PendingStreamingToggle.OffToOn(
+                                    downloadedCount = data.downloadedCount,
+                                    downloadedBytes = data.downloadedBytes,
+                                )
+                            } else {
+                                com.stash.feature.home.streaming.PendingStreamingToggle.OnToOff(
+                                    streamableCount = data.streamableCount,
+                                )
+                            }
+                    }
+                },
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
@@ -527,6 +558,62 @@ fun HomeScreen(
             },
             onDismiss = { showCreateDialog = false },
         )
+    }
+
+    // ── Streaming-mode confirmation prompt ───────────────────────────────
+    // Rendered above the rest of the Home content when `pendingToggle` is
+    // non-null. Each branch maps directly to one of the two
+    // applyStreamingMode side-effect paths; see StreamingModePrompt.kt
+    // for the dialog contracts.
+    when (val pending = pendingToggle) {
+        is com.stash.feature.home.streaming.PendingStreamingToggle.OffToOn -> {
+            com.stash.feature.home.streaming.KeepOrReleaseDownloadsPrompt(
+                downloadedCount = pending.downloadedCount,
+                downloadedBytes = pending.downloadedBytes,
+                onKeep = {
+                    pendingToggle = null
+                    viewModel.onStreamingToggleConfirmed(
+                        enabled = true,
+                        releaseDownloads = false,
+                        downloadAllStreamable = false,
+                    )
+                },
+                onRelease = {
+                    pendingToggle = null
+                    viewModel.onStreamingToggleConfirmed(
+                        enabled = true,
+                        releaseDownloads = true,
+                        downloadAllStreamable = false,
+                    )
+                },
+                onDismiss = { pendingToggle = null },
+            )
+        }
+        is com.stash.feature.home.streaming.PendingStreamingToggle.OnToOff -> {
+            com.stash.feature.home.streaming.DownloadOrStartFreshPrompt(
+                streamableCount = pending.streamableCount,
+                estimatedBytes = pending.streamableCount *
+                    com.stash.feature.home.streaming.ESTIMATED_FLAC_BYTES_PER_TRACK,
+                onDownload = {
+                    pendingToggle = null
+                    viewModel.onStreamingToggleConfirmed(
+                        enabled = false,
+                        releaseDownloads = false,
+                        downloadAllStreamable = true,
+                    )
+                },
+                onStartFresh = {
+                    pendingToggle = null
+                    viewModel.onStreamingToggleConfirmed(
+                        enabled = false,
+                        releaseDownloads = false,
+                        downloadAllStreamable = false,
+                    )
+                },
+                onDismiss = { pendingToggle = null },
+            )
+        }
+        null -> Unit
     }
 
     // ── Playlist context-menu bottom sheet ──────────────────────────────

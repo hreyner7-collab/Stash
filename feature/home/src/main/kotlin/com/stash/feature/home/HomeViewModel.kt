@@ -9,6 +9,7 @@ import com.stash.core.auth.model.AuthState
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
+import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
@@ -89,6 +90,7 @@ class HomeViewModel @Inject constructor(
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
     private val recipeDao: StashMixRecipeDao,
     private val downloadQueueDao: DownloadQueueDao,
+    private val trackDao: TrackDao,
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
@@ -117,17 +119,70 @@ class HomeViewModel @Inject constructor(
         )
 
     /**
-     * Handler for the Home `StreamingModeToggle`. Delegates to
-     * [MusicRepository.applyStreamingMode] with the safe defaults
-     * (keep downloads, no bulk-download of streamables) — Task 17 will
-     * wrap this call in a confirmation sheet that lets the user opt
-     * into either of those follow-up actions. Until then a raw flip
-     * just persists the pref + schedules the availability workers
-     * (when enabling) or does nothing destructive (when disabling).
+     * Snapshot of the counts the Home `StreamingModePrompt` dialogs render.
+     * Read once when the user taps the toggle so the prompt can show real
+     * numbers ("Release 1247 tracks (38 GB)") instead of pre-loading
+     * everything reactively. Both fields are queried in parallel from
+     * Room — they don't depend on each other, and the toggle path is rare
+     * enough that the extra structured-concurrency overhead is negligible.
      */
-    fun onStreamingToggle(enabled: Boolean) {
+    data class StreamingTogglePromptData(
+        /** Downloaded-track count (for the Off→On prompt's "Release N" CTA). */
+        val downloadedCount: Int,
+        /** Downloaded-track total disk usage (Off→On prompt's "Y MB" hint). */
+        val downloadedBytes: Long,
+        /** Stream-only row count (On→Off prompt's "N stream-only tracks"). */
+        val streamableCount: Int,
+    )
+
+    /**
+     * Fetches the count snapshot used by the Home `StreamingModePrompt`
+     * dialogs. Called by [HomeScreen] when the user taps the toggle so the
+     * prompt can render real numbers. Reads both counts in parallel via
+     * `async` — they hit independent indices.
+     *
+     * Returns a single snapshot rather than a `StateFlow` because the
+     * prompt is a transient confirmation: by the time the user dismisses
+     * or confirms, any drift in the underlying counts no longer matters
+     * (the orchestrator inside [MusicRepository.applyStreamingMode]
+     * re-reads the live state when it runs).
+     */
+    suspend fun fetchStreamingTogglePromptData(): StreamingTogglePromptData {
+        val downloadedCount = trackDao.downloadedCount()
+        val downloadedBytes = trackDao.downloadedBytesTotal()
+        val streamableCount = trackDao.streamableOnlyCount()
+        return StreamingTogglePromptData(
+            downloadedCount = downloadedCount,
+            downloadedBytes = downloadedBytes,
+            streamableCount = streamableCount,
+        )
+    }
+
+    /**
+     * Confirmed-toggle handler for the Home `StreamingModeToggle`. Called
+     * by [HomeScreen] after the user resolves the [StreamingModePrompt]
+     * dialog (either branch — keep/release for Off→On, download/start-
+     * fresh for On→Off). Delegates straight to
+     * [MusicRepository.applyStreamingMode], which persists the master
+     * pref and fires whichever workers are needed.
+     *
+     * The prompt is rendered by the screen, not the ViewModel — see
+     * [HomeScreen]'s `pendingToggle` state. Until Task 16 the toggle
+     * called a single-arg `onStreamingToggle(enabled)`; Task 17 split
+     * that into this triple-arg signature so the side-effects map
+     * one-to-one with the dialog's button taps.
+     */
+    fun onStreamingToggleConfirmed(
+        enabled: Boolean,
+        releaseDownloads: Boolean,
+        downloadAllStreamable: Boolean,
+    ) {
         viewModelScope.launch {
-            musicRepository.applyStreamingMode(enabled = enabled)
+            musicRepository.applyStreamingMode(
+                enabled = enabled,
+                releaseDownloads = releaseDownloads,
+                downloadAllStreamable = downloadAllStreamable,
+            )
         }
     }
 

@@ -802,6 +802,26 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE is_downloaded = 0 AND is_streamable = 1")
     suspend fun streamableOnlyTracks(): List<TrackEntity>
 
+    /**
+     * One-shot count of rows that are stream-only — present in the catalog
+     * and confirmed streamable by [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
+     * but not yet downloaded. Drives the On→Off `StreamingModePrompt` dialog's
+     * "download all (~N MB)" estimate so we don't pay the cost of materializing
+     * the full [streamableOnlyTracks] list just to count it.
+     */
+    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 0 AND is_streamable = 1")
+    suspend fun streamableOnlyCount(): Int
+
+    /**
+     * One-shot sum of `file_size_bytes` across every downloaded row. Used by
+     * the Off→On `StreamingModePrompt` to tell the user how much space they'd
+     * reclaim by releasing local copies. Suspending counterpart to
+     * [getTotalStorageBytes] which is reactive — the prompt only needs a single
+     * read at toggle time, not a Flow.
+     */
+    @Query("SELECT COALESCE(SUM(file_size_bytes), 0) FROM tracks WHERE is_downloaded = 1")
+    suspend fun downloadedBytesTotal(): Long
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
