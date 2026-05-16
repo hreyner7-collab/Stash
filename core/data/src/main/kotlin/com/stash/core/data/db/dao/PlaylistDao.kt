@@ -124,6 +124,15 @@ interface PlaylistDao {
      * upstream Spotify/YouTube libraries flooded Home with mosaics
      * for playlists the user never opted into.
      */
+    /**
+     * v0.9.27 — the escape-hatch EXISTS clause now considers streamable
+     * tracks too when `includeStreamable = true`. Without this, a
+     * sync_enabled = 0 playlist whose tracks are all stream-only would
+     * disappear in Online mode even though the user can still play
+     * every track in it. The `sync_enabled = 1` arm and the unconditional
+     * `is_active = 1` arm are unchanged. Callers MUST pass the flag
+     * explicitly — see TrackDao.getByPlaylist for rationale.
+     */
     @Query("""
         SELECT p.* FROM playlists p
         WHERE p.is_active = 1
@@ -134,12 +143,12 @@ interface PlaylistDao {
                   JOIN tracks t ON pt.track_id = t.id
                   WHERE pt.playlist_id = p.id
                     AND pt.removed_at IS NULL
-                    AND t.is_downloaded = 1
+                    AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
               )
           )
         ORDER BY p.name ASC
     """)
-    fun getAllVisible(): Flow<List<PlaylistEntity>>
+    fun getAllVisible(includeStreamable: Boolean): Flow<List<PlaylistEntity>>
 
     /** All playlists from a specific music source. */
     @Query("SELECT * FROM playlists WHERE source = :source ORDER BY name ASC")

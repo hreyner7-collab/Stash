@@ -236,6 +236,15 @@ interface TrackDao {
     /**
      * All tracks belonging to a playlist, resolved through the
      * [playlist_tracks] join table. Only includes non-removed entries.
+     *
+     * v0.9.27 — `includeStreamable` widens the predicate to also surface
+     * stream-only tracks (`is_downloaded = 0 AND is_streamable = 1`) so
+     * Online streaming mode can render playlists whose tracks aren't on
+     * disk yet. Callers MUST pass the flag explicitly — Room's kapt
+     * processor doesn't reliably honour Kotlin default values on @Query.
+     * Checked-but-unavailable rows (checked_at != null AND is_streamable = 0)
+     * are always excluded; unchecked rows (checked_at IS NULL) are also
+     * excluded so they don't pop in/out as the worker drains.
      */
     @Query(
         """
@@ -249,12 +258,13 @@ interface TrackDao {
         WHERE pt.playlist_id = :playlistId
           AND pt.removed_at IS NULL
           AND bl.canonical_key IS NULL
+          AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC
         """
     )
-    fun getByPlaylist(playlistId: Long): Flow<List<TrackEntity>>
+    fun getByPlaylist(playlistId: Long, includeStreamable: Boolean): Flow<List<TrackEntity>>
 
     /** Most-recently-added downloaded tracks, limited to [limit] results. */
     /**
@@ -791,6 +801,11 @@ interface TrackDao {
      *
      * The query string supports SQLite FTS match syntax (e.g. prefix
      * searches with `*`).
+     *
+     * v0.9.27 — `includeStreamable` widens the predicate so Online
+     * streaming mode finds stream-only library rows too. The filter
+     * is applied to the `tracks` JOIN side; `tracks_fts` itself doesn't
+     * carry the columns.
      */
     @Query(
         """
@@ -802,9 +817,10 @@ interface TrackDao {
             OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = tracks.youtube_id)
         WHERE tracks_fts MATCH :query
           AND bl.canonical_key IS NULL
+          AND (tracks.is_downloaded = 1 OR (:includeStreamable AND tracks.is_streamable = 1))
         """
     )
-    fun search(query: String): Flow<List<TrackEntity>>
+    fun search(query: String, includeStreamable: Boolean): Flow<List<TrackEntity>>
 
     /**
      * Search only downloaded tracks by title, artist, or album using FTS4.
@@ -826,9 +842,22 @@ interface TrackDao {
 
     // ── Count / storage queries ─────────────────────────────────────────
 
-    /** Total number of downloaded tracks (reactive). */
-    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
-    fun getTotalCount(): Flow<Int>
+    /**
+     * Total number of library tracks (reactive).
+     *
+     * v0.9.27 — `includeStreamable = false` mirrors the legacy
+     * "downloaded only" count; `true` adds stream-only library rows
+     * so the Home/Library "X tracks" line agrees with the visible row
+     * count when Online streaming mode is on. Callers MUST pass the
+     * flag explicitly — see [getByPlaylist] for rationale.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM tracks
+        WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)
+        """
+    )
+    fun getTotalCount(includeStreamable: Boolean): Flow<Int>
 
     /** Total number of downloaded tracks (one-shot). */
     @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
@@ -884,6 +913,12 @@ interface TrackDao {
     /**
      * All distinct artists with their track count and total duration.
      * Ordered by artist name ascending.
+     *
+     * v0.9.27 — `includeStreamable` widens the row set to include
+     * stream-only library tracks so the Artists tab in Online mode
+     * mirrors the Albums tab. With `false` (default-pref behaviour),
+     * only `is_downloaded = 1` rows contribute. Callers MUST pass the
+     * flag explicitly — see [getByPlaylist] for rationale.
      */
     @Query(
         """
@@ -892,11 +927,12 @@ interface TrackDao {
                SUM(duration_ms) AS totalDurationMs,
                album_art_url AS artUrl
         FROM tracks
+        WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)
         GROUP BY artist
         ORDER BY COUNT(*) DESC, artist ASC
         """
     )
-    fun getAllArtists(): Flow<List<ArtistSummary>>
+    fun getAllArtists(includeStreamable: Boolean): Flow<List<ArtistSummary>>
 
     /**
      * All distinct albums with their primary artist, track count, and
@@ -935,11 +971,12 @@ interface TrackDao {
                MAX(t.album_art_url) AS artUrl
         FROM tracks t
         WHERE t.album != ''
+          AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
         GROUP BY t.album, t.album_artist
         ORDER BY COUNT(*) DESC, t.album ASC
         """
     )
-    fun getAllAlbums(): Flow<List<AlbumSummary>>
+    fun getAllAlbums(includeStreamable: Boolean): Flow<List<AlbumSummary>>
 
     // ── Match dismissal & reconciliation ────────────────────────────────
 
