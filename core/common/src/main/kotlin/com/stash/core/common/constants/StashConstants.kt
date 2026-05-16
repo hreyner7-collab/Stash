@@ -24,5 +24,5 @@ object StashConstants {
      * While `false`, the Home `StreamingModeToggle` stays hidden and the
      * streaming-related Hilt wiring in `StashApplication` stays inert.
      */
-    const val STREAMING_ENGINE_ENABLED = false
+    const val STREAMING_ENGINE_ENABLED = true
 }

@@ -97,7 +97,7 @@ android {
         // feature-module-facing mirror lives at
         // `com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED`
         // — keep both in sync (Task 23 flips both at once).
-        buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "false")
+        buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "true")
     }
 
     signingConfigs {
