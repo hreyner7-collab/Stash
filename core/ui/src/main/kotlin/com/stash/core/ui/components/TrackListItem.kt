@@ -25,12 +25,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
+import com.stash.core.model.isUnavailableForDisplay
 import com.stash.core.ui.theme.StashTheme
 
 /**
@@ -48,6 +52,11 @@ import com.stash.core.ui.theme.StashTheme
  *                    and the row background gets a subtle primary highlight.
  * @param onMoreClick Optional callback for the overflow (three-dot) button.
  * @param onLongPress Optional callback invoked when the row is long-pressed.
+ *
+ * v0.9.27: when [Track.isUnavailableForDisplay] is true (synced metadata
+ * that Kennyy can't resolve), the whole row renders at 50% alpha and the
+ * tap callback is suppressed. Long-press still works so the user can
+ * delete the row or queue it for download.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -62,6 +71,11 @@ fun TrackListItem(
     val extendedColors = StashTheme.extendedColors
     val primaryColor = MaterialTheme.colorScheme.primary
 
+    // v0.9.27: synced metadata that Kennyy can't resolve — grey out the row
+    // and suppress tap-to-play. Long-press menu stays enabled (Task 19 will
+    // refine the menu items surfaced for unavailable rows).
+    val isUnavailable = track.isUnavailableForDisplay
+
     // Subtle background highlight when this track is currently playing.
     val rowBackground = if (isPlaying) {
         primaryColor.copy(alpha = 0.06f)
@@ -72,9 +86,10 @@ fun TrackListItem(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .alpha(if (isUnavailable) 0.5f else 1f)
             .background(rowBackground)
             .combinedClickable(
-                onClick = onClick,
+                onClick = { if (!isUnavailable) onClick() },
                 onLongClick = onLongPress,
             )
             .padding(horizontal = 20.dp, vertical = 8.dp),
@@ -176,6 +191,63 @@ fun TrackListItem(
         }
     }
 }
+
+// ── Previews ───────────────────────────────────────────────────────────────
+
+@Preview(name = "Normal", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewTrackListItemNormal() {
+    StashTheme {
+        TrackListItem(
+            track = previewTrack(),
+            onClick = {},
+        )
+    }
+}
+
+@Preview(name = "Playing", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewTrackListItemPlaying() {
+    StashTheme {
+        TrackListItem(
+            track = previewTrack(),
+            onClick = {},
+            isPlaying = true,
+        )
+    }
+}
+
+@Preview(name = "Unavailable", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewTrackListItemUnavailable() {
+    StashTheme {
+        TrackListItem(
+            // v0.9.27: synced but Kennyy-unresolvable — should render at 50% alpha.
+            track = previewTrack(
+                isDownloaded = false,
+                isStreamable = false,
+                isStreamableCheckedAt = 1_700_000_000_000L,
+            ),
+            onClick = {},
+        )
+    }
+}
+
+private fun previewTrack(
+    isDownloaded: Boolean = true,
+    isStreamable: Boolean = false,
+    isStreamableCheckedAt: Long? = null,
+): Track = Track(
+    id = 1L,
+    title = "Wandering Star",
+    artist = "Portishead",
+    album = "Dummy",
+    durationMs = 287_000L,
+    source = MusicSource.SPOTIFY,
+    isDownloaded = isDownloaded,
+    isStreamable = isStreamable,
+    isStreamableCheckedAt = isStreamableCheckedAt,
+)
 
 /**
  * Formats a duration in milliseconds to a human-readable "m:ss" or "h:mm:ss" string.
