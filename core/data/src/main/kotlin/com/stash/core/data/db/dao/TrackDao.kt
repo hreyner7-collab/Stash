@@ -705,6 +705,31 @@ interface TrackDao {
     )
     suspend fun setStreamable(id: Long, available: Boolean, now: Long)
 
+    /**
+     * Resets `is_streamable_checked_at` to NULL on every row whose stamp
+     * sits before [cutoff], returning the row count touched. Drives
+     * [com.stash.core.data.sync.workers.AvailabilityRecheckWorker]'s
+     * weekly catalog-churn pass — the worker passes `now - 30 days` so
+     * checks older than the staleness window get re-queued for the
+     * one-shot [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
+     * to drain.
+     *
+     * The `IS NOT NULL` guard is paranoia against an edge case where the
+     * cutoff math wraps to a positive value before any row has been
+     * checked (e.g. clock skew on a fresh install) — without it, a
+     * `NULL < cutoff` comparison evaluates to NULL in SQLite, so the
+     * UPDATE is a no-op anyway, but explicit is faster than implicit.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_streamable_checked_at = NULL
+        WHERE is_streamable_checked_at IS NOT NULL
+          AND is_streamable_checked_at < :cutoff
+        """
+    )
+    suspend fun invalidateOldStreamableChecks(cutoff: Long): Int
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
