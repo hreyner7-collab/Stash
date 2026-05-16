@@ -788,6 +788,20 @@ interface TrackDao {
     @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
     suspend fun downloadedCount(): Int
 
+    /**
+     * One-shot snapshot of every "stream-only" row: tracks Stash has the
+     * metadata for and has confirmed are streamable, but doesn't yet have
+     * on disk. Drives the Online→Offline "download all streamable now"
+     * branch of [com.stash.core.data.repository.MusicRepository.applyStreamingMode]
+     * — when the user turns streaming off and asks Stash to grab everything
+     * locally, each returned row gets a fresh [DownloadQueueEntity] and
+     * the existing download worker chain takes over.
+     *
+     * Unordered; the bulk-download path doesn't care about sequence.
+     */
+    @Query("SELECT * FROM tracks WHERE is_downloaded = 0 AND is_streamable = 1")
+    suspend fun streamableOnlyTracks(): List<TrackEntity>
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */

@@ -350,4 +350,55 @@ interface MusicRepository {
 
     /** Reactive stream of all sync history records. */
     fun getAllSyncHistory(): Flow<List<SyncHistoryEntity>>
+
+    // ── Streaming engine ────────────────────────────────────────────────
+
+    /**
+     * Side-effect orchestrator for the master streaming-mode toggle.
+     *
+     * On enable (Off→On):
+     *  1. Persists the master pref (so a UI re-tap doesn't re-fire the
+     *     dialog if any later step fails).
+     *  2. Schedules the weekly [com.stash.core.data.sync.workers.AvailabilityRecheckWorker]
+     *     (KEEP — idempotent across cold starts).
+     *  3. Enqueues a one-shot [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
+     *     drain so any rows produced by prior offline-mode syncs get a
+     *     fresh streamable check.
+     *  4. If [releaseDownloads] = true, enqueues
+     *     [com.stash.core.data.sync.workers.ReleaseDownloadsWorker] to
+     *     reclaim disk space.
+     *
+     * On disable (On→Off):
+     *  1. Persists the master pref (so the player flips back to
+     *     download-only routing on the very next track load).
+     *  2. If [downloadAllStreamable] = true, snapshots every
+     *     `is_downloaded = 0 AND is_streamable = 1` row and inserts a
+     *     [DownloadQueueEntity] for each — the existing download worker
+     *     chain picks them up.
+     *
+     * The periodic recheck worker is intentionally **not** cancelled on
+     * disable. It's cheap (one bulk UPDATE per week) and keeping it warm
+     * means a future re-enable doesn't start with a fully stale
+     * `is_streamable` column.
+     */
+    suspend fun applyStreamingMode(
+        enabled: Boolean,
+        releaseDownloads: Boolean = false,
+        downloadAllStreamable: Boolean = false,
+    )
+
+    /**
+     * Wrapper called by Subproject B's entitlement-status watcher when
+     * the user's subscription lapses or is cancelled. Equivalent to
+     * flipping the toggle Off with safe defaults — keep what's already
+     * downloaded, don't bulk-download streamables (the user just lost
+     * the entitlement; we won't surprise them with a huge download).
+     *
+     * Pinned now so Subproject B has a stable entry point.
+     */
+    suspend fun onEntitlementLost() = applyStreamingMode(
+        enabled = false,
+        releaseDownloads = false,
+        downloadAllStreamable = false,
+    )
 }

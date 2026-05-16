@@ -116,5 +116,7 @@ class MusicRepositoryDownloadsMixTest {
         trackMatcher = mockk(relaxed = true),
         stashMixRecipeDao = mockk(relaxed = true),
         downloadNetworkPreference = mockk(relaxed = true),
+        streamingPreference = mockk(relaxed = true),
+        streamingWorkScheduler = mockk(relaxed = true),
     )
 }
