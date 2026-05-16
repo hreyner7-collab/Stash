@@ -605,6 +605,15 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         }
 
+        // Streaming detection: derive purely from the active MediaItem's
+        // URI scheme so the routing decision (Kennyy http(s) URL vs local
+        // file://) is reflected automatically — no parallel flag to keep
+        // in sync. localConfiguration is the resolved playback URI; falls
+        // back to RequestMetadata for items built without a direct uri.
+        val scheme = currentItem?.localConfiguration?.uri?.scheme
+            ?: currentItem?.requestMetadata?.mediaUri?.scheme
+        val isStreaming = scheme == "http" || scheme == "https"
+
         val newState = PlayerState(
             currentTrack = track,
             isPlaying = controller.isPlaying,
@@ -614,6 +623,7 @@ class PlayerRepositoryImpl @Inject constructor(
             repeatMode = controller.repeatMode.toRepeatMode(),
             queue = queue,
             currentIndex = controller.currentMediaItemIndex,
+            isStreaming = isStreaming,
         )
         _playerState.value = newState
 

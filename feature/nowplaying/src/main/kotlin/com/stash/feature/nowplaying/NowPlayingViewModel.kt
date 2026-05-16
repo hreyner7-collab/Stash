@@ -139,6 +139,7 @@ class NowPlayingViewModel @Inject constructor(
                     queueSize = state.queue.size,
                     currentIndex = state.currentIndex,
                     queue = state.queue,
+                    isStreaming = state.isStreaming,
                 )
             }
         }.launchIn(viewModelScope)

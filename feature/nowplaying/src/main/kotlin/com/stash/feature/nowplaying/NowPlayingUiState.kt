@@ -31,6 +31,13 @@ data class NowPlayingUiState(
     val mutedColor: Color = Color(0xFF37474F),
     /** User-created playlists available for the "Save to Playlist" sheet. */
     val userPlaylists: List<PlaylistInfo> = emptyList(),
+    /**
+     * `true` when the currently-playing MediaItem is sourced from an
+     * `http`/`https` URI (i.e. streamed from Kennyy) rather than a
+     * local `file://` URI. Used by the Now Playing screen to render
+     * a small wifi indicator on the quality line.
+     */
+    val isStreaming: Boolean = false,
 ) {
 
     /**

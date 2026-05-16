@@ -9,6 +9,14 @@ data class PlayerState(
     val repeatMode: RepeatMode = RepeatMode.OFF,
     val queue: List<Track> = emptyList(),
     val currentIndex: Int = 0,
+    /**
+     * `true` when the currently-loaded MediaItem's URI scheme is `http`
+     * or `https` — i.e. the active track is being streamed rather than
+     * read from local storage. Computed from the player's
+     * `currentMediaItem.localConfiguration.uri.scheme` on every state
+     * refresh (see `PlayerRepositoryImpl.updateState`).
+     */
+    val isStreaming: Boolean = false,
 )
 
 enum class RepeatMode {
