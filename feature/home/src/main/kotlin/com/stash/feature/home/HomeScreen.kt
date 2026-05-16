@@ -108,6 +108,7 @@ import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.theme.LocalIsDarkTheme
+import com.stash.feature.home.streaming.StreamingModeToggle
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
@@ -126,6 +127,11 @@ fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    // Master streaming-mode flag for the Home `StreamingModeToggle`. The
+    // composable itself early-returns to nothing while the build-time
+    // kill-switch (`StashConstants.STREAMING_ENGINE_ENABLED`) is off, so
+    // observing this flow is essentially free until the engine ships.
+    val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
 
     // Playlist selected for the context-menu bottom sheet (shared across daily mixes + grid).
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
@@ -375,6 +381,21 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+
+        // ── Streaming Mode toggle ────────────────────────────────────
+        // Master kill-switch for the Online-Streaming Engine. Hidden
+        // entirely while `StashConstants.STREAMING_ENGINE_ENABLED` is
+        // `false` (the composable early-returns), so the LazyColumn slot
+        // is effectively a no-op until Task 23 of the streaming plan
+        // flips the flag. Placed above "Recently Added" per the plan so
+        // the toggle reads as the screen's primary mode switch.
+        item {
+            StreamingModeToggle(
+                enabled = streamingEnabled,
+                onToggle = viewModel::onStreamingToggle,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
         }
 
         // ── Recently Added ───────────────────────────────────────────

@@ -12,6 +12,7 @@ import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
+import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
@@ -91,8 +92,44 @@ class HomeViewModel @Inject constructor(
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
+    private val streamingPreference: StreamingPreference,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
+
+    /**
+     * Master streaming-mode toggle observed by the Home `StreamingModeToggle`.
+     * Mirrors [StreamingPreference.enabled] one-for-one — the orchestrator
+     * call below routes writes through `MusicRepository.applyStreamingMode`
+     * so workers + prefs stay in sync, but reads come straight off the
+     * DataStore Flow so the switch reflects the same source of truth a
+     * remote `onEntitlementLost` flip would update.
+     *
+     * Gated for visibility by `StashConstants.STREAMING_ENGINE_ENABLED`
+     * inside the composable — the StateFlow keeps emitting regardless,
+     * so when the kill-switch is flipped on the Home toggle picks up the
+     * current pref value immediately without a recompose cycle.
+     */
+    val streamingEnabled: StateFlow<Boolean> = streamingPreference.enabled
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * Handler for the Home `StreamingModeToggle`. Delegates to
+     * [MusicRepository.applyStreamingMode] with the safe defaults
+     * (keep downloads, no bulk-download of streamables) — Task 17 will
+     * wrap this call in a confirmation sheet that lets the user opt
+     * into either of those follow-up actions. Until then a raw flip
+     * just persists the pref + schedules the availability workers
+     * (when enabling) or does nothing destructive (when disabling).
+     */
+    fun onStreamingToggle(enabled: Boolean) {
+        viewModelScope.launch {
+            musicRepository.applyStreamingMode(enabled = enabled)
+        }
+    }
 
     private val _userMessages = MutableSharedFlow<String>(
         // Bumped to 8 to mirror NowPlayingViewModel — actions that emit two

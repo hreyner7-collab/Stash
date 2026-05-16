@@ -90,6 +90,14 @@ android {
             "SUPPORTERS_JSON_URL",
             "\"https://stash-tipjar.rawnaldclark.workers.dev\"",
         )
+        // Online-Streaming Engine master kill-switch. Flipped to `true` once
+        // the engine has been validated end-to-end (see Task 23 of the
+        // online-streaming-engine plan). Until then the Home toggle stays
+        // hidden and the Hilt wiring in StashApplication stays inert. The
+        // feature-module-facing mirror lives at
+        // `com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED`
+        // — keep both in sync (Task 23 flips both at once).
+        buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "false")
     }
 
     signingConfigs {
