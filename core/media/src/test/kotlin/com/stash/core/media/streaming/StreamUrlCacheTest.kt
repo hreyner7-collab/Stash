@@ -6,7 +6,7 @@ import org.junit.Test
 class StreamUrlCacheTest {
 
     private var now = 0L
-    private val cache = StreamUrlCache(nowMsProvider = { now })
+    private val cache = StreamUrlCache().apply { nowMsProvider = { now } }
 
     @Test
     fun get_returnsNullForUnknownKey() {

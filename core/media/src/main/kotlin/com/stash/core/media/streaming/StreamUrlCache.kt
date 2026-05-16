@@ -19,15 +19,15 @@ import javax.inject.Singleton
  * is the only invariant we need (no compound transactions cross keys).
  *
  * The [nowMsProvider] seam exists so tests can drive time
- * deterministically without `Thread.sleep`. Production uses the
- * default [System.currentTimeMillis] reference — Dagger fills the
- * remaining constructor parameter and is happy with the Kotlin
- * default for the lambda.
+ * deterministically without `Thread.sleep`. It's an `internal var` so
+ * test code can swap it without going through the constructor —
+ * keeping the constructor parameter-free avoids Hilt's "multiple
+ * @Inject constructors" error that Kotlin default values trigger.
  */
 @Singleton
-class StreamUrlCache @Inject constructor(
-    private val nowMsProvider: () -> Long = System::currentTimeMillis,
-) {
+class StreamUrlCache @Inject constructor() {
+    internal var nowMsProvider: () -> Long = System::currentTimeMillis
+
     private val cache = ConcurrentHashMap<Long, StreamUrl>()
 
     fun get(trackId: Long): StreamUrl? {
