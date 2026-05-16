@@ -1,6 +1,5 @@
 package com.stash.core.data.audio
 
-import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -26,7 +25,8 @@ import java.io.File
 class LoudnessMeasurerTest {
 
     private val fakeBridge = FakeFFmpegBridge()
-    private val measurer = LoudnessMeasurer(fakeBridge, mockk(relaxed = true))
+    private val fakeTrackDao = io.mockk.mockk<com.stash.core.data.db.dao.TrackDao>(relaxed = true)
+    private val measurer = LoudnessMeasurer(fakeBridge, fakeTrackDao)
 
     private val createdTempFiles = mutableListOf<File>()
 
@@ -83,7 +83,7 @@ class LoudnessMeasurerTest {
         val pausingBridge = PausingFakeFFmpegBridge(
             output = resource("ffmpeg_output/normal.txt"),
         )
-        val serialMeasurer = LoudnessMeasurer(pausingBridge, mockk(relaxed = true))
+        val serialMeasurer = LoudnessMeasurer(pausingBridge, fakeTrackDao)
         val file = tempFile("dummy.mp3")
 
         val first = async { serialMeasurer.measure(file) }
