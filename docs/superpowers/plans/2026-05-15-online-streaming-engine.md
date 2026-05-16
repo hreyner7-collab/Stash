@@ -171,6 +171,8 @@ StashDatabase.MIGRATION_24_25,
 StashDatabase.MIGRATION_25_26,
 ```
 
+**Also register the migration in every test-DB builder.** Grep for `inMemoryDatabaseBuilder` and `Room.databaseBuilder` under `**/src/androidTest/**` and `**/src/test/**` — each instance that uses `.addMigrations(...)` needs `MIGRATION_25_26` appended. Missing this causes confusing "schema mismatch" errors in instrumentation tests on v26.
+
 - [ ] **Step 4: Run and verify PASS**
 
 ```
@@ -288,6 +290,8 @@ git commit -m "feat(prefs): StreamingPreference (enabled / streamOnCellular / st
 - Test: `core/media/src/test/kotlin/com/stash/core/media/streaming/KennyyStreamResolverTest.kt`
 
 The wrapper turns a `TrackEntity` (or its identity fields) into a `StreamUrl(url, expiresAtMs)`. It calls the existing `KennyySource.resolve(TrackQuery)` and, on success, extracts the `etsp` query parameter from the returned `downloadUrl` to compute `expiresAtMs`. `etsp` is a Unix epoch *seconds* timestamp; multiply by 1000.
+
+**Note on `streamQuality` preference (v1 deferral):** `TrackQuery` (`data/download/.../lossless/LosslessSource.kt:80`) currently has no `preferredQuality` field — `KennyySource` reads quality from its injected `LosslessSourcePreferences` instead. For v1, streaming quality follows the existing lossless-download preference. The `streamQuality` flow on `StreamingPreference` is stored but unused by the resolver until a follow-up task adds a `preferredQuality` field to `TrackQuery` and threads it through `KennyySource.resolve()`. Document this in the toggle UI (Task 16): the quality submenu is hidden in v1.
 
 - [ ] **Step 1: Failing test**
 
@@ -613,17 +617,17 @@ class RefreshingDataSource(
         return try {
             inner.open(spec)
         } catch (e: HttpDataSource.InvalidResponseCodeException) {
-            if (e.responseCode in REFRESH_TRIGGERS) {
-                val track = runBlocking { trackDao.getByIdSync(trackId) }
-                    ?: throw e
-                val fresh = runBlocking { resolver.resolve(track) }
-                    ?: throw e
-                cache.put(trackId, fresh)
-                val newSpec = spec.buildUpon().setUri(Uri.parse(fresh.url)).build()
-                inner.open(newSpec)
-            } else {
-                throw e
-            }
+            if (e.responseCode !in REFRESH_TRIGGERS) throw e
+            // Single coroutine scope for both lookups — avoids re-entrance
+            // hazards from two independent runBlocking calls sharing the
+            // loader thread with Room's connection pool + Kennyy's rate-limiter.
+            val fresh = runBlocking {
+                val track = trackDao.getById(trackId) ?: return@runBlocking null
+                resolver.resolve(track)
+            } ?: throw e
+            cache.put(trackId, fresh)
+            val newSpec = spec.buildUpon().setUri(Uri.parse(fresh.url)).build()
+            inner.open(newSpec)
         }
     }
 }
@@ -643,7 +647,11 @@ class RefreshingDataSourceFactory(
 private val REFRESH_TRIGGERS = setOf(403, 410)
 ```
 
-**Note on `runBlocking`:** safe inside `DataSource.open()` because Media3 calls it from its own loader thread, never the main thread.
+**Note on construction:** `RefreshingDataSource` / `RefreshingDataSourceFactory` are NOT Hilt-injected. They're constructed per-track inside `StreamingMediaSourceFactory.create(trackId)` (Task 7) which IS a Hilt singleton — that singleton passes its injected `resolver` / `urlCache` / `trackDao` through to the per-track factory.
+
+**Note on `runBlocking`:** safe inside `DataSource.open()` because Media3 calls it from its own loader thread, never the main thread. Use one `runBlocking` block that does both the DAO lookup and the resolver call sequentially — two independent blocking calls could re-enter Room's connection pool or Kennyy's `AggregatorRateLimiter` and deadlock.
+
+**DAO support note:** uses the existing `suspend fun getById(trackId: Long): TrackEntity?` (already defined in `TrackDao.kt:340`). No new DAO method needed for this task.
 
 - [ ] **Step 4: Pass**
 
@@ -737,8 +745,26 @@ Audit list (from the spec):
 - `getAllDownloadedTracks` (rename to `getAllLibraryTracks` or keep as-is and add a parallel method — pick one in this commit)
 - `getByPlaylist`
 - `getTotalCount`
-- FTS variants
+- **FTS variants** — see below
 - `PlaylistDao.getAllVisible`
+
+**FTS query shape:** the existing `search(query)` (TrackDao.kt:787) uses `JOIN tracks_fts ON tracks.rowid = tracks_fts.rowid WHERE tracks_fts MATCH :query`. The `tracks_fts` virtual table doesn't have the `is_downloaded` / `is_streamable` columns — the filter is added to the `tracks` JOIN side, not the FTS MATCH side. Augmented query (preserving the existing blocklist join):
+
+```sql
+SELECT tracks.* FROM tracks
+JOIN tracks_fts ON tracks.rowid = tracks_fts.rowid
+LEFT JOIN track_blocklist bl
+    ON bl.canonical_key = (tracks.canonical_artist || '|' || tracks.canonical_title)
+    OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = tracks.spotify_uri)
+    OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = tracks.youtube_id)
+WHERE tracks_fts MATCH :query
+  AND bl.canonical_key IS NULL
+  AND (tracks.is_downloaded = 1 OR (:includeStreamable AND tracks.is_streamable = 1))
+```
+
+Apply the same `AND (tracks.is_downloaded = 1 OR (:includeStreamable AND tracks.is_streamable = 1))` predicate to every other FTS-based query in `TrackDao.kt` (grep `tracks_fts MATCH` to enumerate them).
+
+**Room and Kotlin defaults:** do NOT use `= false` defaults on `@Query` methods. Room's kapt processor doesn't always honour them and produces confusing errors at compile time. Require every caller to pass `includeStreamable` explicitly — most callers in this codebase already wrap the DAO in `MusicRepositoryImpl`, so there's only one read site per query.
 
 **Library-Health queries stay unchanged** (downloaded-only).
 
@@ -797,12 +823,12 @@ For each affected `@Query`, update like so (example `getAllAlbums`):
     GROUP BY t.album, t.album_artist
     ORDER BY COUNT(*) DESC, t.album ASC
 """)
-fun getAllAlbums(includeStreamable: Boolean = false): Flow<List<AlbumSummary>>
+fun getAllAlbums(includeStreamable: Boolean): Flow<List<AlbumSummary>>
 ```
 
 The `:includeStreamable AND ...` short-circuit in SQLite means when the flag is `false` the streamable branch is skipped entirely.
 
-Repeat for every other affected method. Default value `false` keeps existing callers working.
+Repeat for every other affected method. **No Kotlin default values** — every caller must pass the flag explicitly (existing wrappers in `MusicRepositoryImpl` need to be updated to thread the pref through).
 
 - [ ] **Step 4: Pass**
 
@@ -970,8 +996,45 @@ git commit -m "feat(workers): AvailabilityRecheckWorker — 30-day stale check"
 ### Task 11: `PlayerRepositoryImpl` — streaming routing in buildMediaItem
 
 **Files:**
+- Create: `core/media/src/main/kotlin/com/stash/core/media/streaming/ConnectivityMonitor.kt` (no existing wrapper in the codebase — grep confirmed)
 - Modify: `core/media/src/main/kotlin/com/stash/core/media/PlayerRepositoryImpl.kt`
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/repository/PlayerRepository.kt` (interface — add `playFromStream`)
+- Test: `core/media/src/test/kotlin/com/stash/core/media/streaming/ConnectivityMonitorTest.kt`
 - Test: `core/media/src/test/kotlin/com/stash/core/media/PlayerRepositoryStreamingTest.kt`
+
+- [ ] **Step 0: Create `ConnectivityMonitor`**
+
+A small wrapper around Android's `ConnectivityManager` — keeps `PlayerRepositoryImpl` testable without mocking the Android system service directly.
+
+```kotlin
+package com.stash.core.media.streaming
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class ConnectivityMonitor @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
+    private val cm: ConnectivityManager
+        get() = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    fun isConnected(): Boolean {
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+               caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    fun isCellular(): Boolean {
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+    }
+}
+```
 
 - [ ] **Step 1: Failing tests** — covers the decision tree:
 
@@ -979,46 +1042,80 @@ git commit -m "feat(workers): AvailabilityRecheckWorker — 30-day stale check"
 @Test fun buildMediaItem_downloadedTrack_returnsLocalFileMediaItem() { ... }
 @Test fun buildMediaItem_streamableTrackWithCacheHit_usesCachedUrl() { ... }
 @Test fun buildMediaItem_streamableTrackWithCacheMiss_resolvesAndCaches() { ... }
-@Test fun buildMediaItem_unavailableTrack_returnsNull() { ... }
-@Test fun buildMediaItem_streamableTrackWithStreamingOff_returnsNull() { ... }
-@Test fun buildMediaItem_streamableButCellularWithoutCellularPref_returnsNull() { ... }
+@Test fun buildMediaItem_unavailableTrack_returnsNotAvailable() { ... }
+@Test fun buildMediaItem_streamableTrackWithStreamingOff_returnsOfflineMode() { ... }
+@Test fun buildMediaItem_streamableButCellularWithoutCellularPref_returnsCellularRefused() { ... }
+@Test fun playFromStream_searchItem_resolvesAndPlays() { ... }
 ```
 
 - [ ] **Step 3: Implement**
 
-The streaming branch builds a `MediaItem` that points at the cached/resolved URL; the `StreamingMediaSourceFactory.create(trackId)` is wired into the player so ExoPlayer's `MediaSource.Factory` knows how to load it. ConnectivityManager check gates cellular.
-
-Concretely, add to `PlayerRepositoryImpl`:
+To surface a user-visible reason instead of silently returning null, return a sealed `StreamRoutingResult` from `buildMediaItemForTrack`. The caller — in this codebase, the queue/play orchestrator that eventually feeds `StashPlaybackService` — already has a `_uiEvents: MutableSharedFlow<UiEvent>` (snackbar channel). Wire `CellularRefused` and `OfflineMode` to emit a snackbar there.
 
 ```kotlin
-private suspend fun buildMediaItemForTrack(track: TrackEntity): MediaItem? {
-    val streamingEnabled = streamingPreference.current()
-    return when {
-        track.isDownloaded && filePathExistsOnDisk(track.filePath) -> {
+sealed class StreamRoutingResult {
+    data class Item(val mediaItem: MediaItem) : StreamRoutingResult()
+    data object NotAvailable : StreamRoutingResult()      // no local, not streamable, or no checkedAt
+    data object OfflineMode : StreamRoutingResult()       // streaming pref off, track streamable-only
+    data object CellularRefused : StreamRoutingResult()   // streaming on, cellular only, pref off
+    data object NoConnectivity : StreamRoutingResult()    // streaming on but device offline
+}
+
+private suspend fun buildMediaItemForTrack(track: TrackEntity): StreamRoutingResult {
+    if (track.isDownloaded && filePathExistsOnDisk(track.filePath)) {
+        return StreamRoutingResult.Item(
             MediaItem.Builder()
                 .setMediaId(track.id.toString())
                 .setUri(Uri.fromFile(File(track.filePath!!)))
                 .build()
-        }
-        streamingEnabled && track.isStreamable -> {
-            if (!canStreamNow()) return null   // cellular check + connectivity check
-            val cached = streamUrlCache.get(track.id)
-            val stream = cached ?: kennyyStreamResolver.resolve(track)?.also {
-                streamUrlCache.put(track.id, it)
-            } ?: return null
-            MediaItem.Builder()
-                .setMediaId(track.id.toString())
-                .setUri(Uri.parse(stream.url))
-                .build()
-        }
-        else -> null
+        )
     }
+    if (!track.isStreamable) return StreamRoutingResult.NotAvailable
+    if (!streamingPreference.current()) return StreamRoutingResult.OfflineMode
+    if (!connectivity.isConnected()) return StreamRoutingResult.NoConnectivity
+    if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) {
+        return StreamRoutingResult.CellularRefused
+    }
+    val cached = streamUrlCache.get(track.id)
+    val stream = cached ?: kennyyStreamResolver.resolve(track)?.also {
+        streamUrlCache.put(track.id, it)
+    } ?: return StreamRoutingResult.NotAvailable
+    return StreamRoutingResult.Item(
+        MediaItem.Builder()
+            .setMediaId(track.id.toString())
+            .setUri(Uri.parse(stream.url))
+            .build()
+    )
 }
+```
 
-private suspend fun canStreamNow(): Boolean {
-    if (!connectivity.isConnected()) return false
-    if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) return false
-    return true
+In the caller (the existing tap handler that feeds the player):
+
+```kotlin
+when (val result = buildMediaItemForTrack(track)) {
+    is StreamRoutingResult.Item -> player.setMediaItem(result.mediaItem); player.play()
+    StreamRoutingResult.CellularRefused -> _uiEvents.emit(UiEvent.Snackbar("Streaming on cellular is off in Settings"))
+    StreamRoutingResult.NoConnectivity -> _uiEvents.emit(UiEvent.Snackbar("You're offline — can't stream this track"))
+    StreamRoutingResult.OfflineMode -> _uiEvents.emit(UiEvent.Snackbar("Turn on Online mode to stream this track"))
+    StreamRoutingResult.NotAvailable -> { /* row should be greyed out; silently no-op */ }
+}
+```
+
+Also add `playFromStream(item: TrackItem)` to the `PlayerRepository` interface — used by the Search screen (Task 20) which has `TrackItem` (search-result model) not `TrackEntity`:
+
+```kotlin
+// In PlayerRepository.kt interface
+suspend fun playFromStream(item: TrackItem)
+
+// In PlayerRepositoryImpl.kt
+override suspend fun playFromStream(item: TrackItem) {
+    val tempTrack = TrackEntity.fromSearchItem(item)   // existing converter, or inline-construct
+    when (val result = buildMediaItemForTrack(tempTrack)) {
+        is StreamRoutingResult.Item -> {
+            player.setMediaItem(result.mediaItem); player.play()
+        }
+        else -> _uiEvents.emit(UiEvent.Snackbar(reasonFor(result)))
+    }
 }
 ```
 
@@ -1027,7 +1124,12 @@ The player layer (StashPlaybackService) configures ExoPlayer with `StreamingMedi
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -m "feat(media): PlayerRepositoryImpl streaming routing (local / cached / resolve)"
+git add core/media/src/main/kotlin/com/stash/core/media/streaming/ConnectivityMonitor.kt \
+        core/media/src/main/kotlin/com/stash/core/media/PlayerRepositoryImpl.kt \
+        core/data/src/main/kotlin/com/stash/core/data/repository/PlayerRepository.kt \
+        core/media/src/test/kotlin/com/stash/core/media/streaming/ConnectivityMonitorTest.kt \
+        core/media/src/test/kotlin/com/stash/core/media/PlayerRepositoryStreamingTest.kt
+git commit -m "feat(media): PlayerRepositoryImpl streaming routing + ConnectivityMonitor + playFromStream"
 ```
 
 ---
@@ -1054,16 +1156,75 @@ git commit -m "feat(media): pre-fetch next streamable track at 60% played"
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/DiffWorker.kt`
-- Test: extend `DiffWorkerTest` (or its equivalent if absent)
+- Test: extend `DiffWorkerTest` (create if absent; mirror `LoudnessBackfillWorkerTest` scaffolding)
 
-When `StreamingPreference.enabled = true`, skip `TrackDownloadWorker.enqueue` for newly-inserted rows; enqueue `AvailabilityCheckWorker.enqueueSelf` instead.
+The actual download-enqueue point is `downloadQueueDao.insert(DownloadQueueEntity(...))` (DiffWorker.kt:424). When `StreamingPreference.enabled = true`, this insert is skipped for newly-inserted track rows; an `AvailabilityCheckWorker` is enqueued once at the END of the worker (not per-row — avoids 50× enqueueUnique churn on a large sync).
 
-- [ ] **Step 1: Failing test**
+**Read the preference ONCE at the top** of `doWork()`, not per-row. The user can't flip the toggle mid-sync — and even if they did, the pref already-loaded behavior is the consistent choice.
+
+- [ ] **Step 1: Failing tests**
+
+```kotlin
+@Test fun downloadModeStillInsertsDownloadQueueRows() = runTest {
+    streamingPreference.setEnabled(false)
+    worker.doWork()
+    assertThat(downloadQueueDao.allPending().size).isGreaterThan(0)
+    assertThat(workManager.getWorkInfosForUniqueWork("availability_check").get()).isEmpty()
+}
+
+@Test fun streamingModeSkipsDownloadQueueAndEnqueuesAvailability() = runTest {
+    streamingPreference.setEnabled(true)
+    worker.doWork()
+    assertThat(downloadQueueDao.allPending()).isEmpty()
+    assertThat(workManager.getWorkInfosForUniqueWork("availability_check").get()).isNotEmpty()
+}
+
+@Test fun streamingModeWithZeroNewTracksDoesNotEnqueueAvailability() = runTest {
+    streamingPreference.setEnabled(true)
+    // …seed remote_snapshot tracks that all already exist locally…
+    worker.doWork()
+    assertThat(workManager.getWorkInfosForUniqueWork("availability_check").get()).isEmpty()
+}
+```
+
 - [ ] **Step 3: Implement**
+
+In `DiffWorker`:
+
+```kotlin
+// Add to constructor injection:
+private val streamingPreference: StreamingPreference,
+
+// Top of doWork() — read once, propagate:
+val streamingMode = streamingPreference.current()
+var newTrackCount = 0
+// …existing playlist loop…
+
+// At the existing downloadQueueDao.insert site (line 424):
+if (!streamingMode) {
+    downloadQueueDao.insert(
+        DownloadQueueEntity(
+            trackId = trackId,
+            syncId = syncId,
+            searchQuery = searchQuery,
+            youtubeUrl = trackSnapshot.youtubeId?.let { "https://music.youtube.com/watch?v=$it" },
+        )
+    )
+}
+newTrackCount++   // unchanged — the row still exists, it's just not download-queued
+
+// After the playlist loop completes, BEFORE returning Result.success():
+if (streamingMode && newTrackCount > 0) {
+    AvailabilityCheckWorker.enqueueSelf(applicationContext)
+}
+```
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -m "feat(sync): DiffWorker skips downloads + enqueues availability check in streaming mode"
+git add core/data/src/main/kotlin/com/stash/core/data/sync/workers/DiffWorker.kt \
+        core/data/src/test/kotlin/com/stash/core/data/sync/workers/DiffWorkerTest.kt
+git commit -m "feat(sync): DiffWorker skips download queue + enqueues availability check in streaming mode"
 ```
 
 ---
@@ -1072,15 +1233,128 @@ git commit -m "feat(sync): DiffWorker skips downloads + enqueues availability ch
 
 **Files:**
 - Create: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/ReleaseDownloadsWorker.kt`
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/db/dao/TrackDao.kt` (add `markAsNotDownloaded`)
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/prefs/SyncPreferencesManager.kt` (or sibling DataStore) to add a `release_downloads_last_processed_id` key
 - Test: `core/data/src/test/kotlin/com/stash/core/data/sync/workers/ReleaseDownloadsWorkerTest.kt`
 
-Iterates `is_downloaded = 1` rows in batches; for each, deletes the file from disk via `FileOrganizer.deleteForTrack(track)`, then `trackDao.markAsNotDownloaded(id)` (a new DAO method that sets `is_downloaded = 0, file_path = NULL, file_size_bytes = 0`). Reads progress from a DataStore key so it can resume cleanly after cancellation.
+Reuses the existing `MusicRepository.deleteTrack(track)` path which already calls `deleteTrackFile()` (MusicRepositoryImpl.kt:73) AND clears the DB row in one call. That's the file-delete-then-DB-update ordering we want — if we crash after `deleteTrackFile()` returns but before the DAO write, the next run sees a stale `is_downloaded = 1` row pointing at a missing file. To make THIS worker crash-safe, set `is_downloaded = 0` + `file_path = NULL` *first*, then delete the file. A crash leaves an orphaned file (cleaned up by the existing `OrphanCleanupWorker`), not a stale-pointer DB row. This is the opposite ordering from `deleteTrack` because we have different crash-safety requirements.
 
-- [ ] **Step 1: Failing test**
+**Resumability:** stash the last-processed `track.id` in a small per-worker DataStore key. On restart, query `is_downloaded = 1 AND id > :lastId` ordered by id ASC. Batch size 100 keeps each transaction short.
+
+- [ ] **Step 1: Failing tests**
+
+```kotlin
+@Test fun releaseProcessesAllDownloadedRows_clearsDbAndDeletesFiles() = runTest {
+    seedDownloaded(count = 5)
+    worker.doWork()
+    assertThat(trackDao.downloadedCount()).isEqualTo(0)
+    assertThat(testFileSystem.remainingFiles()).isEmpty()
+}
+
+@Test fun resumeAfterCancellation_picksUpFromLastProcessedId() = runTest {
+    seedDownloaded(count = 5)
+    sessionStore.put("release_downloads_last_processed_id", 2L)  // 1,2 already done
+    worker.doWork()
+    // Only ids 3,4,5 should be touched this run
+    verify(exactly = 3) { fileOps.delete(any()) }
+}
+
+@Test fun cancellation_persistsLastProcessedId() = runTest {
+    seedDownloaded(count = 100)
+    workerCancellationAfter(rows = 30)
+    worker.doWork()
+    val resumeId = sessionStore.get("release_downloads_last_processed_id")
+    assertThat(resumeId).isGreaterThan(0L)
+}
+
+@Test fun completion_clearsLastProcessedId() = runTest {
+    seedDownloaded(count = 5)
+    worker.doWork()
+    assertThat(sessionStore.get("release_downloads_last_processed_id")).isNull()
+}
+```
+
 - [ ] **Step 3: Implement**
+
+```kotlin
+@HiltWorker
+class ReleaseDownloadsWorker @AssistedInject constructor(
+    @Assisted ctx: Context,
+    @Assisted params: WorkerParameters,
+    private val trackDao: TrackDao,
+    private val database: StashDatabase,
+    private val releaseDownloadsState: ReleaseDownloadsState,  // tiny DataStore wrapper
+) : CoroutineWorker(ctx, params) {
+
+    override suspend fun doWork(): Result {
+        val deadline = System.currentTimeMillis() + MAX_RUN_MS
+        var lastId = releaseDownloadsState.lastProcessedId() ?: 0L
+        while (!isStopped && System.currentTimeMillis() < deadline) {
+            val batch = trackDao.downloadedAfter(lastId, BATCH_SIZE)
+            if (batch.isEmpty()) break
+            for (track in batch) {
+                if (isStopped) {
+                    releaseDownloadsState.setLastProcessedId(lastId)
+                    return Result.retry()
+                }
+                val path = track.filePath
+                // DB write FIRST so a mid-op crash doesn't leave a row pointing at a deleted file.
+                database.withTransaction {
+                    trackDao.markAsNotDownloaded(track.id)
+                }
+                if (!path.isNullOrBlank()) {
+                    runCatching { File(path).delete() }   // orphan-safe if it fails
+                }
+                lastId = track.id
+            }
+            releaseDownloadsState.setLastProcessedId(lastId)
+        }
+        // Drained or stopped at boundary — clear the cursor only if we know we're done.
+        if (trackDao.downloadedCount() == 0) {
+            releaseDownloadsState.clear()
+        }
+        return Result.success()
+    }
+
+    companion object {
+        const val WORK_NAME = "release_downloads"
+        private const val BATCH_SIZE = 100
+        private const val MAX_RUN_MS = 9L * 60_000
+
+        fun enqueueSelf(ctx: Context) {
+            val req = OneTimeWorkRequestBuilder<ReleaseDownloadsWorker>()
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 60, TimeUnit.SECONDS)
+                .build()
+            WorkManager.getInstance(ctx).enqueueUniqueWork(
+                WORK_NAME, ExistingWorkPolicy.KEEP, req,
+            )
+        }
+    }
+}
+```
+
+DAO support:
+
+```kotlin
+@Query("SELECT * FROM tracks WHERE is_downloaded = 1 AND id > :lastId ORDER BY id ASC LIMIT :limit")
+suspend fun downloadedAfter(lastId: Long, limit: Int): List<TrackEntity>
+
+@Query("UPDATE tracks SET is_downloaded = 0, file_path = NULL, file_size_bytes = 0 WHERE id = :id")
+suspend fun markAsNotDownloaded(id: Long)
+
+@Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
+suspend fun downloadedCount(): Int
+```
+
+`ReleaseDownloadsState` is a 5-line wrapper around a Preferences DataStore named `release_downloads_state` with one Long key. Mirror the `StashMixPreference` scaffold but with fewer keys.
+
 - [ ] **Step 5: Commit**
 
 ```bash
+git add core/data/src/main/kotlin/com/stash/core/data/sync/workers/ReleaseDownloadsWorker.kt \
+        core/data/src/main/kotlin/com/stash/core/data/prefs/ReleaseDownloadsState.kt \
+        core/data/src/main/kotlin/com/stash/core/data/db/dao/TrackDao.kt \
+        core/data/src/test/kotlin/com/stash/core/data/sync/workers/ReleaseDownloadsWorkerTest.kt
 git commit -m "feat(workers): ReleaseDownloadsWorker — used by Off→On 'release space' prompt"
 ```
 
@@ -1095,18 +1369,30 @@ git commit -m "feat(workers): ReleaseDownloadsWorker — used by Off→On 'relea
 
 ```kotlin
 suspend fun applyStreamingMode(enabled: Boolean, releaseDownloads: Boolean = false, downloadAllStreamable: Boolean = false)
+
+/**
+ * Wrapper called by Subproject B's entitlement-status watcher when the user's
+ * subscription lapses or is cancelled. Equivalent to flipping the toggle Off
+ * with safe defaults (keep what's downloaded; don't bulk-download streamables).
+ * Pinned now so Subproject B has a stable entry point.
+ */
+suspend fun onEntitlementLost() = applyStreamingMode(
+    enabled = false,
+    releaseDownloads = false,
+    downloadAllStreamable = false,
+)
 ```
 
 If `enabled = true`:
 - `streamingPreference.setEnabled(true)`
-- If `releaseDownloads = true`: enqueue `ReleaseDownloadsWorker`
-- Schedule `AvailabilityRecheckWorker` periodic if not already scheduled
+- If `releaseDownloads = true`: enqueue `ReleaseDownloadsWorker.enqueueSelf(context)`
+- Schedule `AvailabilityRecheckWorker.schedulePeriodic` if not already scheduled
 - Enqueue `AvailabilityCheckWorker.enqueueSelf` once (drains existing un-checked rows)
 
 If `enabled = false`:
 - `streamingPreference.setEnabled(false)`
-- If `downloadAllStreamable = true`: iterate `is_downloaded = 0 AND is_streamable = 1` rows and enqueue `TrackDownloadWorker` for each
-- Stash the existing periodic `AvailabilityRecheckWorker` cancellation? No — keep running so cached-checked rows stay fresh for future re-enables. Cheap.
+- If `downloadAllStreamable = true`: query `trackDao.streamableOnlyTracks()` and bulk-insert into `downloadQueueDao` (same pattern as DiffWorker — one DownloadQueueEntity per track)
+- Leave the periodic `AvailabilityRecheckWorker` running so cached-checked rows stay fresh for future re-enables. Cheap.
 
 - [ ] **Step 1: Failing test**
 - [ ] **Step 3: Implement**
@@ -1121,17 +1407,32 @@ git commit -m "feat(repo): MusicRepository.applyStreamingMode orchestrator (work
 ### Task 16: `StreamingModeToggle` composable on HomeScreen
 
 **Files:**
+- Modify: `app/build.gradle.kts` (add `STREAMING_ENGINE_ENABLED` buildConfigField)
 - Create: `feature/home/src/main/kotlin/com/stash/feature/home/streaming/StreamingModeToggle.kt`
 - Modify: `feature/home/src/main/kotlin/com/stash/feature/home/HomeScreen.kt`
 - Modify: `feature/home/src/main/kotlin/com/stash/feature/home/HomeViewModel.kt`
 
 Single-row switch labeled "Online" with subtitle "Stream from your synced library". Above "Recently played". Gated on `BuildConfig.STREAMING_ENGINE_ENABLED` — hidden when false.
 
+- [ ] **Step 0: Declare the BuildConfig field FIRST** — the composable references it; without this step Task 16 won't compile.
+
+In `app/build.gradle.kts` inside `defaultConfig`:
+
+```kotlin
+buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "false")
+```
+
+Run `./gradlew :app:generateDebugBuildConfig` to materialise the field, then proceed.
+
 - [ ] **Step 1: Compose preview / unit test the composable** with both states.
 - [ ] **Step 3: Implement** — mirror the existing single-row-switch pattern from `feature/settings/.../equalizer/EqualizerScreen.kt` (the Loudness Normalization card).
 - [ ] **Step 5: Commit**
 
 ```bash
+git add app/build.gradle.kts \
+        feature/home/src/main/kotlin/com/stash/feature/home/streaming/StreamingModeToggle.kt \
+        feature/home/src/main/kotlin/com/stash/feature/home/HomeScreen.kt \
+        feature/home/src/main/kotlin/com/stash/feature/home/HomeViewModel.kt
 git commit -m "feat(home): StreamingModeToggle — single-row switch at top of Home"
 ```
 
@@ -1160,11 +1461,17 @@ git commit -m "feat(home): StreamingModePrompt — mode transition AlertDialogs"
 
 ### Task 18: Library row treatment — greyed-out for unavailable
 
-**Files:**
-- Modify: each `feature/library/.../*Screen.kt` track-row composable
-- Test: existing snapshot tests, if any, get an "unavailable" variant added
+**Files (enumerated — grep confirmed these are the only library track-row composables):**
+- Modify: `feature/library/src/main/kotlin/com/stash/feature/library/LibraryScreen.kt`
+- Modify: `feature/library/src/main/kotlin/com/stash/feature/library/AlbumDetailScreen.kt`
+- Modify: `feature/library/src/main/kotlin/com/stash/feature/library/ArtistDetailScreen.kt`
+- Modify: `feature/library/src/main/kotlin/com/stash/feature/library/PlaylistDetailScreen.kt`
+- Modify: `feature/library/src/main/kotlin/com/stash/feature/library/LikedSongsDetailScreen.kt` (if it has its own row composable; otherwise reuses the LibraryScreen one)
+- Test: snapshot tests for each — add an "unavailable" variant
 
 Row renders at 50% opacity when `track.isDownloaded == false && track.isStreamable == false && track.isStreamableCheckedAt != null`. No tap action. No long-press menu items for streaming.
+
+Implementation: each screen calls into a shared `TrackRow` composable. If a shared component already exists in `core/ui/`, modify it once; otherwise lift one out as part of this task and update each screen to consume it.
 
 - [ ] **Step 3: Implement**
 - [ ] **Step 5: Commit**
@@ -1228,21 +1535,14 @@ git commit -m "feat(nowplaying): wifi indicator when current track is streaming"
 
 ---
 
-### Task 22: `StashApplication.onCreate` — wire startup workers + BuildConfig gate
+### Task 22: `StashApplication.onCreate` — wire startup workers
 
 **Files:**
 - Modify: `app/src/main/kotlin/com/stash/app/StashApplication.kt`
-- Modify: `app/build.gradle.kts` (add `STREAMING_ENGINE_ENABLED` buildConfigField, default false)
 
-- [ ] **Step 1: Add BuildConfig field**
+The `STREAMING_ENGINE_ENABLED` BuildConfig flag was declared in Task 16's Step 0 and is already wired up. This task only adds the startup-time worker scheduling.
 
-In `defaultConfig` of `app/build.gradle.kts`:
-
-```kotlin
-buildConfigField("Boolean", "STREAMING_ENGINE_ENABLED", "false")
-```
-
-- [ ] **Step 2: Wire startup**
+- [ ] **Step 1: Wire startup**
 
 In `StashApplication.onCreate`, after the existing worker scheduling:
 
