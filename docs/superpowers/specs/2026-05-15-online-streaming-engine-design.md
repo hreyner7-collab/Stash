@@ -12,16 +12,18 @@ Stash today is a downloads-only app: every track in the user's library is a loca
 1. **Storage cost** — a typical synced Spotify library is 500-5000 tracks at ~10 MB per FLAC = several gigabytes. Many users on entry-level Android phones (32 GB / 64 GB) can't store their full library and have to choose subsets.
 2. **Bandwidth cost on sync** — downloading every track imposes a large up-front bandwidth + time cost on first sync, especially over cellular.
 
-Both are addressable by offering streaming as an alternative playback path. Stash already integrates Monochrome (a community-operated Tidal API proxy) as a lossless download source (`monochrome_tidal` in `LosslessSourceRegistry`); the same source can serve as a streaming URL provider for tracks the user hasn't downloaded.
+Both are addressable by offering streaming as an alternative playback path. Stash already integrates **Kennyy** (a community-operated Qobuz API proxy at `qobuz.kennyy.com.br`) as a lossless download source (`kennyy_qobuz` in `LosslessSourceRegistry`). The signed URLs Kennyy returns point at Qobuz's Akamai CDN (`streaming-qobuz-std.akamaized.net/file?...&etsp=…&hmac=…`); the audio is plain FLAC, no DRM, with `accept-ranges: bytes` — exactly the shape ExoPlayer needs for HTTP streaming. Per-URL TTL is encoded in the `etsp` query parameter (~12h in practice). The same source can therefore serve as a streaming URL provider for tracks the user hasn't downloaded — the only difference between download and stream is what the client does with the bytes.
+
+**Why not Monochrome / Tidal?** An earlier design pass targeted `api.monochrome.tf`, but it returns DRM-encrypted DASH (Widevine, PREVIEW-only) and is currently broken anyway (Tidal's account-banning sweep is hitting all hifi-api operators). Commit `3a3f100` documents the pivot. Monochrome's website still works end-to-end because it transparently falls through to Qobuz CDN under the hood — exactly the path we'll take directly.
 
 This spec defines the streaming engine: the technical foundation that lets a track be played without first being downloaded. It does NOT define the subscription paywall (Subproject B) or the entitlement backend (Subproject C). For development, the engine is enabled via a build-time flag.
 
 ## Goals
 
-1. **A "Streaming" mode** that, when on, lets the user tap any synced track and play it via Monochrome → ExoPlayer, with no prior download.
+1. **A "Streaming" mode** that, when on, lets the user tap any synced track and play it via Kennyy/Qobuz → ExoPlayer, with no prior download.
 2. **A "Streaming" toggle at the top of the Home tab** — single-row switch, always visible, primary affordance.
 3. **Non-destructive mode transitions** — prompts at toggle time so the user explicitly chooses what to do with their existing downloads.
-4. **Catalog gap handling** — tracks not in Monochrome's Tidal catalog are surfaced as unavailable with a clear escape hatch.
+4. **Catalog gap handling** — tracks not in Kennyy's Qobuz catalog are surfaced as unavailable; no fallback path in v1.
 5. **Mid-stream URL refresh** — pause-and-resume hours later works without playback errors.
 6. **Cellular streaming preference** — never burn the user's data plan without explicit opt-in.
 7. **Subscription-lapsed transition** — if the (future) entitlement backend reports an expired subscription, mode auto-flips to Offline cleanly.
@@ -33,13 +35,15 @@ These are out of scope for the v1 streaming engine. Most are deferred to later r
 - **Subscription / paywall.** Subproject B.
 - **Server-side entitlement validation.** Subproject C.
 - **Spotify Connect equivalent** / cast-to-other-device.
-- **Online-only playlists from Monochrome itself** (e.g., Tidal-curated mixes). Stream-only access to the user's own synced library is the scope.
+- **Online-only browsing of the upstream catalog** (e.g., Qobuz / Tidal curated playlists). Stream-only access to the user's own synced library is the scope.
 - **YouTube fallback for streaming.** Download via YT remains as today; streaming via YT does not. YouTube's anti-bot measures plus mid-stream URL signing make it unreliable for streaming.
-- **YouTube recovery for unavailable tracks.** When Monochrome lacks a track, the row stays greyed-out and uninteractable. No "Search YouTube to download…" affordance in v1 — that opens a match-confidence design problem (wrong-song risk vs UI surface) that's worth doing properly in its own follow-up rather than shipping a rough cut.
+- **YouTube recovery for unavailable tracks.** When Kennyy lacks a track, the row stays greyed-out and uninteractable. No "Search YouTube to download…" affordance in v1 — that opens a match-confidence design problem (wrong-song risk vs UI surface) that's worth doing properly in its own follow-up rather than shipping a rough cut.
 - **Stash Mixes via streaming.** Daily Discover / Deep Cuts / First Listen stay download-based for v1.
-- **Album / artist drill-in via Monochrome catalog** ("show me all this artist's albums on Tidal"). Limit Online mode to the user's own synced library + downloads for v1.
+- **Album / artist drill-in via Kennyy catalog** ("show me all this artist's albums on Qobuz"). Limit Online mode to the user's own synced library + downloads for v1.
 - **First-toggle tooltip / onboarding card.** Polish; pickable for v1 follow-up.
-- **Per-source priority** for streaming. Only Monochrome (Tidal) is supported. A future spec can add Qobuz streaming via squid.wtf alongside.
+- **Per-source priority** for streaming. Only Kennyy is supported. A future spec can add `squid.wtf` Qobuz as a redundant streaming source.
+- **Tidal / Monochrome streaming via Widevine DRM.** ExoPlayer can technically do this, but it requires DASH manifest parsing + a license-server proxy + key acquisition flow — a multi-week design+build on its own. The Qobuz path is structurally simpler and the catalog coverage is comparable for mainstream content.
+- **Self-hosted Qobuz proxy.** Eventually Stash should run its own Cloudflare Worker that hits Qobuz with our own credentials and returns signed CDN URLs — removes the dependency on a third-party community operator and aligns with the entitlement-backend pattern. Out of scope for v1 of this subproject; tracked as a follow-up.
 
 ## Architecture
 
@@ -69,12 +73,14 @@ These are out of scope for the v1 streaming engine. Most are deferred to later r
 │  AvailabilityCheckWorker                                │
 │  ────────────────────────                               │
 │  For every freshly-imported metadata row, call          │
-│  MonochromeSource.resolve(query) once. Write the        │
-│  result to tracks.is_streamable (TRUE / FALSE).         │
-│  Does NOT cache URLs — they have TTLs that would        │
-│  expire before the user taps.                           │
-│  Runs in a serialised queue at 1 req/s to respect       │
-│  AggregatorRateLimiter.                                 │
+│  KennyySource.resolve(query) once. Write the result     │
+│  to tracks.is_streamable (TRUE / FALSE). Does NOT       │
+│  cache URLs — they have ~12h TTLs that would expire     │
+│  before the user taps. Runs in a serialised queue at    │
+│  1 req/s to respect AggregatorRateLimiter (the existing │
+│  Kennyy rate limit). The same source/rate-limit pool    │
+│  is shared with the download path, so concurrent sync   │
+│  + availability-check traffic naturally throttles.      │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
@@ -97,9 +103,9 @@ These are out of scope for the v1 streaming engine. Most are deferred to later r
 │  RefreshingDataSource.Factory                           │
 │  ────────────────────────────                           │
 │  DataSource wrapper around DefaultHttpDataSource.       │
-│  On 403/410 mid-stream:                                 │
+│  On 403/410 mid-stream (URL expired past etsp):         │
 │    1. Pause player                                      │
-│    2. Re-resolve via MonochromeStreamResolver           │
+│    2. Re-resolve via KennyyStreamResolver               │
 │    3. Update MediaItem URI in-place                     │
 │    4. Resume from current byte offset                   │
 │  This makes pause-then-resume-hours-later work without  │
@@ -120,7 +126,7 @@ These are out of scope for the v1 streaming engine. Most are deferred to later r
 │  ─────────────────────                                  │
 │  When current track is >60% played, look up the next    │
 │  queue item; if streamable + not in cache, call         │
-│  MonochromeStreamResolver eagerly. Auto-advance         │
+│  KennyyStreamResolver eagerly. Auto-advance             │
 │  latency drops from 300-800ms to <50ms.                 │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -133,7 +139,7 @@ One new column on `tracks`:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `is_streamable` | INTEGER (Boolean) NOT NULL DEFAULT 0 | Per-track availability flag set by `AvailabilityCheckWorker`. `1` = Monochrome returned a confident match. `0` = not yet checked OR confirmed unavailable. The "not yet checked" vs "unavailable" distinction is encoded by a separate `is_streamable_checked_at INTEGER` column. |
+| `is_streamable` | INTEGER (Boolean) NOT NULL DEFAULT 0 | Per-track availability flag set by `AvailabilityCheckWorker`. `1` = Kennyy returned a confident match. `0` = not yet checked OR confirmed unavailable. The "not yet checked" vs "unavailable" distinction is encoded by a separate `is_streamable_checked_at INTEGER` column. |
 | `is_streamable_checked_at` | INTEGER (epoch ms) nullable | Timestamp of last availability check. `NULL` = never checked. Used by the worker to re-check stale rows (e.g., monthly catalog refresh; tracks delisted by the operator). |
 
 Existing state combinations the UI must handle:
@@ -142,7 +148,7 @@ Existing state combinations the UI must handle:
 |---|---|---|---|---|
 | 1 | non-null | * | * | Downloaded, plays locally |
 | 0 | NULL | 1 | non-null | Streamable-only (needs Online mode to play) |
-| 0 | NULL | 0 | non-null | Confirmed unavailable on Monochrome |
+| 0 | NULL | 0 | non-null | Confirmed unavailable on Kennyy |
 | 0 | NULL | 0 | NULL | Not yet checked (transient; AvailabilityCheckWorker will resolve) |
 
 ### Migration
@@ -201,7 +207,7 @@ class StreamingPreference @Inject constructor(
 
 - `enabled` — the master Online toggle. Written by the Home-tab switch.
 - `streamOnCellular` — when false, the player refuses to start a stream while the device is on cellular. Existing `ConnectivityManager` integration handles the check. Refusal renders as a snackbar: "Streaming paused — on cellular. Enable in Settings → Streaming."
-- `streamQuality` — Lossless 16/44.1 (default) or High-quality lossy (~256 kbps AAC if Monochrome supports a lower tier). Independent from the existing `LosslessQualityTier` (which is for downloads).
+- `streamQuality` — Lossless 16/44.1 (default; Kennyy `fmt=6`) or High-quality lossy (~320 kbps MP3; Kennyy `fmt=5`). Independent from the existing `LosslessQualityTier` (which is for downloads).
 
 ### Subscription gating (deferred to Subproject B, but design shape locked in)
 
@@ -213,16 +219,16 @@ The `StreamingPreference.enabled = true` state requires an active entitlement. F
 |---|---|
 | `core/data/.../prefs/StreamingPreference.kt` | DataStore wrapper above |
 | `core/media/.../streaming/StreamUrlCache.kt` | In-memory `Map<Long, CachedStreamUrl(url, expiresAt)>` with TTL eviction |
-| `core/media/.../streaming/MonochromeStreamResolver.kt` | Reuses the existing `MonochromeSource` to fetch a stream URL + TTL for a given track |
+| `core/media/.../streaming/KennyyStreamResolver.kt` | Calls the existing `KennyySource.resolve(query)` to get a Qobuz CDN URL, then parses the `etsp` query parameter to compute the TTL. Returns `StreamUrl(url, expiresAt, headers)`. Thin wrapper — no new HTTP work, just URL parsing. |
 | `core/media/.../streaming/RefreshingDataSourceFactory.kt` | Media3 `DataSource.Factory` that catches 403/410 and re-resolves transparently |
 | `core/media/.../streaming/StreamCache.kt` | Hilt-bound `SimpleCache` instance (500 MB LRU) for streamed bytes. Additive to the existing `PreviewCache` — separate disk directory, separate eviction. Combined ceiling on disk: existing PreviewCache size + 500 MB. |
-| `core/data/.../sync/workers/AvailabilityCheckWorker.kt` | Per-track Monochrome availability probe; writes `is_streamable` |
+| `core/data/.../sync/workers/AvailabilityCheckWorker.kt` | Per-track Kennyy availability probe; writes `is_streamable` |
 | `feature/home/.../StreamingModeToggle.kt` | Compose composable for the top-of-Home switch |
 | `feature/home/.../StreamingModePrompt.kt` | Compose dialog for the mode-transition prompts (delete-downloads / download-everything) |
 
 ## Components — modified files
 
-- **`PlayerRepositoryImpl`** — extend MediaItem construction to choose between local file URI, cached stream URI, or fresh `MonochromeStreamResolver` resolution.
+- **`PlayerRepositoryImpl`** — extend MediaItem construction to choose between local file URI, cached stream URI, or fresh `KennyyStreamResolver` resolution.
 - **`DiffWorker` (sync)** — when streaming pref on, skip `TrackDownloadWorker.enqueue` and instead enqueue `AvailabilityCheckWorker` for the inserted rows.
 - **DAO query audits** — every "library content" query gets a `includeStreamable: Boolean` parameter. Callers pass `streamingPreference.enabled.first()`.
 - **`HomeScreen`** — add `StreamingModeToggle` row above the existing "Recently played" section.
@@ -288,9 +294,9 @@ The user sees the library populate immediately with metadata + art (via existing
 `AvailabilityCheckWorker` is a `CoroutineWorker` that drains rows with `is_streamable_checked_at IS NULL`. It:
 
 1. Pulls a batch of 50 such rows.
-2. For each, calls `MonochromeSource.resolve(TrackQuery(...))` via the existing rate-limited path.
+2. For each, calls `KennyySource.resolve(TrackQuery(...))` via the existing rate-limited path.
 3. Writes back: `is_streamable = (result != null ? 1 : 0)`, `is_streamable_checked_at = now()`.
-4. Throttled to 1 request per second (Monochrome respects).
+4. Throttled to 1 request per second (existing `AggregatorRateLimiter` for `kennyy_qobuz`).
 5. Backs off (60s) on `429 / circuit_open`.
 6. **Does NOT cache the resolved URL** — it would expire before the user taps. The worker only writes a Boolean.
 
@@ -312,7 +318,7 @@ suspend fun play(track: TrackEntity) {
             val cached = streamUrlCache.get(track.id)
             val streamUrl = cached?.takeIf { !it.isExpired() }
                 ?: run {
-                    val fresh = monochromeStreamResolver.resolve(track)
+                    val fresh = kennyyStreamResolver.resolve(track)
                     streamUrlCache.put(track.id, fresh)
                     fresh
                 }
@@ -346,7 +352,7 @@ The streaming-path `MediaItem` flows through ExoPlayer's `MediaSource.Factory`, 
 ```kotlin
 class RefreshingDataSource(
     private val inner: HttpDataSource,
-    private val resolver: MonochromeStreamResolver,
+    private val resolver: KennyyStreamResolver,
     private val cache: StreamUrlCache,
     private val trackId: Long,
 ) : DataSource by inner {
@@ -374,7 +380,7 @@ The `runBlocking { resolver.resolve(...) }` call inside `open()` is intentional 
 
 ### Pre-fetch next queue item
 
-When `Player.Listener.onPositionDiscontinuity` fires AND the current track is >60% played, look up the next item in the queue. If it's streamable and not in cache, call `MonochromeStreamResolver.resolve(nextTrack)` and warm the cache. Same hook the existing `LosslessUrlPrefetcher` uses for previews.
+When `Player.Listener.onPositionDiscontinuity` fires AND the current track is >60% played, look up the next item in the queue. If it's streamable and not in cache, call `KennyyStreamResolver.resolve(nextTrack)` and warm the cache. Same hook the existing `LosslessUrlPrefetcher` uses for previews.
 
 ### Catalog gap UX
 
@@ -425,12 +431,12 @@ Minimal: a tiny `wifi` icon prefixes the existing quality line on the full Now P
 | Layer | Tests |
 |---|---|
 | Unit — `StreamUrlCache` | TTL eviction, hit/miss/expired semantics |
-| Unit — `MonochromeStreamResolver` | Happy path, catalog miss, rate-limit, error mapping |
+| Unit — `KennyyStreamResolver` | Happy path, catalog miss, rate-limit, error mapping |
 | Unit — `RefreshingDataSource` | 403/410 → re-resolve and resume; 500 → propagate; other codes → propagate |
 | Unit — `AvailabilityCheckWorker` | Empty queue → success; batch with mixed availability → correct writes |
 | Unit — `PlayerRepositoryImpl.play()` | Decision tree: downloaded / streamable / unavailable / offline |
 | Unit — DAO query parameterisation | Each modified query returns the right set for `includeStreamable = true/false` |
-| Integration — end-to-end stream | Mock Monochrome returning a static HTTP URL; verify first sample played |
+| Integration — end-to-end stream | Mock Kennyy returning a static HTTP URL; verify first sample played |
 | Integration — mid-stream URL expiry | Inject 403 response after N bytes; verify resume |
 | Integration — mode transition prompts | Off→On with mock downloads; On→Off with mock streamable rows |
 | Manual — Spotify-synced library | 100+ tracks; verify availability check completes within reasonable time and unavailable rows are accurate |
@@ -442,7 +448,7 @@ Minimal: a tiny `wifi` icon prefixes the existing quality line on the full Now P
 
 The Online toggle's prompt copy includes one line for honesty:
 
-> Streaming uses a community Tidal proxy. The proxy operator can see what you play.
+> Streaming uses a community Qobuz proxy. The proxy operator can see what you play.
 
 Not scary, just true. Sets correct user expectations about what changes when they enable streaming vs the existing downloads-only model.
 
