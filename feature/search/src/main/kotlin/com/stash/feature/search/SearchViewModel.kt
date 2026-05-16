@@ -5,8 +5,12 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.common.perf.PerfLog
+import com.stash.core.data.prefs.StreamingPreference
+import com.stash.core.media.PlayerRepository
+import com.stash.core.media.StreamRoutingResult
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.core.model.TrackItem
 import com.stash.data.ytmusic.YTMusicApiClient
 import com.stash.data.ytmusic.model.SearchResultSection
 import com.stash.data.ytmusic.model.TopResultItem
@@ -50,6 +54,8 @@ class SearchViewModel @Inject constructor(
     private val prefetcher: PreviewPrefetcher,
     val delegate: TrackActionsDelegate,
     val losslessPrefetcher: LosslessUrlPrefetcher,
+    private val playerRepository: PlayerRepository,
+    private val streamingPreference: StreamingPreference,
 ) : ViewModel() {
 
     companion object {
@@ -144,6 +150,45 @@ class SearchViewModel @Inject constructor(
     fun onQueryChanged(query: String) {
         _uiState.update { it.copy(query = query) }
         queryFlow.value = query
+    }
+
+    /**
+     * Task 20 — Search-tab tap action.
+     *
+     * When the master streaming pref is **on**, tap streams the full
+     * track via [PlayerRepository.playFromStream]. The routing decision
+     * tree inside the repo handles "no connectivity", "cellular refused",
+     * etc., returning a [StreamRoutingResult] variant for refusal paths;
+     * we surface those as snackbars on [userMessages] so the existing
+     * search-screen snackbar host renders them.
+     *
+     * When streaming is **off**, the existing preview-on-tap behavior is
+     * preserved: [TrackActionsDelegate.previewTrack] plays a ~30s clip.
+     * This keeps the search tab usable in pure download-and-play mode.
+     *
+     * Snackbar copy matches the strings called out in the
+     * [StreamRoutingResult] KDoc so all surfaces (Library, Search) read
+     * identically when a stream-routing refusal fires.
+     */
+    fun onResultTap(item: TrackItem) {
+        viewModelScope.launch {
+            if (streamingPreference.current()) {
+                val result = playerRepository.playFromStream(item)
+                when (result) {
+                    is StreamRoutingResult.Item -> Unit // playback started by the repo
+                    StreamRoutingResult.NotAvailable ->
+                        _userMessages.emit("Couldn't find this track.")
+                    StreamRoutingResult.OfflineMode ->
+                        _userMessages.emit("Turn on Online mode to stream this track.")
+                    StreamRoutingResult.CellularRefused ->
+                        _userMessages.emit("Streaming on cellular is off in Settings.")
+                    StreamRoutingResult.NoConnectivity ->
+                        _userMessages.emit("You're offline — can't stream this track.")
+                }
+            } else {
+                delegate.previewTrack(item)
+            }
+        }
     }
 
     /**
