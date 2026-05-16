@@ -730,6 +730,64 @@ interface TrackDao {
     )
     suspend fun invalidateOldStreamableChecks(cutoff: Long): Int
 
+    // ── Release-downloads worker (Off→On "release space" path) ──────────
+
+    /**
+     * Paginated `is_downloaded = 1` scan ordered by id ASC. Drives
+     * [com.stash.core.data.sync.workers.ReleaseDownloadsWorker]'s
+     * resumable batch loop — the worker persists the last-processed id
+     * in its own DataStore and feeds it back as [lastId] on the next
+     * run, so a mid-batch cancellation picks up exactly where it left
+     * off instead of re-scanning the whole library.
+     *
+     * Ordered ASC on the primary key for a deterministic cursor; that's
+     * cheaper than any other sort and the order doesn't matter to the
+     * caller (every matching row will eventually be processed).
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_downloaded = 1
+          AND id > :lastId
+        ORDER BY id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun downloadedAfter(lastId: Long, limit: Int): List<TrackEntity>
+
+    /**
+     * Single-row clear of the download bookkeeping columns. Paired with
+     * a file-delete in [com.stash.core.data.sync.workers.ReleaseDownloadsWorker]:
+     * the DB write runs **first** so a mid-op crash leaves an orphaned
+     * file (cleaned up by the existing orphan sweeper) rather than a
+     * row whose `file_path` points at a deleted file. Mirrors the column
+     * set cleared by [resetForReDownload] / [bulkResetForReDownload].
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_downloaded = 0,
+            file_path = NULL,
+            file_size_bytes = 0
+        WHERE id = :id
+        """
+    )
+    suspend fun markAsNotDownloaded(id: Long)
+
+    /**
+     * One-shot count of `is_downloaded = 1` rows. Used by the release
+     * worker to decide whether it can safely clear its resume cursor —
+     * if any rows remain, the next run must keep paging instead of
+     * starting over from id 0.
+     *
+     * Distinct from the existing [getCount] alias only by name + intent:
+     * keeping a dedicated function makes the worker's call sites self-
+     * documenting and decouples it from any future refactor of
+     * [getCount]'s contract.
+     */
+    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
+    suspend fun downloadedCount(): Int
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
