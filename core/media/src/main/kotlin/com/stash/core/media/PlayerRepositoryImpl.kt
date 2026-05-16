@@ -12,12 +12,19 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.service.StashPlaybackService
+import com.stash.core.media.streaming.ConnectivityMonitor
+import com.stash.core.media.streaming.KennyyStreamResolver
+import com.stash.core.media.streaming.StreamUrlCache
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
+import com.stash.core.model.TrackItem
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,11 +34,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import androidx.core.net.toUri
@@ -48,7 +57,21 @@ class PlayerRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val playbackStateStore: PlaybackStateStore,
     private val musicRepository: MusicRepository,
+    private val streamingPreference: StreamingPreference,
+    private val streamResolver: KennyyStreamResolver,
+    private val streamUrlCache: StreamUrlCache,
+    private val connectivity: ConnectivityMonitor,
+    private val trackDao: TrackDao,
 ) : PlayerRepository {
+
+    /**
+     * Visible-for-testing indirection so unit tests can stub out the
+     * on-disk existence check without touching the real filesystem.
+     * Production reads through to [File.exists]. Tests override via
+     * the constructor that wraps this instance (see
+     * `PlayerRepositoryStreamingTest`).
+     */
+    internal var filePathExistsOnDisk: (String) -> Boolean = { File(it).exists() }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -303,6 +326,155 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         }
     }
+
+    // ---- Streaming routing ----
+
+    override suspend fun playTrack(track: Track): StreamRoutingResult {
+        val entity = trackDao.getById(track.id) ?: track.toEntity()
+        val result = buildMediaItemForTrack(entity)
+        if (result is StreamRoutingResult.Item) {
+            playSingleMediaItem(result.mediaItem)
+        }
+        return result
+    }
+
+    override suspend fun playFromStream(item: TrackItem): StreamRoutingResult {
+        // Search-tab tap: no library row yet, so synthesize a transient
+        // TrackEntity carrying only the fields buildMediaItemForTrack
+        // reads. isDownloaded = false routes us straight into the
+        // streaming branch.
+        val transient = TrackEntity(
+            id = 0L,
+            title = item.title,
+            artist = item.artist,
+            album = item.album ?: "",
+            durationMs = (item.durationSeconds * 1000).toLong(),
+            isDownloaded = false,
+            isStreamable = true,
+            albumArtUrl = item.thumbnailUrl,
+        )
+        val result = buildMediaItemForTrack(transient)
+        if (result is StreamRoutingResult.Item) {
+            playSingleMediaItem(result.mediaItem)
+        }
+        return result
+    }
+
+    /**
+     * Streaming-routing decision tree. The ordering matters:
+     *
+     * 1. Local file present + actually on disk → play it. Cheap, no
+     *    network, works in airplane mode. Always preferred even when
+     *    streaming is enabled — caching what you already have is free.
+     * 2. Not streamable → [StreamRoutingResult.NotAvailable]. The
+     *    library row should already be greyed out (Task 18); this is
+     *    defense-in-depth.
+     * 3. Streaming pref off → [StreamRoutingResult.OfflineMode]. The
+     *    track is theoretically streamable but the user has opted out.
+     * 4. No validated internet → [StreamRoutingResult.NoConnectivity].
+     *    Includes airplane mode, captive-portal-not-yet-accepted, and
+     *    any other "associated but no real internet" state.
+     * 5. Cellular + cellular pref off → [StreamRoutingResult.CellularRefused].
+     *    The user has a data plan they want to protect.
+     * 6. URL cache hit → use the cached signed URL.
+     * 7. Cache miss → resolve via Kennyy and cache the result. Resolver
+     *    null = no match in the proxy's catalog → [NotAvailable].
+     */
+    internal suspend fun buildMediaItemForTrack(track: TrackEntity): StreamRoutingResult {
+        val localPath = track.filePath
+        if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
+            val uri = if (localPath.startsWith("/")) Uri.parse("file://$localPath") else Uri.parse(localPath)
+            return StreamRoutingResult.Item(
+                MediaItem.Builder()
+                    .setMediaId(track.id.toString())
+                    .setUri(uri)
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle(track.title)
+                            .setArtist(track.artist)
+                            .setAlbumTitle(track.album)
+                            .setArtworkUri(
+                                (track.albumArtPath ?: track.albumArtUrl)?.let { Uri.parse(it) }
+                            )
+                            .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, track.id) })
+                            .build()
+                    )
+                    .build()
+            )
+        }
+        if (!track.isStreamable) return StreamRoutingResult.NotAvailable
+        if (!streamingPreference.current()) return StreamRoutingResult.OfflineMode
+        if (!connectivity.isConnected()) return StreamRoutingResult.NoConnectivity
+        if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) {
+            return StreamRoutingResult.CellularRefused
+        }
+
+        val cached = streamUrlCache.get(track.id)
+        val stream = cached ?: streamResolver.resolve(track)?.also {
+            streamUrlCache.put(track.id, it)
+        } ?: return StreamRoutingResult.NotAvailable
+
+        return StreamRoutingResult.Item(
+            MediaItem.Builder()
+                .setMediaId(track.id.toString())
+                .setUri(Uri.parse(stream.url))
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(track.title)
+                        .setArtist(track.artist)
+                        .setAlbumTitle(track.album)
+                        .setArtworkUri(
+                            (track.albumArtPath ?: track.albumArtUrl)?.let { Uri.parse(it) }
+                        )
+                        .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, track.id) })
+                        .build()
+                )
+                .build()
+        )
+    }
+
+    /**
+     * Helper used by [playTrack] and [playFromStream]: replace the queue
+     * with a single MediaItem and start playback. Mirrors the prepare()
+     * + play() pattern used by [setQueue].
+     *
+     * Also clears the library-shuffle armed state since the user has
+     * navigated into a specific track — same invariant as [setQueue].
+     */
+    private suspend fun playSingleMediaItem(mediaItem: MediaItem) {
+        libraryShuffleActive = false
+        librarySnapshot = emptyList()
+        val controller = ensureController() ?: return
+        controller.setMediaItem(mediaItem)
+        controller.prepare()
+        controller.play()
+    }
+
+    /**
+     * Lossy mapping from the domain [Track] back to a [TrackEntity] for
+     * the routing decision tree. Used only when [trackDao.getById] returns
+     * null — i.e. the track was resolved from a non-Room source. Carries
+     * the routing-relevant fields ([isDownloaded], [filePath],
+     * [isStreamable]) and the metadata fields the MediaItem builder reads.
+     *
+     * [Track] doesn't currently carry [isStreamable]; pessimistically
+     * defaults to `false` here, which is safe — if a Track lookup misses
+     * Room and isn't already downloaded, treating it as not-streamable
+     * surfaces a [NotAvailable] rather than mysteriously falling through.
+     */
+    private fun Track.toEntity(): TrackEntity = TrackEntity(
+        id = id,
+        title = title,
+        artist = artist,
+        album = album,
+        durationMs = durationMs,
+        filePath = filePath,
+        isDownloaded = isDownloaded,
+        isStreamable = false,
+        albumArtUrl = albumArtUrl,
+        albumArtPath = albumArtPath,
+        isrc = isrc,
+    )
 
     // ---- Internals ----
 
