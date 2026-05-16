@@ -28,13 +28,17 @@ import com.stash.core.media.equalizer.EqController
 import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
+import com.stash.core.media.streaming.PrefetchOrchestrator
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.guava.future
 import javax.inject.Inject
@@ -61,6 +65,7 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var trackDao: TrackDao
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
+    @Inject lateinit var prefetchOrchestrator: PrefetchOrchestrator
 
     companion object {
         /** Custom command action for toggling shuffle mode. */
@@ -80,6 +85,16 @@ class StashPlaybackService : MediaLibraryService() {
         private const val RECENTLY_ADDED_ID = "RECENTLY_ADDED"
         private const val PLAYLIST_PREFIX = "PLAYLIST_"
         private const val SHUFFLE_PLAY_PREFIX = "SHUFFLE_PLAY_"
+
+        /**
+         * How often the prefetch poll checks playback position against
+         * the 60 %-played threshold. 5 s keeps the worst-case prefetch
+         * latency below half a poll-interval after crossing the
+         * threshold without burning unnecessary CPU on a wakelock-held
+         * service. Pulling this lower wastes battery; higher than ~10 s
+         * risks crossing the threshold too late on short (<60 s) tracks.
+         */
+        private const val PREFETCH_POLL_INTERVAL_MS = 5_000L
     }
 
     private var mediaSession: MediaLibrarySession? = null
@@ -89,6 +104,15 @@ class StashPlaybackService : MediaLibraryService() {
     // when the service stops.
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var likeObserverJob: Job? = null
+
+    /**
+     * Periodic position-poll that drives [PrefetchOrchestrator]. Started
+     * when playback becomes active, cancelled when it stops or when a
+     * track transition occurs (a new poll is started for the next track).
+     * Runs on the service's main scope so player reads stay on the
+     * required thread.
+     */
+    private var prefetchPollJob: Job? = null
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -163,6 +187,23 @@ class StashPlaybackService : MediaLibraryService() {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 updateCustomLayout()
                 onTrackTransitionForLoudness(mediaItem)
+                // Every transition gives the orchestrator a fresh
+                // "attempted" budget so the new "next" track can be
+                // prefetched even if the previous next-id was the same
+                // track id we already burned an attempt on (e.g.
+                // REPEAT_ONE loops, manual skip-back).
+                prefetchOrchestrator.resetSession()
+                // Restart the poll against the new current item.
+                if (player.isPlaying) startPrefetchPoll(player)
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    startPrefetchPoll(player)
+                } else {
+                    prefetchPollJob?.cancel()
+                    prefetchPollJob = null
+                }
             }
 
             override fun onRepeatModeChanged(repeatMode: Int) {
@@ -174,6 +215,44 @@ class StashPlaybackService : MediaLibraryService() {
             }
         })
         updateCustomLayout()
+    }
+
+    /**
+     * Cancels any existing prefetch poll and starts a new one that ticks
+     * every [PREFETCH_POLL_INTERVAL_MS]. Each tick reads the current
+     * playback position and the *next* queue item's mediaId off the
+     * player on the main thread, then hands those to
+     * [PrefetchOrchestrator.onPlaybackProgress] which decides whether to
+     * launch a resolve.
+     *
+     * The poll runs as long as the player reports `isPlaying = true`.
+     * `onIsPlayingChanged(false)` cancels it; `onMediaItemTransition`
+     * cancels + restarts it so a new "next" target is picked up
+     * immediately after auto-advance.
+     */
+    @OptIn(UnstableApi::class)
+    private fun startPrefetchPoll(player: Player) {
+        prefetchPollJob?.cancel()
+        prefetchPollJob = serviceScope.launch {
+            while (isActive && player.isPlaying) {
+                val nextIndex = player.nextMediaItemIndex
+                val nextId = if (nextIndex == C.INDEX_UNSET) {
+                    null
+                } else {
+                    runCatching { player.getMediaItemAt(nextIndex) }
+                        .getOrNull()
+                        ?.mediaId
+                        ?.toLongOrNull()
+                }
+                prefetchOrchestrator.onPlaybackProgress(
+                    scope = serviceScope,
+                    nextTrackId = nextId,
+                    positionMs = player.currentPosition,
+                    durationMs = player.duration,
+                )
+                delay(PREFETCH_POLL_INTERVAL_MS)
+            }
+        }
     }
 
     /**
@@ -309,6 +388,7 @@ class StashPlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         likeObserverJob?.cancel()
+        prefetchPollJob?.cancel()
         serviceScope.cancel()
         mediaSession?.run {
             player.release()
