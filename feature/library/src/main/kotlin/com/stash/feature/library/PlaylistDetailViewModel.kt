@@ -185,6 +185,19 @@ class PlaylistDetailViewModel @Inject constructor(
      * The returned cascade summary is emitted on [userMessages] as a
      * human-readable string so the detail screen can show a Snackbar.
      */
+    /** v0.9.27 — enqueue a background download for [track]. */
+    fun downloadForOffline(track: Track) {
+        viewModelScope.launch { musicRepository.enqueueDownload(track) }
+    }
+
+    /**
+     * v0.9.27 — remove [track]'s on-disk file but keep the library row
+     * so the user can re-download or stream it later.
+     */
+    fun removeDownload(track: Track) {
+        viewModelScope.launch { musicRepository.removeDownload(track) }
+    }
+
     fun deleteTrackFromPlaylist(track: Track, alsoBlacklist: Boolean) {
         viewModelScope.launch {
             val isDownloadsMix = uiState.value.playlist?.type == PlaylistType.DOWNLOADS_MIX

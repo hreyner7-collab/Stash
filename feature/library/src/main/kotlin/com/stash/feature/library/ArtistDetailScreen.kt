@@ -190,6 +190,14 @@ fun ArtistDetailScreen(
                     viewModel.deleteTrack(it)
                     selectedTrack = null
                 },
+                onDownloadForOffline = {
+                    viewModel.downloadForOffline(it)
+                    selectedTrack = null
+                },
+                onRemoveDownload = {
+                    viewModel.removeDownload(it)
+                    selectedTrack = null
+                },
             )
         }
     }

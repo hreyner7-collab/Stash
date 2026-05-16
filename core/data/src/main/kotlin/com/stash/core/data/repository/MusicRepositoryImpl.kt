@@ -386,6 +386,33 @@ class MusicRepositoryImpl @Inject constructor(
         return true
     }
 
+    override suspend fun removeDownload(track: Track) {
+        // Non-destructive: drop the file but keep the row + art so the
+        // track can be re-downloaded or streamed later. Mirrors what
+        // ReleaseDownloadsWorker does per-row — see that worker's KDoc
+        // for the rationale on why we don't emit a deletion event.
+        track.filePath?.let { deleteTrackFile(it) }
+        trackDao.markAsNotDownloaded(track.id)
+    }
+
+    override suspend fun enqueueDownload(track: Track) {
+        // Mirror DiffWorker's "new track" enqueue shape: sync_id = null
+        // tags this as a manual / user-initiated download (no associated
+        // sync session) — same shape as the search-tab download path
+        // and the streaming-mode bulk-download orchestrator above.
+        val searchQuery = "${track.artist} - ${track.title}"
+        downloadQueueDao.insert(
+            com.stash.core.data.db.entity.DownloadQueueEntity(
+                trackId = track.id,
+                syncId = null,
+                searchQuery = searchQuery,
+                youtubeUrl = track.youtubeId?.let {
+                    "https://music.youtube.com/watch?v=$it"
+                },
+            )
+        )
+    }
+
     override suspend fun insertPlaylist(playlist: Playlist): Long =
         playlistDao.insert(playlist.toEntity())
 
