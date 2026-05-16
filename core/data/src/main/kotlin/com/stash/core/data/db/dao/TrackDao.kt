@@ -645,6 +645,66 @@ interface TrackDao {
     )
     suspend fun markLoudnessFailed(id: Long, now: Long, nanSentinel: Float = Float.NaN)
 
+    // ── Stream availability (v0.9.27) ───────────────────────────────────
+
+    /**
+     * Returns up to [limit] tracks whose stream availability has never
+     * been checked AND that aren't already on disk. Drives
+     * [com.stash.core.data.sync.workers.AvailabilityCheckWorker]'s batch
+     * loop.
+     *
+     * `is_streamable_checked_at IS NULL` is the canonical "needs work"
+     * sentinel (mirrors `loudness_measured_at IS NULL` from v0.9.25) —
+     * the worker stamps this column after every check, success or failure,
+     * so a row is only re-picked by Task 10's recheck worker after the
+     * 30-day staleness window.
+     *
+     * `file_path IS NULL` excludes already-downloaded rows: the streaming
+     * resolver isn't consulted for tracks the user has locally, and
+     * polluting their `is_streamable` flag would just waste Kennyy quota.
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_streamable_checked_at IS NULL
+          AND file_path IS NULL
+        LIMIT :limit
+        """
+    )
+    suspend fun tracksNeedingStreamableCheck(limit: Int): List<TrackEntity>
+
+    /**
+     * Count of rows still awaiting an initial streamable check. The
+     * worker calls this after draining a batch to decide whether to
+     * re-enqueue itself for another pass before WorkManager's 10-minute
+     * per-run cap forces an exit.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM tracks
+        WHERE is_streamable_checked_at IS NULL
+          AND file_path IS NULL
+        """
+    )
+    suspend fun tracksNeedingStreamableCheckCount(): Int
+
+    /**
+     * Writes the result of a single availability check: the boolean
+     * `is_streamable` flag and the wall-clock timestamp of the attempt.
+     * Always pairs both columns — even a `false` result needs the
+     * timestamp set so the row doesn't get re-picked on the next worker
+     * invocation.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_streamable = :available,
+            is_streamable_checked_at = :now
+        WHERE id = :id
+        """
+    )
+    suspend fun setStreamable(id: Long, available: Boolean, now: Long)
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
