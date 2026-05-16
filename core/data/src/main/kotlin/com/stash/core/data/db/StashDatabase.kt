@@ -70,7 +70,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackBlocklistEntity::class,
         TrackSkipEventEntity::class,
     ],
-    version = 25,
+    version = 26,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -695,6 +695,25 @@ abstract class StashDatabase : RoomDatabase() {
         val MIGRATION_24_25 = object : Migration(24, 25) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN album_artist TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * v25 → v26: per-track streamability metadata.
+         *
+         * `is_streamable` is the cached result of an `AvailabilityCheckWorker`
+         * lookup against Kennyy's Qobuz proxy. `is_streamable_checked_at` is the
+         * timestamp of that lookup (NULL = never checked, so the worker can drain
+         * the un-checked rows on first run).
+         *
+         * Both columns are additive; existing rows survive untouched with their
+         * default values, and the `AvailabilityCheckWorker` fills them in over
+         * the next few minutes after first launch on v0.9.27.
+         */
+        val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN is_streamable_checked_at INTEGER")
             }
         }
     }
