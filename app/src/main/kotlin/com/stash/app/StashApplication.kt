@@ -24,8 +24,6 @@ import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
-import com.stash.core.data.sync.workers.AvailabilityCheckWorker
-import com.stash.core.data.sync.workers.AvailabilityRecheckWorker
 import com.stash.core.data.sync.workers.DiscoveryDownloadWorker
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.LoudnessBackfillWorker
@@ -275,19 +273,11 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
         applicationScope.launch { maybeBackfillTrackAlbums() }
 
-        // Online streaming engine: drain any pre-existing un-checked rows on
-        // first launch after upgrade, then schedule the weekly periodic
-        // re-check. Both calls are idempotent (unique-work policies). Gated
-        // on the canonical [BuildConfig.STREAMING_ENGINE_ENABLED] kill-switch
-        // so dormant builds incur zero startup cost.
-        if (BuildConfig.STREAMING_ENGINE_ENABLED) {
-            applicationScope.launch {
-                if (trackDao.tracksNeedingStreamableCheckCount() > 0) {
-                    AvailabilityCheckWorker.enqueueSelf(this@StashApplication)
-                }
-                AvailabilityRecheckWorker.schedulePeriodic(this@StashApplication)
-            }
-        }
+        // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker
+        // were removed when Library reverted to downloaded-only. They populated
+        // is_streamable for the "show streamable rows in Library" surface that
+        // no longer exists. Streaming-tap availability is determined per-call
+        // by KennyySource at the moment the user taps a search result.
 
         // Start the local listening-history recorder + optional Last.fm
         // and YouTube Music scrobbler. All are safe to start unconditionally —

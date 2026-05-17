@@ -20,7 +20,6 @@ import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.RemotePlaylistSnapshotEntity
 import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
 import com.stash.core.data.db.entity.TrackEntity
-import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.SyncPreferencesManager
 import com.stash.core.data.sync.SyncStateManager
@@ -44,7 +43,7 @@ import kotlinx.coroutines.flow.first
  * Outputs [KEY_SYNC_ID] and [KEY_NEW_TRACKS] for downstream workers.
  */
 @HiltWorker
-open class DiffWorker @AssistedInject constructor(
+class DiffWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val database: StashDatabase,
@@ -58,7 +57,6 @@ open class DiffWorker @AssistedInject constructor(
     private val musicRepository: MusicRepository,
     private val syncPreferencesManager: SyncPreferencesManager,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
-    private val streamingPreference: StreamingPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -85,16 +83,6 @@ open class DiffWorker @AssistedInject constructor(
             // the Sync Preferences cards.
             val spotifySyncMode = syncPreferencesManager.spotifySyncMode.first()
             val youtubeSyncMode = syncPreferencesManager.youtubeSyncMode.first()
-
-            // Read the streaming-mode toggle ONCE up front, not per-row.
-            // The user can't realistically flip it mid-sync, and even if
-            // they did, behaving consistently for the whole run is the
-            // correct semantics. When `true`, new track rows still land
-            // in the `tracks` table (the metadata is needed regardless)
-            // but skip the `download_queue` enqueue; AvailabilityCheckWorker
-            // gets enqueued once at the end of the run to fill in the
-            // `is_streamable` columns added in Task 1.
-            val streamingMode = streamingPreference.current()
 
             val playlistSnapshots = remoteSnapshotDao.getPlaylistSnapshotsBySyncId(syncId)
             var newTrackCount = 0
@@ -147,20 +135,9 @@ open class DiffWorker @AssistedInject constructor(
                         trackSnapshots = trackSnapshots,
                         syncMode = playlistSyncMode,
                         syncId = syncId,
-                        streamingMode = streamingMode,
                     )
                 }
                 newTrackCount += playlistNewTracks
-            }
-
-            // Streaming mode: kick off one AvailabilityCheckWorker run
-            // AFTER the playlist loop, only if at least one new track was
-            // inserted. Per-row enqueue would just REPLACE the same unique
-            // work N times — wasteful logging and the same end state.
-            // Skipping the enqueue when nothing is new avoids spinning up
-            // the worker just to immediately find an empty queue.
-            if (streamingMode && newTrackCount > 0) {
-                enqueueAvailabilityCheck()
             }
 
             // Soft-hide YouTube playlists that rotated off the home feed
@@ -316,7 +293,6 @@ open class DiffWorker @AssistedInject constructor(
         trackSnapshots: List<RemoteTrackSnapshotEntity>,
         syncMode: SyncMode,
         syncId: Long,
-        streamingMode: Boolean,
     ): Int {
         // In REFRESH mode, clear existing playlist-track associations
         // before inserting the current set. In ACCUMULATE mode, keep
@@ -443,25 +419,21 @@ open class DiffWorker @AssistedInject constructor(
                     position = trackSnapshot.position,
                 )
 
-                // Streaming mode: the track row still lands (we need the
-                // metadata for the Library) but no download_queue row is
-                // created — playback will resolve a stream URL on demand.
-                // newTrackCount still increments because the count drives
-                // the post-loop AvailabilityCheckWorker enqueue decision.
-                if (!streamingMode) {
-                    val searchQuery = "${trackSnapshot.artist} - ${trackSnapshot.title}"
-                    Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
-                    downloadQueueDao.insert(
-                        DownloadQueueEntity(
-                            trackId = trackId,
-                            syncId = syncId,
-                            searchQuery = searchQuery,
-                            youtubeUrl = trackSnapshot.youtubeId?.let {
-                                "https://music.youtube.com/watch?v=$it"
-                            },
-                        )
+                // v0.9.30 Path A: Library is downloaded-only — every new
+                // track row always lands in the download queue regardless
+                // of the streaming-mode pref.
+                val searchQuery = "${trackSnapshot.artist} - ${trackSnapshot.title}"
+                Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
+                downloadQueueDao.insert(
+                    DownloadQueueEntity(
+                        trackId = trackId,
+                        syncId = syncId,
+                        searchQuery = searchQuery,
+                        youtubeUrl = trackSnapshot.youtubeId?.let {
+                            "https://music.youtube.com/watch?v=$it"
+                        },
                     )
-                }
+                )
                 newTrackCount++
             }
         }
@@ -496,18 +468,6 @@ open class DiffWorker @AssistedInject constructor(
         }
 
         return newTrackCount
-    }
-
-    /**
-     * Test seam — delegates to [AvailabilityCheckWorker.enqueueSelf] in
-     * production. The static `WorkManager.getInstance(ctx)` lookup inside
-     * `enqueueSelf` isn't mockable in plain JVM tests, so the test
-     * subclass overrides this no-op to record invocation count instead
-     * (mirrors [AvailabilityCheckWorker.onTrackProcessed] +
-     * [LoudnessBackfillWorker]'s `shouldStop`).
-     */
-    protected open fun enqueueAvailabilityCheck() {
-        AvailabilityCheckWorker.enqueueSelf(applicationContext)
     }
 
     /**
