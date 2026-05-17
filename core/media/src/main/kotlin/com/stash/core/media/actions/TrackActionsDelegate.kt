@@ -149,17 +149,40 @@ class TrackActionsDelegate @Inject constructor(
     fun previewTrack(track: TrackItem) {
         val videoId = track.videoId
 
-        // Idempotency guard: if we're already playing — or loading — this same
-        // videoId, do nothing. Prevents redundant stop+restart cycles from
-        // phantom clicks, double-taps, or any future caller that fires the
-        // same id twice within the play window. The Stop button already uses
-        // [stopPreview] so legitimate "stop" taps still work; this only
-        // swallows spurious "play what's already playing" requests.
-        if ((previewState.value as? PreviewState.Playing)?.videoId == videoId) return
-        if (_previewLoadingId.value == videoId) return
-
-        previewPlayer.stop()
         scope().launch {
+            // Streaming mode: skip preview entirely. Route to full-track playback
+            // via PlayerRepository.playFromStream. Same routing as
+            // SearchViewModel.onResultTap, so every surface that calls
+            // delegate.previewTrack (SearchScreen, ArtistProfileScreen,
+            // AlbumDiscoveryScreen, etc.) behaves identically when streaming
+            // is enabled instead of falling back to the 30s preview clip.
+            if (streamingPreference.current()) {
+                val result = playerRepository.playFromStream(track)
+                when (result) {
+                    is com.stash.core.media.StreamRoutingResult.Item -> Unit
+                    com.stash.core.media.StreamRoutingResult.NotAvailable ->
+                        _userMessages.emit("Couldn't find this track.")
+                    com.stash.core.media.StreamRoutingResult.OfflineMode ->
+                        _userMessages.emit("Turn on Online mode to stream this track.")
+                    com.stash.core.media.StreamRoutingResult.CellularRefused ->
+                        _userMessages.emit("Streaming on cellular is off in Settings.")
+                    com.stash.core.media.StreamRoutingResult.NoConnectivity ->
+                        _userMessages.emit("You're offline — can't stream this track.")
+                }
+                return@launch
+            }
+
+            // Preview-mode idempotency guard: if we're already playing — or
+            // loading — this same videoId, do nothing. Prevents redundant
+            // stop+restart cycles from phantom clicks, double-taps, or any
+            // future caller that fires the same id twice within the play
+            // window. The Stop button already uses [stopPreview] so legitimate
+            // "stop" taps still work; this only swallows spurious "play what's
+            // already playing" requests.
+            if ((previewState.value as? PreviewState.Playing)?.videoId == videoId) return@launch
+            if (_previewLoadingId.value == videoId) return@launch
+
+            previewPlayer.stop()
             val t0 = System.currentTimeMillis()
             _previewLoadingId.value = videoId
             try {
