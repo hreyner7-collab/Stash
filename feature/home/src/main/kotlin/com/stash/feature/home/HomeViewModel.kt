@@ -9,7 +9,6 @@ import com.stash.core.auth.model.AuthState
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
-import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
@@ -90,7 +89,6 @@ class HomeViewModel @Inject constructor(
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
     private val recipeDao: StashMixRecipeDao,
     private val downloadQueueDao: DownloadQueueDao,
-    private val trackDao: TrackDao,
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
@@ -100,11 +98,9 @@ class HomeViewModel @Inject constructor(
 
     /**
      * Master streaming-mode toggle observed by the Home `StreamingModeToggle`.
-     * Mirrors [StreamingPreference.enabled] one-for-one — the orchestrator
-     * call below routes writes through `MusicRepository.applyStreamingMode`
-     * so workers + prefs stay in sync, but reads come straight off the
-     * DataStore Flow so the switch reflects the same source of truth a
-     * remote `onEntitlementLost` flip would update.
+     * Mirrors [StreamingPreference.enabled] one-for-one — writes route
+     * through `MusicRepository.applyStreamingMode` (currently just a pref
+     * write — v0.9.30 Path A: Library is downloaded-only regardless).
      *
      * Gated for visibility by `StashConstants.STREAMING_ENGINE_ENABLED`
      * inside the composable — the StateFlow keeps emitting regardless,
@@ -119,70 +115,43 @@ class HomeViewModel @Inject constructor(
         )
 
     /**
-     * Snapshot of the counts the Home `StreamingModePrompt` dialogs render.
-     * Read once when the user taps the toggle so the prompt can show real
-     * numbers ("Release 1247 tracks (38 GB)") instead of pre-loading
-     * everything reactively. Both fields are queried in parallel from
-     * Room — they don't depend on each other, and the toggle path is rare
-     * enough that the extra structured-concurrency overhead is negligible.
+     * One-shot event: emit when the user is about to enable streaming for
+     * the first time so the Home screen can show the privacy disclosure
+     * dialog. The pref is already being flipped — the dialog is purely
+     * informational ("here's what streaming means"), not a confirmation
+     * gate.
      */
-    data class StreamingTogglePromptData(
-        /** Downloaded-track count (for the Off→On prompt's "Release N" CTA). */
-        val downloadedCount: Int,
-        /** Downloaded-track total disk usage (Off→On prompt's "Y MB" hint). */
-        val downloadedBytes: Long,
-        /** Stream-only row count (On→Off prompt's "N stream-only tracks"). */
-        val streamableCount: Int,
+    private val _showStreamingDisclosure = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+    val showStreamingDisclosure: SharedFlow<Unit> = _showStreamingDisclosure.asSharedFlow()
 
     /**
-     * Fetches the count snapshot used by the Home `StreamingModePrompt`
-     * dialogs. Called by [HomeScreen] when the user taps the toggle so the
-     * prompt can render real numbers. Reads both counts in parallel via
-     * `async` — they hit independent indices.
+     * v0.9.30 Path A: simplified one-arg streaming toggle.
      *
-     * Returns a single snapshot rather than a `StateFlow` because the
-     * prompt is a transient confirmation: by the time the user dismisses
-     * or confirms, any drift in the underlying counts no longer matters
-     * (the orchestrator inside [MusicRepository.applyStreamingMode]
-     * re-reads the live state when it runs).
-     */
-    suspend fun fetchStreamingTogglePromptData(): StreamingTogglePromptData {
-        val downloadedCount = trackDao.downloadedCount()
-        val downloadedBytes = trackDao.downloadedBytesTotal()
-        val streamableCount = trackDao.streamableOnlyCount()
-        return StreamingTogglePromptData(
-            downloadedCount = downloadedCount,
-            downloadedBytes = downloadedBytes,
-            streamableCount = streamableCount,
-        )
-    }
-
-    /**
-     * Confirmed-toggle handler for the Home `StreamingModeToggle`. Called
-     * by [HomeScreen] after the user resolves the [StreamingModePrompt]
-     * dialog (either branch — keep/release for Off→On, download/start-
-     * fresh for On→Off). Delegates straight to
-     * [MusicRepository.applyStreamingMode], which persists the master
-     * pref and fires whichever workers are needed.
+     * Off→On: if the user has never seen the disclosure, emit a one-shot
+     * event so the screen renders the AlertDialog after the pref flips.
+     * On→Off: no prompt — flip the pref instantly.
      *
-     * The prompt is rendered by the screen, not the ViewModel — see
-     * [HomeScreen]'s `pendingToggle` state. Until Task 16 the toggle
-     * called a single-arg `onStreamingToggle(enabled)`; Task 17 split
-     * that into this triple-arg signature so the side-effects map
-     * one-to-one with the dialog's button taps.
+     * Library is always downloaded-only regardless of this toggle; the
+     * pref gates only search-tap streaming and the Now Playing wifi
+     * indicator. See `MusicRepository.applyStreamingMode` for the
+     * (deliberately minimal) side-effects.
      */
-    fun onStreamingToggleConfirmed(
-        enabled: Boolean,
-        releaseDownloads: Boolean,
-        downloadAllStreamable: Boolean,
-    ) {
+    fun onStreamingToggle(enabled: Boolean) {
         viewModelScope.launch {
-            musicRepository.applyStreamingMode(
-                enabled = enabled,
-                releaseDownloads = releaseDownloads,
-                downloadAllStreamable = downloadAllStreamable,
-            )
+            musicRepository.applyStreamingMode(enabled = enabled)
+            if (enabled) {
+                val prefs = context.getSharedPreferences(
+                    STREAMING_DISCLOSURE_PREFS,
+                    Context.MODE_PRIVATE,
+                )
+                if (!prefs.getBoolean(STREAMING_DISCLOSURE_SEEN_KEY, false)) {
+                    _showStreamingDisclosure.tryEmit(Unit)
+                    prefs.edit().putBoolean(STREAMING_DISCLOSURE_SEEN_KEY, true).apply()
+                }
+            }
         }
     }
 
@@ -867,6 +836,13 @@ class HomeViewModel @Inject constructor(
                 playerRepository.setQueue(allTracks, startIndex = 0)
             }
         }
+    }
+
+    companion object {
+        /** SharedPreferences file backing the one-time streaming disclosure flag. */
+        private const val STREAMING_DISCLOSURE_PREFS = "streaming_disclosure"
+        /** Boolean flag — true once the user has dismissed the disclosure dialog. */
+        private const val STREAMING_DISCLOSURE_SEEN_KEY = "streaming_disclosure_seen"
     }
 }
 
