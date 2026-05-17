@@ -114,5 +114,7 @@ class MusicRepositoryDownloadsMixTest {
         discoveryQueueDao = discoveryQueueDao,
         blocklistGuard = mockk(relaxed = true),
         trackMatcher = mockk(relaxed = true),
+        stashMixRecipeDao = mockk(relaxed = true),
+        downloadNetworkPreference = mockk(relaxed = true),
     )
 }

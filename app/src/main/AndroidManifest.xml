@@ -72,5 +72,22 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
+
+        <!--
+            FileProvider for sharing crash reports written to
+            cacheDir/crashes/ by CrashFileStore. The Settings → Diagnostics
+            "Share latest crash report" button builds a content:// URI
+            against this authority and grants FLAG_GRANT_READ_URI_PERMISSION
+            to the recipient app (email / Discord / GitHub upload).
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
