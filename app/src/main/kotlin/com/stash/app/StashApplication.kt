@@ -10,6 +10,7 @@ import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.diagnostics.CrashReporter
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
@@ -120,6 +121,15 @@ class StashApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var losslessRetryScheduler: LosslessRetryScheduler
 
+    /**
+     * Writes uncaught exceptions to `cacheDir/crashes/` so the user can
+     * later share the latest report from Settings → Diagnostics. Installed
+     * as the first thing after super.onCreate() so it catches errors from
+     * every subsequent init step.
+     */
+    @Inject
+    lateinit var crashReporter: CrashReporter
+
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -135,6 +145,12 @@ class StashApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        // First thing after super: install the crash-to-file handler so any
+        // exception thrown by the init steps below still produces a report
+        // the user can share from Settings → Diagnostics. The handler
+        // chains through to the platform default so the OS still records
+        // the crash and the process exits cleanly.
+        crashReporter.install()
         // Install the app-wide Coil ImageLoader synchronously so it is ready
         // for the first Compose frame (and any AsyncImage composed before any
         // async startup work completes).
