@@ -96,10 +96,15 @@ class SettingsViewModel @Inject constructor(
     private val crashFileStore: CrashFileStore,
 ) : ViewModel() {
 
+    /** Internal mutable UI state that is combined with token-manager flows. */
+    private val _localState = MutableStateFlow(LocalState())
+
     init {
         // Refresh on construction so the Diagnostics card shows the
         // correct enabled/disabled state on first frame. Cheap (a
         // single directory listing) — no need to rerun on every flow tick.
+        // Must follow _localState declaration: Kotlin initializes properties
+        // top-to-bottom and refreshDiagnostics() writes to _localState.
         refreshDiagnostics()
     }
 
@@ -111,9 +116,6 @@ class SettingsViewModel @Inject constructor(
      */
     fun consumeDeepLinkFocus(): com.stash.core.data.navigation.SettingsFocus? =
         settingsDeepLinkController.consume()
-
-    /** Internal mutable UI state that is combined with token-manager flows. */
-    private val _localState = MutableStateFlow(LocalState())
 
     // Phase 8: `blockedCount` + `onRunYtLibraryBackfill` relocated to
     // SyncViewModel — the Blocked Songs + Fix-wrong-version rows moved
