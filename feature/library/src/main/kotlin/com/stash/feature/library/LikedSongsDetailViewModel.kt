@@ -123,19 +123,6 @@ class LikedSongsDetailViewModel @Inject constructor(
         viewModelScope.launch { musicRepository.deleteTrack(track) }
     }
 
-    /** v0.9.27 — enqueue a background download for [track]. */
-    fun downloadForOffline(track: Track) {
-        viewModelScope.launch { musicRepository.enqueueDownload(track) }
-    }
-
-    /**
-     * v0.9.27 — remove [track]'s on-disk file but keep the library row
-     * so the user can re-download or stream it later.
-     */
-    fun removeDownload(track: Track) {
-        viewModelScope.launch { musicRepository.removeDownload(track) }
-    }
-
     val userPlaylists = musicRepository.getUserCreatedPlaylists()
 
     fun saveTrackToPlaylist(trackId: Long, playlistId: Long) {

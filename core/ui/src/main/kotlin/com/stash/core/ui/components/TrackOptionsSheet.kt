@@ -15,12 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
-import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,16 +45,6 @@ import com.stash.core.ui.theme.StashTheme
  * @param onAddToQueue        Appends the track to the end of the queue.
  * @param onSaveToPlaylist    Opens the save-to-playlist flow.
  * @param onDelete            Deletes the track from the device.
- * @param onDownloadForOffline Enqueues a background download of the
- *   track. Only shown when the track is streamable-only metadata
- *   (`!isDownloaded && isStreamable`). Pass `null` to hide the row in
- *   surfaces that don't support the action.
- * @param onRemoveDownload    Removes the audio file from disk but
- *   keeps the row in the library so it can be re-downloaded or
- *   streamed later. Only shown when the track is currently downloaded.
- *   Pass `null` to hide the row in surfaces that don't support the
- *   action. Semantically distinct from [onDelete] — that removes the
- *   track from the library entirely.
  */
 @Composable
 fun TrackOptionsSheet(
@@ -65,8 +53,6 @@ fun TrackOptionsSheet(
     onAddToQueue: (Track) -> Unit,
     onSaveToPlaylist: (Track) -> Unit,
     onDelete: (Track) -> Unit,
-    onDownloadForOffline: ((Track) -> Unit)? = null,
-    onRemoveDownload: ((Track) -> Unit)? = null,
 ) {
     val extendedColors = StashTheme.extendedColors
 
@@ -154,27 +140,6 @@ fun TrackOptionsSheet(
             label = "Save to Playlist",
             onClick = { onSaveToPlaylist(track) },
         )
-
-        // -- Streaming engine: download / remove-download (Task 19) --
-        //
-        // Conditional, mutually exclusive (a track is either downloaded
-        // or not). Callers that don't wire callbacks pass null and we
-        // hide both regardless of track state — surfaces without the
-        // download infrastructure (e.g. previews) get a clean menu.
-        if (onDownloadForOffline != null && !track.isDownloaded && track.isStreamable) {
-            SheetOptionRow(
-                icon = Icons.Default.Download,
-                label = "Download for offline",
-                onClick = { onDownloadForOffline(track) },
-            )
-        }
-        if (onRemoveDownload != null && track.isDownloaded) {
-            SheetOptionRow(
-                icon = Icons.Default.RemoveCircleOutline,
-                label = "Remove download",
-                onClick = { onRemoveDownload(track) },
-            )
-        }
 
         Spacer(modifier = Modifier.height(4.dp))
 

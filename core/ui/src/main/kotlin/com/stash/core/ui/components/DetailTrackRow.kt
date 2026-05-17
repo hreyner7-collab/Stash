@@ -22,7 +22,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -32,7 +31,6 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
-import com.stash.core.model.isUnavailableForDisplay
 import com.stash.core.ui.theme.StashTheme
 import com.stash.core.ui.util.formatDuration
 
@@ -51,11 +49,6 @@ import com.stash.core.ui.util.formatDuration
  *                          Set to false to suppress the subtitle entirely (e.g. AlbumDetailScreen).
  * @param subtitleOverride  When non-null, replaces the artist name with this string.
  *                          A blank override is treated as absent — no subtitle is rendered.
- *
- * v0.9.27: when [Track.isUnavailableForDisplay] is true (synced metadata
- * that Kennyy can't resolve), the whole row renders at 50% alpha and the
- * tap callback is suppressed. Long-press still works so the user can
- * delete the row or queue it for download.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -71,11 +64,6 @@ fun DetailTrackRow(
     val extendedColors = StashTheme.extendedColors
     val primaryColor = MaterialTheme.colorScheme.primary
 
-    // v0.9.27: synced metadata that Kennyy can't resolve — grey out the row
-    // and suppress tap-to-play. Long-press menu stays enabled (Task 19 will
-    // refine the menu items surfaced for unavailable rows).
-    val isUnavailable = track.isUnavailableForDisplay
-
     // Subtle background highlight for the currently-playing track.
     val rowBackground = if (isPlaying) {
         primaryColor.copy(alpha = 0.06f)
@@ -86,10 +74,9 @@ fun DetailTrackRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .alpha(if (isUnavailable) 0.5f else 1f)
             .background(rowBackground)
             .combinedClickable(
-                onClick = { if (!isUnavailable) onClick() },
+                onClick = onClick,
                 onLongClick = onLongPress,
             )
             .padding(horizontal = 20.dp, vertical = 10.dp),
@@ -208,29 +195,8 @@ private fun PreviewDetailTrackRowPlaying() {
     }
 }
 
-@Preview(name = "Unavailable", showBackground = true, backgroundColor = 0xFF101012)
-@Composable
-private fun PreviewDetailTrackRowUnavailable() {
-    StashTheme {
-        DetailTrackRow(
-            // v0.9.27: synced but Kennyy-unresolvable — should render at 50% alpha.
-            track = previewDetailTrack(
-                isDownloaded = false,
-                isStreamable = false,
-                isStreamableCheckedAt = 1_700_000_000_000L,
-            ),
-            trackNumber = 7,
-            isPlaying = false,
-            onClick = {},
-            onLongPress = {},
-        )
-    }
-}
-
 private fun previewDetailTrack(
     isDownloaded: Boolean = true,
-    isStreamable: Boolean = false,
-    isStreamableCheckedAt: Long? = null,
 ): Track = Track(
     id = 1L,
     title = "Glory Box",
@@ -239,6 +205,4 @@ private fun previewDetailTrack(
     durationMs = 308_000L,
     source = MusicSource.SPOTIFY,
     isDownloaded = isDownloaded,
-    isStreamable = isStreamable,
-    isStreamableCheckedAt = isStreamableCheckedAt,
 )

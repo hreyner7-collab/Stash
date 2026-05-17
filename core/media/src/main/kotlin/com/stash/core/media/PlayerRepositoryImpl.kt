@@ -339,6 +339,46 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     override suspend fun playFromStream(item: TrackItem): StreamRoutingResult {
+        // Idempotency guard #1 (already-playing): if the controller's
+        // current MediaItem is THIS track and is in an active state,
+        // skip. Mirrors the preview path's original guard.
+        val targetMediaId = item.videoId.hashCode().toLong().toString()
+        val controller = controllerDeferred
+        if (controller != null) {
+            val currentId = controller.currentMediaItem?.mediaId
+            val state = controller.playbackState
+            val activeStates = setOf(Player.STATE_BUFFERING, Player.STATE_READY)
+            if (currentId == targetMediaId && state in activeStates) {
+                return StreamRoutingResult.Item(controller.currentMediaItem!!)
+            }
+        }
+
+        // Idempotency guard #2 (in-flight resolve): the user may tap N
+        // times before the FIRST resolve has completed — at that point
+        // the controller still shows the previous track, so guard #1
+        // misses. Track in-flight videoIds in a synchronised set; rapid
+        // duplicate taps short-circuit until the original resolve
+        // finishes. Without this, 30 rapid taps = 30 separate resolves
+        // and 30 setMediaItem calls.
+        synchronized(inFlightStreamingTaps) {
+            if (item.videoId in inFlightStreamingTaps) {
+                return StreamRoutingResult.Deduped
+            }
+            inFlightStreamingTaps.add(item.videoId)
+        }
+        try {
+            return playFromStreamInner(item)
+        } finally {
+            synchronized(inFlightStreamingTaps) {
+                inFlightStreamingTaps.remove(item.videoId)
+            }
+        }
+    }
+
+    private val inFlightStreamingTaps = mutableSetOf<String>()
+
+    private suspend fun playFromStreamInner(item: TrackItem): StreamRoutingResult {
+
         // Search-tab tap: no library row yet, so synthesize a transient
         // TrackEntity carrying only the fields buildMediaItemForTrack
         // reads. isDownloaded = false routes us straight into the

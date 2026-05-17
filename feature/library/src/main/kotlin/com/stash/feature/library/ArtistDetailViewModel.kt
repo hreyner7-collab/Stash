@@ -153,19 +153,6 @@ class ArtistDetailViewModel @Inject constructor(
         }
     }
 
-    /** v0.9.27 — enqueue a background download for [track]. */
-    fun downloadForOffline(track: Track) {
-        viewModelScope.launch { musicRepository.enqueueDownload(track) }
-    }
-
-    /**
-     * v0.9.27 — remove [track]'s on-disk file but keep the library row
-     * so the user can re-download or stream it later.
-     */
-    fun removeDownload(track: Track) {
-        viewModelScope.launch { musicRepository.removeDownload(track) }
-    }
-
     /** User-created playlists for the Save to Playlist picker. */
     val userPlaylists = musicRepository.getUserCreatedPlaylists()
 

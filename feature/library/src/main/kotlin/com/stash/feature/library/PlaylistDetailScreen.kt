@@ -235,14 +235,6 @@ fun PlaylistDetailScreen(
                     trackToDelete = it
                     selectedTrack = null
                 },
-                onDownloadForOffline = {
-                    viewModel.downloadForOffline(it)
-                    selectedTrack = null
-                },
-                onRemoveDownload = {
-                    viewModel.removeDownload(it)
-                    selectedTrack = null
-                },
             )
         }
     }

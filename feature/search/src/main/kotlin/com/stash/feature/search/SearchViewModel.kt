@@ -176,6 +176,7 @@ class SearchViewModel @Inject constructor(
                 val result = playerRepository.playFromStream(item)
                 when (result) {
                     is StreamRoutingResult.Item -> Unit // playback started by the repo
+                    StreamRoutingResult.Deduped -> Unit // earlier tap is handling it
                     StreamRoutingResult.NotAvailable ->
                         _userMessages.emit("Couldn't find this track.")
                     StreamRoutingResult.OfflineMode ->

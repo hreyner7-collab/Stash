@@ -19,7 +19,7 @@ class KennyyStreamResolverTest {
 
     @Test
     fun resolve_returnsNullWhenKennyyHasNoMatch() = runTest {
-        coEvery { fakeKennyy.resolve(any()) } returns null
+        coEvery { fakeKennyy.resolveImmediate(any()) } returns null
 
         val result = resolver.resolve(stubTrack())
 
@@ -28,7 +28,7 @@ class KennyyStreamResolverTest {
 
     @Test
     fun resolve_parsesEtspIntoExpiresAtMs() = runTest {
-        coEvery { fakeKennyy.resolve(any()) } returns stubSourceResult(
+        coEvery { fakeKennyy.resolveImmediate(any()) } returns stubSourceResult(
             downloadUrl = "https://streaming-qobuz-std.akamaized.net/file?uid=1&etsp=1778893323&hmac=abc",
         )
 
@@ -42,7 +42,7 @@ class KennyyStreamResolverTest {
     @Test
     fun resolve_returnsNullWhenEtspMissing() = runTest {
         // Defensive: a URL with no etsp can't be safely refreshed; treat as null.
-        coEvery { fakeKennyy.resolve(any()) } returns stubSourceResult(
+        coEvery { fakeKennyy.resolveImmediate(any()) } returns stubSourceResult(
             downloadUrl = "https://streaming-qobuz-std.akamaized.net/file?uid=1&hmac=abc",
         )
 
@@ -53,7 +53,7 @@ class KennyyStreamResolverTest {
 
     @Test
     fun resolve_returnsNullWhenEtspNotInteger() = runTest {
-        coEvery { fakeKennyy.resolve(any()) } returns stubSourceResult(
+        coEvery { fakeKennyy.resolveImmediate(any()) } returns stubSourceResult(
             downloadUrl = "https://streaming-qobuz-std.akamaized.net/file?uid=1&etsp=garbage&hmac=abc",
         )
 

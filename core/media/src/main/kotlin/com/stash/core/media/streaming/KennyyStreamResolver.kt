@@ -62,7 +62,11 @@ class KennyyStreamResolver @Inject constructor(
             isrc = track.isrc?.takeIf { it.isNotBlank() },
             durationMs = track.durationMs,
         )
-        val result = source.resolve(query) ?: return null
+        // Use the immediate (rate-limiter-bypassing) path: streaming-tap
+        // is user-initiated and must not queue behind background
+        // AvailabilityCheckWorker batches that hold the limiter at 1
+        // req/s. See KennyySource.resolveImmediate KDoc for rationale.
+        val result = source.resolveImmediate(query) ?: return null
         val etspMs = parseEtspMs(result.downloadUrl) ?: return null
         return StreamUrl(url = result.downloadUrl, expiresAtMs = etspMs)
     }

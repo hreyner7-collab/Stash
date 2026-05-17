@@ -160,6 +160,7 @@ class TrackActionsDelegate @Inject constructor(
                 val result = playerRepository.playFromStream(track)
                 when (result) {
                     is com.stash.core.media.StreamRoutingResult.Item -> Unit
+                    com.stash.core.media.StreamRoutingResult.Deduped -> Unit
                     com.stash.core.media.StreamRoutingResult.NotAvailable ->
                         _userMessages.emit("Couldn't find this track.")
                     com.stash.core.media.StreamRoutingResult.OfflineMode ->
