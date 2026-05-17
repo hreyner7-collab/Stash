@@ -916,17 +916,20 @@ interface TrackDao {
     @Query(
         """
         SELECT t.album AS album,
-               CASE
-                   WHEN t.album_artist != '' THEN t.album_artist
-                   ELSE (
-                       SELECT artist FROM tracks
-                       WHERE album = t.album AND artist != ''
-                         AND COALESCE(album_artist, '') = COALESCE(t.album_artist, '')
-                       GROUP BY artist
-                       ORDER BY COUNT(*) DESC
-                       LIMIT 1
-                   )
-               END AS artist,
+               COALESCE(
+                   CASE
+                       WHEN t.album_artist != '' THEN t.album_artist
+                       ELSE (
+                           SELECT artist FROM tracks
+                           WHERE album = t.album AND artist != ''
+                             AND COALESCE(album_artist, '') = COALESCE(t.album_artist, '')
+                           GROUP BY artist
+                           ORDER BY COUNT(*) DESC
+                           LIMIT 1
+                       )
+                   END,
+                   'Unknown Artist'
+               ) AS artist,
                COUNT(*) AS trackCount,
                MAX(t.album_art_path) AS artPath,
                MAX(t.album_art_url) AS artUrl
