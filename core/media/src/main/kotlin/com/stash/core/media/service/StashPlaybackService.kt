@@ -662,7 +662,11 @@ class StashPlaybackService : MediaLibraryService() {
                         )
                     }
                     PLAYLISTS_ID -> {
-                        playlistDao.getAllVisible().first().map { playlist ->
+                        // Android Auto browse shows downloaded playlists only.
+                        // Streaming-only tracks would fail on flaky cellular while
+                        // driving — worse UX than not seeing them at all. Revisit
+                        // when streaming-aware Auto support lands.
+                        playlistDao.getAllVisible(includeStreamable = false).first().map { playlist ->
                             MediaItem.Builder()
                                 .setMediaId("$PLAYLIST_PREFIX${playlist.id}")
                                 .setMediaMetadata(

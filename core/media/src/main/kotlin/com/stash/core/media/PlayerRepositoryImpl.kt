@@ -343,8 +343,14 @@ class PlayerRepositoryImpl @Inject constructor(
         // TrackEntity carrying only the fields buildMediaItemForTrack
         // reads. isDownloaded = false routes us straight into the
         // streaming branch.
+        // Synthetic stable ID derived from videoId so the StreamUrlCache key
+        // and the MediaItem.mediaId both differ between tracks. The previous
+        // id=0L collapsed every search-tap stream onto a single cache key:
+        // first tap cached, second tap returned the FIRST track's URL and
+        // Media3 no-op'd setMediaItem on the matching mediaId. Repeat taps
+        // of the same videoId still hit the cache (intended TTL behaviour).
         val transient = TrackEntity(
-            id = 0L,
+            id = item.videoId.hashCode().toLong(),
             title = item.title,
             artist = item.artist,
             album = item.album ?: "",

@@ -48,6 +48,8 @@ class TrackActionsDelegate @Inject constructor(
     private val previewUrlCache: PreviewUrlCache,
     private val trackDao: TrackDao,
     private val searchDownloadCoordinator: SearchDownloadCoordinator,
+    private val playerRepository: com.stash.core.media.PlayerRepository,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) {
     /** Mirrors [PreviewPlayer.previewState] so consumers don't need a second dep. */
     val previewState: StateFlow<PreviewState> = previewPlayer.previewState
