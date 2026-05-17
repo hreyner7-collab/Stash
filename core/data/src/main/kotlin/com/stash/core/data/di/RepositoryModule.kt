@@ -8,8 +8,6 @@ import com.stash.core.data.prefs.ThemePreference
 import com.stash.core.data.prefs.ThemePreferencesManager
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.repository.MusicRepositoryImpl
-import com.stash.core.data.sync.DefaultStreamingWorkScheduler
-import com.stash.core.data.sync.StreamingWorkScheduler
 import com.stash.core.data.youtube.OkHttpPingSubmitter
 import com.stash.core.data.youtube.PingSubmitter
 import dagger.Binds
@@ -45,10 +43,4 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindFFmpegBridge(impl: FFmpegBridgeImpl): FFmpegBridge
-
-    @Binds
-    @Singleton
-    abstract fun bindStreamingWorkScheduler(
-        impl: DefaultStreamingWorkScheduler,
-    ): StreamingWorkScheduler
 }

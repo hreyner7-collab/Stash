@@ -165,43 +165,6 @@ interface MusicRepository {
      */
     suspend fun deleteTrack(track: Track): Boolean
 
-    /**
-     * v0.9.27 — non-destructive "free up disk" variant of [deleteTrack].
-     *
-     * Removes the audio file from disk and flips `is_downloaded = 0,
-     * file_path = NULL` on the row, but **keeps** the [Track] entity and
-     * its album art. The user can re-download the track later or stream
-     * it via the streaming engine.
-     *
-     * Used by the Track-options long-press sheet's "Remove download"
-     * action (Task 19). Mental-model contrast with [deleteTrack]:
-     *  - [deleteTrack]            : "remove from my library entirely"
-     *  - [removeDownload]         : "I don't want it on disk anymore,
-     *                               but keep it in my library"
-     *
-     * No [trackDeletions] emit — the row stays alive, so the player
-     * eviction hook does NOT fire. (If the user is currently playing
-     * the removed-from-disk track and we're in offline mode, playback
-     * may fail at the next data-source read; the caller is responsible
-     * for guarding this case.)
-     */
-    suspend fun removeDownload(track: Track)
-
-    /**
-     * v0.9.27 — enqueue [track] for background download by [com.stash.core.data.sync.workers.TrackDownloadWorker].
-     *
-     * Inserts a `DownloadQueueEntity` (sync_id = null, status = PENDING)
-     * exactly like a search-tab manual download. The user-initiated
-     * tag means it skips the playlist-membership orphan sweep — see
-     * [linkTrackToDownloadsMix] for the post-success linkage that
-     * keeps the file alive after the next sync.
-     *
-     * Used by the Track-options long-press sheet's "Download for
-     * offline" action (Task 19). Intended for tracks that exist in
-     * the library as streamable-only metadata (no file).
-     */
-    suspend fun enqueueDownload(track: Track)
-
     /** Insert or replace a playlist. Returns the row ID. */
     suspend fun insertPlaylist(playlist: Playlist): Long
 
@@ -391,51 +354,14 @@ interface MusicRepository {
     // ── Streaming engine ────────────────────────────────────────────────
 
     /**
-     * Side-effect orchestrator for the master streaming-mode toggle.
+     * v0.9.30 Path A: persists the master streaming-mode preference.
      *
-     * On enable (Off→On):
-     *  1. Persists the master pref (so a UI re-tap doesn't re-fire the
-     *     dialog if any later step fails).
-     *  2. Schedules the weekly [com.stash.core.data.sync.workers.AvailabilityRecheckWorker]
-     *     (KEEP — idempotent across cold starts).
-     *  3. Enqueues a one-shot [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
-     *     drain so any rows produced by prior offline-mode syncs get a
-     *     fresh streamable check.
-     *  4. If [releaseDownloads] = true, enqueues
-     *     [com.stash.core.data.sync.workers.ReleaseDownloadsWorker] to
-     *     reclaim disk space.
-     *
-     * On disable (On→Off):
-     *  1. Persists the master pref (so the player flips back to
-     *     download-only routing on the very next track load).
-     *  2. If [downloadAllStreamable] = true, snapshots every
-     *     `is_downloaded = 0 AND is_streamable = 1` row and inserts a
-     *     [DownloadQueueEntity] for each — the existing download worker
-     *     chain picks them up.
-     *
-     * The periodic recheck worker is intentionally **not** cancelled on
-     * disable. It's cheap (one bulk UPDATE per week) and keeping it warm
-     * means a future re-enable doesn't start with a fully stale
-     * `is_streamable` column.
+     * Library remains downloaded-only regardless of the toggle. The flag
+     * gates only the search-tap streaming behaviour (see
+     * [com.stash.feature.search.SearchViewModel.onResultTap]) and the Now
+     * Playing wifi indicator. No worker scheduling, no bulk download or
+     * release side-effects — those concepts belonged to the pre-Path-A
+     * "mix streamable rows into Library" model that was reverted.
      */
-    suspend fun applyStreamingMode(
-        enabled: Boolean,
-        releaseDownloads: Boolean = false,
-        downloadAllStreamable: Boolean = false,
-    )
-
-    /**
-     * Wrapper called by Subproject B's entitlement-status watcher when
-     * the user's subscription lapses or is cancelled. Equivalent to
-     * flipping the toggle Off with safe defaults — keep what's already
-     * downloaded, don't bulk-download streamables (the user just lost
-     * the entitlement; we won't surprise them with a huge download).
-     *
-     * Pinned now so Subproject B has a stable entry point.
-     */
-    suspend fun onEntitlementLost() = applyStreamingMode(
-        enabled = false,
-        releaseDownloads = false,
-        downloadAllStreamable = false,
-    )
+    suspend fun applyStreamingMode(enabled: Boolean)
 }

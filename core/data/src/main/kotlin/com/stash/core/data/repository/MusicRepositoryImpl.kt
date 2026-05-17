@@ -42,7 +42,6 @@ class MusicRepositoryImpl @Inject constructor(
     private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
     private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
-    private val streamingWorkScheduler: com.stash.core.data.sync.StreamingWorkScheduler,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -235,11 +234,14 @@ class MusicRepositoryImpl @Inject constructor(
     override fun getTracksByArtist(artist: String): Flow<List<Track>> =
         trackDao.getByArtist(artist).map { entities -> entities.map { it.toDomain() } }
 
+    // v0.9.30 Path A: Library is curated = downloaded-only, always.
+    // Online toggle controls SEARCH-tap streaming; it does NOT change
+    // what shows in Library. This matches the Spotify/Apple Music
+    // mental model (Library = your saved music; streaming/search is a
+    // separate surface). Previously these queries mixed streamable-only
+    // rows into Library, which exposed thousands of ghost rows from
+    // historic failed downloads.
     override fun getTracksByPlaylist(playlistId: Long): Flow<List<Track>> =
-        // v0.9.27 — Online streaming mode (Task 15) will thread the user's
-        // streaming pref through this and the other `includeStreamable`
-        // call sites. Until then, pass `false` to preserve legacy
-        // downloaded-only behaviour.
         trackDao.getByPlaylist(playlistId, includeStreamable = false)
             .map { entities -> entities.map { it.toDomain() } }
 
@@ -258,7 +260,6 @@ class MusicRepositoryImpl @Inject constructor(
     override fun search(query: String): Flow<List<Track>> {
         val sanitized = "\"${query.replace("\"", "").trim()}\""
         if (sanitized == "\"\"") return flowOf(emptyList())
-        // v0.9.27 — pass `false` until Task 15 threads the streaming pref.
         return trackDao.search(sanitized, includeStreamable = false)
             .map { entities -> entities.map { it.toDomain() } }
     }
@@ -318,7 +319,6 @@ class MusicRepositoryImpl @Inject constructor(
         trackDao.getAllDownloaded().map { it.toDomain() }
 
     override fun getTrackCount(): Flow<Int> =
-        // v0.9.27 — pass `false` until Task 15 threads the streaming pref.
         trackDao.getTotalCount(includeStreamable = false)
 
     override fun getTotalStorageBytes(): Flow<Long> =
@@ -344,7 +344,6 @@ class MusicRepositoryImpl @Inject constructor(
         // Sync Preferences state. See PlaylistDao.getAllVisible for
         // the source=BOTH exemption that keeps local CUSTOM + STASH_MIX
         // visible while still gating imported YouTube CUSTOM playlists.
-        // v0.9.27 — pass `false` until Task 15 threads the streaming pref.
         playlistDao.getAllVisible(includeStreamable = false)
             .map { entities -> entities.map { it.toDomain() } }
 
@@ -384,33 +383,6 @@ class MusicRepositoryImpl @Inject constructor(
         trackDao.delete(track.toEntity())
         _trackDeletions.tryEmit(track.id)
         return true
-    }
-
-    override suspend fun removeDownload(track: Track) {
-        // Non-destructive: drop the file but keep the row + art so the
-        // track can be re-downloaded or streamed later. Mirrors what
-        // ReleaseDownloadsWorker does per-row — see that worker's KDoc
-        // for the rationale on why we don't emit a deletion event.
-        track.filePath?.let { deleteTrackFile(it) }
-        trackDao.markAsNotDownloaded(track.id)
-    }
-
-    override suspend fun enqueueDownload(track: Track) {
-        // Mirror DiffWorker's "new track" enqueue shape: sync_id = null
-        // tags this as a manual / user-initiated download (no associated
-        // sync session) — same shape as the search-tab download path
-        // and the streaming-mode bulk-download orchestrator above.
-        val searchQuery = "${track.artist} - ${track.title}"
-        downloadQueueDao.insert(
-            com.stash.core.data.db.entity.DownloadQueueEntity(
-                trackId = track.id,
-                syncId = null,
-                searchQuery = searchQuery,
-                youtubeUrl = track.youtubeId?.let {
-                    "https://music.youtube.com/watch?v=$it"
-                },
-            )
-        )
     }
 
     override suspend fun insertPlaylist(playlist: Playlist): Long =
@@ -650,51 +622,11 @@ class MusicRepositoryImpl @Inject constructor(
 
     // ── Streaming engine ────────────────────────────────────────────────
 
-    override suspend fun applyStreamingMode(
-        enabled: Boolean,
-        releaseDownloads: Boolean,
-        downloadAllStreamable: Boolean,
-    ) {
-        if (enabled) {
-            // Persist FIRST so a re-tap of the UI control doesn't re-fire
-            // the prompt if any worker enqueue fails after this point.
-            streamingPreference.setEnabled(true)
-            // Keep the weekly recheck running so cached `is_streamable`
-            // values don't go stale (KEEP-policy — re-calls are cheap).
-            streamingWorkScheduler.scheduleAvailabilityRecheckPeriodic()
-            // Drain whatever rows the offline-mode syncs left without a
-            // streamable check. REPLACE policy inside enqueueSelf coalesces
-            // overlapping triggers.
-            streamingWorkScheduler.enqueueAvailabilityCheck()
-            if (releaseDownloads) {
-                streamingWorkScheduler.enqueueReleaseDownloads()
-            }
-        } else {
-            // Persist FIRST so the player's source-factory switch flips
-            // back to download-only routing on the very next track load.
-            streamingPreference.setEnabled(false)
-            if (downloadAllStreamable) {
-                // Snapshot then bulk-insert into the queue. sync_id = null
-                // tags these as user-initiated (no associated sync session)
-                // — mirrors how a manual search-tab download lands, and is
-                // permitted by the SET_NULL FK on the column.
-                val rows = trackDao.streamableOnlyTracks()
-                for (track in rows) {
-                    downloadQueueDao.insert(
-                        com.stash.core.data.db.entity.DownloadQueueEntity(
-                            trackId = track.id,
-                            syncId = null,
-                            searchQuery = "${track.artist} - ${track.title}",
-                            youtubeUrl = track.youtubeId?.let {
-                                "https://music.youtube.com/watch?v=$it"
-                            },
-                        )
-                    )
-                }
-            }
-            // Leave the periodic recheck running — cheap, and keeps the
-            // `is_streamable` column warm for a future re-enable.
-        }
+    override suspend fun applyStreamingMode(enabled: Boolean) {
+        // v0.9.30 Path A: Library is downloaded-only regardless of toggle.
+        // The pref only gates search-tap streaming behaviour, so the
+        // orchestrator collapses to a single pref write.
+        streamingPreference.setEnabled(enabled)
     }
 
     // ── Sync history ────────────────────────────────────────────────────
