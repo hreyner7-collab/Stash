@@ -94,7 +94,36 @@ class SettingsViewModel @Inject constructor(
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val crashFileStore: CrashFileStore,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : ViewModel() {
+
+    /**
+     * Live streaming-mode flag (Online vs Offline). Mirrors what the
+     * Home top-bar chip reads from the same [streamingPreference] —
+     * Settings is the canonical home for this preference; the chip is
+     * the quick-access surface. Both end up writing through
+     * [MusicRepository.applyStreamingMode].
+     */
+    val streamingEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * Flip streaming mode from the Settings tab. Routes through the
+     * repository so workers + prefs stay in sync — same path as
+     * [HomeViewModel.onStreamingToggle], minus the first-time
+     * disclosure dialog (a user opening Settings is already deliberate;
+     * we don't need the educational popup here).
+     */
+    fun onStreamingToggle(enabled: Boolean) {
+        if (enabled == streamingEnabled.value) return
+        viewModelScope.launch {
+            musicRepository.applyStreamingMode(enabled = enabled)
+        }
+    }
 
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())

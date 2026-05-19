@@ -68,6 +68,25 @@ object ArtUrlUpgrader {
         """(/vi[a-z_]*/[^/]+/)(?:default|mqdefault|hqdefault)(\.(?:jpg|webp))""",
     )
 
+    /**
+     * Returns true when [url] is a YouTube *video* thumbnail
+     * (`i.ytimg.com/vi/.../sddefault.jpg` etc). These are uploader-chosen
+     * images — music-video frames, "Topic" channel placeholders, hand-
+     * picked photos — and rarely match the actual studio album cover.
+     *
+     * Used by the streaming + download pipelines to decide whether to
+     * overwrite a stored art URL with a fresh catalog match (Qobuz, etc).
+     * Proper YT Music catalog art lives on `lh3.googleusercontent.com`
+     * and is treated as good — not a video thumbnail.
+     *
+     * Note: this stays true after [upgrade] rewrites `sddefault` →
+     * `maxresdefault` or similar; the host is the load-bearing signal.
+     */
+    fun isYouTubeVideoThumbnail(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return "i.ytimg.com" in url
+    }
+
     fun upgrade(url: String?): String? {
         if (url == null) return null
 

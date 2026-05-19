@@ -55,4 +55,43 @@ class TrackMapperTest {
         assertEquals(true, entity.toDomain().explicit)
         assertEquals(true, entity.toDomain().toEntity().explicit)
     }
+
+    @Test
+    fun `streamability fields survive round-trip`() {
+        // v0.9.27: the library row's greyed-out predicate
+        // (`isUnavailableForDisplay`) reads both `isStreamable` and
+        // `isStreamableCheckedAt` off the domain `Track`. If the mapper
+        // ever drops one of these, rows that should grey out would
+        // render normally (and tap into a no-op play) or vice-versa.
+        val entity = TrackEntity(
+            title = "Unavailable Track",
+            artist = "Artist",
+            isStreamable = false,
+            isStreamableCheckedAt = 1_700_000_000_000L,
+        )
+
+        val domain = entity.toDomain()
+        assertEquals(false, domain.isStreamable)
+        assertEquals(1_700_000_000_000L, domain.isStreamableCheckedAt)
+
+        val roundTripped = domain.toEntity()
+        assertEquals(false, roundTripped.isStreamable)
+        assertEquals(1_700_000_000_000L, roundTripped.isStreamableCheckedAt)
+    }
+
+    @Test
+    fun `null streamability checkedAt survives round-trip`() {
+        // The tristate sentinel: null = "never checked", which the
+        // `AvailabilityCheckWorker` queries to find rows that still
+        // need an initial check.
+        val entity = TrackEntity(title = "Legacy Row", artist = "Artist")
+
+        val domain = entity.toDomain()
+        assertNull(domain.isStreamableCheckedAt)
+        assertEquals(false, domain.isStreamable)
+
+        val roundTripped = domain.toEntity()
+        assertNull(roundTripped.isStreamableCheckedAt)
+        assertEquals(false, roundTripped.isStreamable)
+    }
 }

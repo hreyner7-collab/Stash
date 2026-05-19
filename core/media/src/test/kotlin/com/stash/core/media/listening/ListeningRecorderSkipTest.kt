@@ -5,8 +5,10 @@ import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.StreamRoutingResult
 import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
+import com.stash.core.model.TrackItem
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -53,6 +55,8 @@ class ListeningRecorderSkipTest {
         override suspend fun removeFromQueue(index: Int) = Unit
         override suspend fun moveInQueue(from: Int, to: Int) = Unit
         override suspend fun skipToQueueIndex(index: Int) = Unit
+        override suspend fun playTrack(track: Track) = StreamRoutingResult.NotAvailable
+        override suspend fun playFromStream(item: TrackItem) = StreamRoutingResult.NotAvailable
     }
 
     private val trackA = Track(

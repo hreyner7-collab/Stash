@@ -12,6 +12,7 @@ import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
+import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
@@ -91,8 +92,68 @@ class HomeViewModel @Inject constructor(
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
+    private val streamingPreference: StreamingPreference,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
+
+    /**
+     * Master streaming-mode toggle observed by the Home `StreamingModeToggle`.
+     * Mirrors [StreamingPreference.enabled] one-for-one — writes route
+     * through `MusicRepository.applyStreamingMode` (currently just a pref
+     * write — v0.9.30 Path A: Library is downloaded-only regardless).
+     *
+     * Gated for visibility by `StashConstants.STREAMING_ENGINE_ENABLED`
+     * inside the composable — the StateFlow keeps emitting regardless,
+     * so when the kill-switch is flipped on the Home toggle picks up the
+     * current pref value immediately without a recompose cycle.
+     */
+    val streamingEnabled: StateFlow<Boolean> = streamingPreference.enabled
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /**
+     * One-shot event: emit when the user is about to enable streaming for
+     * the first time so the Home screen can show the privacy disclosure
+     * dialog. The pref is already being flipped — the dialog is purely
+     * informational ("here's what streaming means"), not a confirmation
+     * gate.
+     */
+    private val _showStreamingDisclosure = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val showStreamingDisclosure: SharedFlow<Unit> = _showStreamingDisclosure.asSharedFlow()
+
+    /**
+     * v0.9.30 Path A: simplified one-arg streaming toggle.
+     *
+     * Off→On: if the user has never seen the disclosure, emit a one-shot
+     * event so the screen renders the AlertDialog after the pref flips.
+     * On→Off: no prompt — flip the pref instantly.
+     *
+     * Library is always downloaded-only regardless of this toggle; the
+     * pref gates only search-tap streaming and the Now Playing wifi
+     * indicator. See `MusicRepository.applyStreamingMode` for the
+     * (deliberately minimal) side-effects.
+     */
+    fun onStreamingToggle(enabled: Boolean) {
+        viewModelScope.launch {
+            musicRepository.applyStreamingMode(enabled = enabled)
+            if (enabled) {
+                val prefs = context.getSharedPreferences(
+                    STREAMING_DISCLOSURE_PREFS,
+                    Context.MODE_PRIVATE,
+                )
+                if (!prefs.getBoolean(STREAMING_DISCLOSURE_SEEN_KEY, false)) {
+                    _showStreamingDisclosure.tryEmit(Unit)
+                    prefs.edit().putBoolean(STREAMING_DISCLOSURE_SEEN_KEY, true).apply()
+                }
+            }
+        }
+    }
 
     private val _userMessages = MutableSharedFlow<String>(
         // Bumped to 8 to mirror NowPlayingViewModel — actions that emit two
@@ -521,28 +582,71 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Loads the downloaded tracks for [playlist] and begins playback from the first track.
-     * Only tracks with a non-null [Track.filePath] (i.e. downloaded) are queued.
+     * Loads the tracks for [playlist] and begins playback from the first
+     * track. In streaming mode every member is playable (Kennyy resolves
+     * on demand inside setQueue); in offline mode only on-disk tracks
+     * are queued.
      */
     fun playPlaylist(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val downloaded = tracks.filter { it.filePath != null }
-            if (downloaded.isNotEmpty()) {
-                playerRepository.setQueue(downloaded, startIndex = 0)
+            val playable = if (streamingPreference.current()) {
+                tracks
+            } else {
+                tracks.filter { it.filePath != null }
+            }
+            if (playable.isNotEmpty()) {
+                playerRepository.setQueue(playable, startIndex = 0)
             }
         }
     }
 
     /**
-     * Loads the downloaded tracks for [playlist] and appends each to the playback queue.
-     * Only tracks with a non-null [Track.filePath] (i.e. downloaded) are queued.
+     * Queue every undownloaded track in [playlist] for download. Surfaces
+     * a snackbar with the count so the user knows it took effect even
+     * though the download chain runs in WorkManager background context.
+     */
+    fun queueDownloadsForPlaylist(playlist: Playlist) {
+        viewModelScope.launch {
+            val count = musicRepository.queueDownloadsForPlaylist(playlist.id)
+            val msg = when (count) {
+                0 -> "Nothing to download — all tracks are already on disk."
+                1 -> "Queued 1 track for download."
+                else -> "Queued $count tracks for download."
+            }
+            _userMessages.tryEmit(msg)
+        }
+    }
+
+    /**
+     * Remove the on-disk file for every downloaded track in [playlist].
+     * Rows stay (still streamable). Counterpart to [queueDownloadsForPlaylist].
+     */
+    fun removeDownloadsForPlaylist(playlist: Playlist) {
+        viewModelScope.launch {
+            val count = musicRepository.removeDownloadsForPlaylist(playlist.id)
+            val msg = when (count) {
+                0 -> "No downloads to remove."
+                1 -> "Removed 1 download."
+                else -> "Removed downloads for $count tracks."
+            }
+            _userMessages.tryEmit(msg)
+        }
+    }
+
+    /**
+     * Loads the tracks for [playlist] and appends each to the playback
+     * queue. Streaming-mode-aware (same filter as [playPlaylist]).
      */
     fun addPlaylistToQueue(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val downloaded = tracks.filter { it.filePath != null }
-            downloaded.forEach { playerRepository.addToQueue(it) }
+            val playable = if (streamingPreference.current()) {
+                tracks
+            } else {
+                tracks.filter { it.filePath != null }
+            }
+            playable.forEach { playerRepository.addToQueue(it) }
         }
     }
 
@@ -725,11 +829,12 @@ class HomeViewModel @Inject constructor(
             }
             if (mixes.isEmpty()) return@launch
 
+            val streamingOn = streamingPreference.current()
             val allTracks = mixes
                 .flatMap { mix ->
                     musicRepository.getTracksByPlaylist(mix.id).first()
                 }
-                .filter { it.filePath != null }
+                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
                 .distinctBy { it.id }
 
             if (allTracks.isNotEmpty()) {
@@ -764,17 +869,25 @@ class HomeViewModel @Inject constructor(
             if (playlistsToPlay.isEmpty()) return@launch
 
             // Fetch each liked playlist's tracks in parallel and flatten
+            val streamingOn = streamingPreference.current()
             val allTracks = playlistsToPlay
                 .flatMap { playlist ->
                     musicRepository.getTracksByPlaylist(playlist.id).first()
                 }
-                .filter { it.filePath != null }
+                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
                 .distinctBy { it.id }
 
             if (allTracks.isNotEmpty()) {
                 playerRepository.setQueue(allTracks, startIndex = 0)
             }
         }
+    }
+
+    companion object {
+        /** SharedPreferences file backing the one-time streaming disclosure flag. */
+        private const val STREAMING_DISCLOSURE_PREFS = "streaming_disclosure"
+        /** Boolean flag — true once the user has dismissed the disclosure dialog. */
+        private const val STREAMING_DISCLOSURE_SEEN_KEY = "streaming_disclosure_seen"
     }
 }
 

@@ -52,11 +52,30 @@ class KennyySource @Inject constructor(
         return !rateLimiter.stateOf(id).isCircuitBroken
     }
 
-    override suspend fun resolve(query: TrackQuery): SourceResult? {
+    override suspend fun resolve(query: TrackQuery): SourceResult? =
+        resolveInternal(query, bypassRateLimit = false)
+
+    /**
+     * User-initiated immediate resolve for the streaming path. Skips
+     * BOTH the token bucket AND the circuit breaker. Rationale: a tap
+     * is a deliberate user action, infrequent and self-rate-limited
+     * (user can only press play so fast). The breaker exists to stop
+     * background workers from spamming a sick upstream; it should not
+     * stand between a user and their music. If Kennyy is genuinely
+     * down, each user-initiated call fails on its own merits and the
+     * user notices immediately — vastly better UX than a 30-minute
+     * silent dead zone after a transient burst of 5 failures earlier
+     * in the session. Background paths ([resolve]) still respect the
+     * breaker.
+     */
+    suspend fun resolveImmediate(query: TrackQuery): SourceResult? =
+        resolveInternal(query, bypassRateLimit = true)
+
+    private suspend fun resolveInternal(query: TrackQuery, bypassRateLimit: Boolean): SourceResult? {
         // 1. Search kennyy.com.br for candidates. ISRC is Qobuz's best
         // index key — when we have one, send it as the query directly.
         val searchTerm = query.isrc ?: "${query.artist} ${query.title}"
-        val searchData = callLimited { apiClient.search(searchTerm) }
+        val searchData = callLimited(bypassRateLimit) { apiClient.search(searchTerm) }
             ?: return null
 
         val candidates = searchData.tracks?.items.orEmpty()
@@ -87,7 +106,7 @@ class KennyySource @Inject constructor(
         val tier = losslessPrefs.qualityTierNow()
         val requestedQuality = tier.qobuzCode
         Log.d(TAG, "kennyy_qobuz: requested quality=$requestedQuality (tier=${tier.name})")
-        val download = callLimited {
+        val download = callLimited(bypassRateLimit) {
             apiClient.getFileUrl(best.first.id, requestedQuality)
         } ?: return null
 
@@ -132,8 +151,16 @@ class KennyySource @Inject constructor(
      * No captcha-expired branch — kennyy.com.br has no captcha gate.
      * 429 → reportRateLimited; all other exceptions → reportFailure.
      */
-    private suspend fun <T> callLimited(block: suspend () -> T): T? {
-        if (!rateLimiter.acquire(id)) return null
+    private suspend fun <T> callLimited(bypassRateLimit: Boolean = false, block: suspend () -> T): T? {
+        if (bypassRateLimit) {
+            // User-initiated path: skip BOTH the token bucket and the
+            // circuit breaker. A user tap should never be blocked by
+            // either gate — see [resolveImmediate] KDoc for rationale.
+            // We still report outcomes below so the breaker state
+            // continues to reflect reality for background paths.
+        } else {
+            if (!rateLimiter.acquire(id)) return null
+        }
         return try {
             val result = block()
             rateLimiter.reportSuccess(id)
@@ -196,7 +223,19 @@ class KennyySource @Inject constructor(
             }
         }
 
-        return (titleSim * artistSim * durationFactor)
+        // When title AND artist both match near-perfectly, trust the name
+        // match and don't reject on duration alone. Music videos on YouTube
+        // routinely have different durations from the studio Qobuz cut
+        // (e.g. Drake's "God's Plan" YT video is 5:57 with the giving-money
+        // intro, Qobuz studio is 3:18 — same audio, drift = 44%, which
+        // used to score 0.30 and fail the 0.5 threshold). For fuzzy name
+        // matches the duration still weighs in as a useful tiebreaker.
+        val nameScore = titleSim * artistSim
+        return if (nameScore >= 0.9f) {
+            nameScore
+        } else {
+            nameScore * durationFactor
+        }
     }
 
     companion object {

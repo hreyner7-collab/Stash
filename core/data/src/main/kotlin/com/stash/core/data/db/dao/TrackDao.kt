@@ -236,6 +236,15 @@ interface TrackDao {
     /**
      * All tracks belonging to a playlist, resolved through the
      * [playlist_tracks] join table. Only includes non-removed entries.
+     *
+     * v0.9.27 — `includeStreamable` widens the predicate to also surface
+     * stream-only tracks (`is_downloaded = 0 AND is_streamable = 1`) so
+     * Online streaming mode can render playlists whose tracks aren't on
+     * disk yet. Callers MUST pass the flag explicitly — Room's kapt
+     * processor doesn't reliably honour Kotlin default values on @Query.
+     * Checked-but-unavailable rows (checked_at != null AND is_streamable = 0)
+     * are always excluded; unchecked rows (checked_at IS NULL) are also
+     * excluded so they don't pop in/out as the worker drains.
      */
     @Query(
         """
@@ -249,12 +258,13 @@ interface TrackDao {
         WHERE pt.playlist_id = :playlistId
           AND pt.removed_at IS NULL
           AND bl.canonical_key IS NULL
+          AND (t.is_downloaded = 1 OR :includeStreamable)
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC
         """
     )
-    fun getByPlaylist(playlistId: Long): Flow<List<TrackEntity>>
+    fun getByPlaylist(playlistId: Long, includeStreamable: Boolean): Flow<List<TrackEntity>>
 
     /** Most-recently-added downloaded tracks, limited to [limit] results. */
     /**
@@ -635,6 +645,183 @@ interface TrackDao {
     )
     suspend fun markLoudnessFailed(id: Long, now: Long, nanSentinel: Float = Float.NaN)
 
+    // ── Stream availability (v0.9.27) ───────────────────────────────────
+
+    /**
+     * Returns up to [limit] tracks whose stream availability has never
+     * been checked AND that aren't already on disk. Drives
+     * [com.stash.core.data.sync.workers.AvailabilityCheckWorker]'s batch
+     * loop.
+     *
+     * `is_streamable_checked_at IS NULL` is the canonical "needs work"
+     * sentinel (mirrors `loudness_measured_at IS NULL` from v0.9.25) —
+     * the worker stamps this column after every check, success or failure,
+     * so a row is only re-picked by Task 10's recheck worker after the
+     * 30-day staleness window.
+     *
+     * `file_path IS NULL` excludes already-downloaded rows: the streaming
+     * resolver isn't consulted for tracks the user has locally, and
+     * polluting their `is_streamable` flag would just waste Kennyy quota.
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_streamable_checked_at IS NULL
+          AND file_path IS NULL
+        LIMIT :limit
+        """
+    )
+    suspend fun tracksNeedingStreamableCheck(limit: Int): List<TrackEntity>
+
+    /**
+     * Count of rows still awaiting an initial streamable check. The
+     * worker calls this after draining a batch to decide whether to
+     * re-enqueue itself for another pass before WorkManager's 10-minute
+     * per-run cap forces an exit.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM tracks
+        WHERE is_streamable_checked_at IS NULL
+          AND file_path IS NULL
+        """
+    )
+    suspend fun tracksNeedingStreamableCheckCount(): Int
+
+    /**
+     * Writes the result of a single availability check: the boolean
+     * `is_streamable` flag and the wall-clock timestamp of the attempt.
+     * Always pairs both columns — even a `false` result needs the
+     * timestamp set so the row doesn't get re-picked on the next worker
+     * invocation.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_streamable = :available,
+            is_streamable_checked_at = :now
+        WHERE id = :id
+        """
+    )
+    suspend fun setStreamable(id: Long, available: Boolean, now: Long)
+
+    /**
+     * Resets `is_streamable_checked_at` to NULL on every row whose stamp
+     * sits before [cutoff], returning the row count touched. Drives
+     * [com.stash.core.data.sync.workers.AvailabilityRecheckWorker]'s
+     * weekly catalog-churn pass — the worker passes `now - 30 days` so
+     * checks older than the staleness window get re-queued for the
+     * one-shot [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
+     * to drain.
+     *
+     * The `IS NOT NULL` guard is paranoia against an edge case where the
+     * cutoff math wraps to a positive value before any row has been
+     * checked (e.g. clock skew on a fresh install) — without it, a
+     * `NULL < cutoff` comparison evaluates to NULL in SQLite, so the
+     * UPDATE is a no-op anyway, but explicit is faster than implicit.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_streamable_checked_at = NULL
+        WHERE is_streamable_checked_at IS NOT NULL
+          AND is_streamable_checked_at < :cutoff
+        """
+    )
+    suspend fun invalidateOldStreamableChecks(cutoff: Long): Int
+
+    // ── Release-downloads worker (Off→On "release space" path) ──────────
+
+    /**
+     * Paginated `is_downloaded = 1` scan ordered by id ASC. Drives
+     * [com.stash.core.data.sync.workers.ReleaseDownloadsWorker]'s
+     * resumable batch loop — the worker persists the last-processed id
+     * in its own DataStore and feeds it back as [lastId] on the next
+     * run, so a mid-batch cancellation picks up exactly where it left
+     * off instead of re-scanning the whole library.
+     *
+     * Ordered ASC on the primary key for a deterministic cursor; that's
+     * cheaper than any other sort and the order doesn't matter to the
+     * caller (every matching row will eventually be processed).
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_downloaded = 1
+          AND id > :lastId
+        ORDER BY id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun downloadedAfter(lastId: Long, limit: Int): List<TrackEntity>
+
+    /**
+     * Single-row clear of the download bookkeeping columns. Paired with
+     * a file-delete in [com.stash.core.data.sync.workers.ReleaseDownloadsWorker]:
+     * the DB write runs **first** so a mid-op crash leaves an orphaned
+     * file (cleaned up by the existing orphan sweeper) rather than a
+     * row whose `file_path` points at a deleted file. Mirrors the column
+     * set cleared by [resetForReDownload] / [bulkResetForReDownload].
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_downloaded = 0,
+            file_path = NULL,
+            file_size_bytes = 0
+        WHERE id = :id
+        """
+    )
+    suspend fun markAsNotDownloaded(id: Long)
+
+    /**
+     * One-shot count of `is_downloaded = 1` rows. Used by the release
+     * worker to decide whether it can safely clear its resume cursor —
+     * if any rows remain, the next run must keep paging instead of
+     * starting over from id 0.
+     *
+     * Distinct from the existing [getCount] alias only by name + intent:
+     * keeping a dedicated function makes the worker's call sites self-
+     * documenting and decouples it from any future refactor of
+     * [getCount]'s contract.
+     */
+    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
+    suspend fun downloadedCount(): Int
+
+    /**
+     * One-shot snapshot of every "stream-only" row: tracks Stash has the
+     * metadata for and has confirmed are streamable, but doesn't yet have
+     * on disk. Drives the Online→Offline "download all streamable now"
+     * branch of [com.stash.core.data.repository.MusicRepository.applyStreamingMode]
+     * — when the user turns streaming off and asks Stash to grab everything
+     * locally, each returned row gets a fresh [DownloadQueueEntity] and
+     * the existing download worker chain takes over.
+     *
+     * Unordered; the bulk-download path doesn't care about sequence.
+     */
+    @Query("SELECT * FROM tracks WHERE is_downloaded = 0 AND is_streamable = 1")
+    suspend fun streamableOnlyTracks(): List<TrackEntity>
+
+    /**
+     * One-shot count of rows that are stream-only — present in the catalog
+     * and confirmed streamable by [com.stash.core.data.sync.workers.AvailabilityCheckWorker]
+     * but not yet downloaded. Drives the On→Off `StreamingModePrompt` dialog's
+     * "download all (~N MB)" estimate so we don't pay the cost of materializing
+     * the full [streamableOnlyTracks] list just to count it.
+     */
+    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 0 AND is_streamable = 1")
+    suspend fun streamableOnlyCount(): Int
+
+    /**
+     * One-shot sum of `file_size_bytes` across every downloaded row. Used by
+     * the Off→On `StreamingModePrompt` to tell the user how much space they'd
+     * reclaim by releasing local copies. Suspending counterpart to
+     * [getTotalStorageBytes] which is reactive — the prompt only needs a single
+     * read at toggle time, not a Flow.
+     */
+    @Query("SELECT COALESCE(SUM(file_size_bytes), 0) FROM tracks WHERE is_downloaded = 1")
+    suspend fun downloadedBytesTotal(): Long
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
@@ -791,6 +978,11 @@ interface TrackDao {
      *
      * The query string supports SQLite FTS match syntax (e.g. prefix
      * searches with `*`).
+     *
+     * v0.9.27 — `includeStreamable` widens the predicate so Online
+     * streaming mode finds stream-only library rows too. The filter
+     * is applied to the `tracks` JOIN side; `tracks_fts` itself doesn't
+     * carry the columns.
      */
     @Query(
         """
@@ -802,9 +994,10 @@ interface TrackDao {
             OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = tracks.youtube_id)
         WHERE tracks_fts MATCH :query
           AND bl.canonical_key IS NULL
+          AND (tracks.is_downloaded = 1 OR (:includeStreamable AND tracks.is_streamable = 1))
         """
     )
-    fun search(query: String): Flow<List<TrackEntity>>
+    fun search(query: String, includeStreamable: Boolean): Flow<List<TrackEntity>>
 
     /**
      * Search only downloaded tracks by title, artist, or album using FTS4.
@@ -826,9 +1019,22 @@ interface TrackDao {
 
     // ── Count / storage queries ─────────────────────────────────────────
 
-    /** Total number of downloaded tracks (reactive). */
-    @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
-    fun getTotalCount(): Flow<Int>
+    /**
+     * Total number of library tracks (reactive).
+     *
+     * v0.9.27 — `includeStreamable = false` mirrors the legacy
+     * "downloaded only" count; `true` adds stream-only library rows
+     * so the Home/Library "X tracks" line agrees with the visible row
+     * count when Online streaming mode is on. Callers MUST pass the
+     * flag explicitly — see [getByPlaylist] for rationale.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM tracks
+        WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)
+        """
+    )
+    fun getTotalCount(includeStreamable: Boolean): Flow<Int>
 
     /** Total number of downloaded tracks (one-shot). */
     @Query("SELECT COUNT(*) FROM tracks WHERE is_downloaded = 1")
@@ -884,6 +1090,12 @@ interface TrackDao {
     /**
      * All distinct artists with their track count and total duration.
      * Ordered by artist name ascending.
+     *
+     * v0.9.27 — `includeStreamable` widens the row set to include
+     * stream-only library tracks so the Artists tab in Online mode
+     * mirrors the Albums tab. With `false` (default-pref behaviour),
+     * only `is_downloaded = 1` rows contribute. Callers MUST pass the
+     * flag explicitly — see [getByPlaylist] for rationale.
      */
     @Query(
         """
@@ -892,11 +1104,12 @@ interface TrackDao {
                SUM(duration_ms) AS totalDurationMs,
                album_art_url AS artUrl
         FROM tracks
+        WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)
         GROUP BY artist
         ORDER BY COUNT(*) DESC, artist ASC
         """
     )
-    fun getAllArtists(): Flow<List<ArtistSummary>>
+    fun getAllArtists(includeStreamable: Boolean): Flow<List<ArtistSummary>>
 
     /**
      * All distinct albums with their primary artist, track count, and
@@ -935,11 +1148,12 @@ interface TrackDao {
                MAX(t.album_art_url) AS artUrl
         FROM tracks t
         WHERE t.album != ''
+          AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
         GROUP BY t.album, t.album_artist
         ORDER BY COUNT(*) DESC, t.album ASC
         """
     )
-    fun getAllAlbums(): Flow<List<AlbumSummary>>
+    fun getAllAlbums(includeStreamable: Boolean): Flow<List<AlbumSummary>>
 
     // ── Match dismissal & reconciliation ────────────────────────────────
 
@@ -1070,6 +1284,26 @@ interface TrackDao {
      */
     @Query("UPDATE tracks SET album_art_url = :albumArtUrl WHERE id = :trackId")
     suspend fun updateAlbumArtUrl(trackId: Long, albumArtUrl: String)
+
+    /**
+     * Clears the download state for a track without removing the row.
+     * Used by the streaming-mode "Remove download" action: file deleted
+     * from disk, flags cleared, row stays so the track is still streamable.
+     *
+     * Sets `is_downloaded = 0`, nulls `file_path`. Preserves loudness,
+     * format, art and every other field — re-downloading just rewrites
+     * the file path on success.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_downloaded = 0,
+            file_path = NULL,
+            file_size_bytes = 0
+        WHERE id = :trackId
+        """
+    )
+    suspend fun clearDownloadState(trackId: Long)
 
     /**
      * Duration-only sibling of [fillMissingMetadata]. Used by the primary

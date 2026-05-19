@@ -7,6 +7,7 @@ import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.social.stash.StashLikedPlaylistRepository
 import com.stash.core.media.equalizer.EqController
 import com.stash.core.media.equalizer.LoudnessController
+import com.stash.core.media.streaming.PrefetchOrchestrator
 import io.mockk.coEvery
 import io.mockk.mockk
 import io.mockk.verify
@@ -31,6 +32,7 @@ class StashPlaybackServiceLoudnessTest {
     private val loudnessController = mockk<LoudnessController>(relaxed = true)
     private val eqController = mockk<EqController>(relaxed = true)
     private val stashLikedRepository = mockk<StashLikedPlaylistRepository>(relaxed = true)
+    private val prefetchOrchestrator = mockk<PrefetchOrchestrator>(relaxed = true)
 
     private fun newService(): StashPlaybackService {
         // Robolectric attaches a base context so @AndroidEntryPoint's
@@ -41,6 +43,7 @@ class StashPlaybackServiceLoudnessTest {
         service.loudnessController = loudnessController
         service.eqController = eqController
         service.stashLikedRepository = stashLikedRepository
+        service.prefetchOrchestrator = prefetchOrchestrator
         return service
     }
 

@@ -93,6 +93,7 @@ class AlbumDiscoveryViewModelTest {
         playerRepository = playerRepository,
         musicRepository = musicRepository,
         delegate = delegate,
+        losslessPrefetcher = mock(),
     )
 
     /**

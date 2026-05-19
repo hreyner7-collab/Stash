@@ -214,6 +214,8 @@ fun SettingsScreen(
         onNavigateToSquidWtfCaptcha = onNavigateToSquidWtfCaptcha,
         onShareLatestCrashReport = viewModel::latestCrashShareTarget,
         onDiagnosticsRefresh = viewModel::refreshDiagnostics,
+        streamingEnabled = viewModel.streamingEnabled.collectAsStateWithLifecycle().value,
+        onStreamingToggle = viewModel::onStreamingToggle,
         modifier = modifier,
     )
 }
@@ -273,6 +275,10 @@ private fun SettingsContent(
      * when the user navigates away and comes back.
      */
     onDiagnosticsRefresh: () -> Unit,
+    /** Live streaming-mode (Online vs Offline) — see [SettingsViewModel.streamingEnabled]. */
+    streamingEnabled: Boolean,
+    /** Routed to [SettingsViewModel.onStreamingToggle] in the host. */
+    onStreamingToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
@@ -303,6 +309,24 @@ private fun SettingsContent(
             style = MaterialTheme.typography.headlineLarge,
             color = MaterialTheme.colorScheme.onBackground,
         )
+
+        // -- Playback (Online / Offline mode) --------------------------------
+        // Canonical home for the streaming-mode preference. Settings is where
+        // users expect to find app-wide modes; the Home top-bar chip
+        // (StreamingModeChip) is the quick-access surface that writes to the
+        // same preference. Both render the OnlineOfflinePicker so the control
+        // surface is identical regardless of entry point.
+        if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
+            SectionHeader(title = "Playback")
+            GlassCard {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    com.stash.core.ui.components.OnlineOfflinePicker(
+                        streamingEnabled = streamingEnabled,
+                        onSelect = onStreamingToggle,
+                    )
+                }
+            }
+        }
 
         // -- Support section --------------------------------------------------
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current

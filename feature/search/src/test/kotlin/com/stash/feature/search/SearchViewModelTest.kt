@@ -1,8 +1,12 @@
 package com.stash.feature.search
 
 import app.cash.turbine.test
+import com.stash.core.data.prefs.StreamingPreference
+import com.stash.core.media.PlayerRepository
+import com.stash.core.media.StreamRoutingResult
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.PreviewState
+import com.stash.core.model.TrackItem
 import com.stash.data.ytmusic.YTMusicApiClient
 import com.stash.data.ytmusic.model.SearchAllResults
 import kotlinx.coroutines.CompletableDeferred
@@ -31,6 +35,7 @@ import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyBlocking
 import org.mockito.kotlin.whenever
 
 /**
@@ -130,6 +135,117 @@ class SearchViewModelTest {
     }
 
     // ------------------------------------------------------------------
+    // Task 20: onResultTap — streaming on vs off
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `onResultTap streaming off calls preview not playFromStream`() = runTest {
+        val delegate = stubDelegate()
+        val playerRepository = mock<PlayerRepository>()
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn false
+        }
+        val vm = newVm(
+            delegate = delegate,
+            playerRepository = playerRepository,
+            streamingPreference = streamingPreference,
+        )
+
+        vm.onResultTap(sampleTrack())
+        advanceUntilIdle()
+
+        verify(delegate).previewTrack(any())
+        verifyBlocking(playerRepository, never()) { playFromStream(any()) }
+    }
+
+    @Test
+    fun `onResultTap streaming on calls playFromStream not preview`() = runTest {
+        val delegate = stubDelegate()
+        val playerRepository = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doReturn StreamRoutingResult.Item(
+                androidx.media3.common.MediaItem.fromUri("https://example/song"),
+            )
+        }
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            delegate = delegate,
+            playerRepository = playerRepository,
+            streamingPreference = streamingPreference,
+        )
+
+        vm.onResultTap(sampleTrack())
+        advanceUntilIdle()
+
+        verifyBlocking(playerRepository) { playFromStream(any()) }
+        verify(delegate, never()).previewTrack(any())
+    }
+
+    @Test
+    fun `onResultTap streaming on but no connectivity emits snackbar`() = runTest {
+        val playerRepository = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doReturn StreamRoutingResult.NoConnectivity
+        }
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            playerRepository = playerRepository,
+            streamingPreference = streamingPreference,
+        )
+
+        vm.userMessages.test {
+            vm.onResultTap(sampleTrack())
+            val msg = awaitItem()
+            assertTrue(msg.contains("offline", ignoreCase = true))
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `onResultTap streaming on but cellular refused emits snackbar`() = runTest {
+        val playerRepository = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doReturn StreamRoutingResult.CellularRefused
+        }
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            playerRepository = playerRepository,
+            streamingPreference = streamingPreference,
+        )
+
+        vm.userMessages.test {
+            vm.onResultTap(sampleTrack())
+            val msg = awaitItem()
+            assertTrue(msg.contains("cellular", ignoreCase = true))
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `onResultTap streaming on but not available emits snackbar`() = runTest {
+        val playerRepository = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doReturn StreamRoutingResult.NotAvailable
+        }
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            playerRepository = playerRepository,
+            streamingPreference = streamingPreference,
+        )
+
+        vm.userMessages.test {
+            vm.onResultTap(sampleTrack())
+            val msg = awaitItem()
+            assertTrue(msg.contains("couldn't find", ignoreCase = true))
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -137,7 +253,27 @@ class SearchViewModelTest {
         api: YTMusicApiClient = mock(),
         prefetcher: PreviewPrefetcher = mock(),
         delegate: TrackActionsDelegate = stubDelegate(),
-    ): SearchViewModel = SearchViewModel(api, prefetcher, delegate)
+        playerRepository: PlayerRepository = mock(),
+        streamingPreference: StreamingPreference = mock {
+            onBlocking { current() } doReturn false
+        },
+    ): SearchViewModel = SearchViewModel(
+        api = api,
+        prefetcher = prefetcher,
+        delegate = delegate,
+        losslessPrefetcher = mock(),
+        playerRepository = playerRepository,
+        streamingPreference = streamingPreference,
+    )
+
+    private fun sampleTrack(): TrackItem = TrackItem(
+        videoId = "vid123",
+        title = "Hit Song",
+        artist = "Hit Artist",
+        durationSeconds = 200.0,
+        thumbnailUrl = null,
+        album = null,
+    )
 
     /**
      * Returns a [TrackActionsDelegate] mock with all flows stubbed to their

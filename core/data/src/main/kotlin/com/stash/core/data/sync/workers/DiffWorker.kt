@@ -57,6 +57,7 @@ class DiffWorker @AssistedInject constructor(
     private val musicRepository: MusicRepository,
     private val syncPreferencesManager: SyncPreferencesManager,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -83,6 +84,13 @@ class DiffWorker @AssistedInject constructor(
             // the Sync Preferences cards.
             val spotifySyncMode = syncPreferencesManager.spotifySyncMode.first()
             val youtubeSyncMode = syncPreferencesManager.youtubeSyncMode.first()
+
+            // Read the streaming-mode toggle ONCE up front. When on, new
+            // track rows still land in the `tracks` table (the metadata is
+            // needed regardless — Home playlist surfaces + playlist detail
+            // rely on it) but skip the `download_queue` enqueue. Tracks
+            // become available via streaming-tap through KennyySource.
+            val streamingMode = streamingPreference.current()
 
             val playlistSnapshots = remoteSnapshotDao.getPlaylistSnapshotsBySyncId(syncId)
             var newTrackCount = 0
@@ -135,6 +143,7 @@ class DiffWorker @AssistedInject constructor(
                         trackSnapshots = trackSnapshots,
                         syncMode = playlistSyncMode,
                         syncId = syncId,
+                        streamingMode = streamingMode,
                     )
                 }
                 newTrackCount += playlistNewTracks
@@ -293,6 +302,7 @@ class DiffWorker @AssistedInject constructor(
         trackSnapshots: List<RemoteTrackSnapshotEntity>,
         syncMode: SyncMode,
         syncId: Long,
+        streamingMode: Boolean,
     ): Int {
         // In REFRESH mode, clear existing playlist-track associations
         // before inserting the current set. In ACCUMULATE mode, keep
@@ -419,18 +429,27 @@ class DiffWorker @AssistedInject constructor(
                     position = trackSnapshot.position,
                 )
 
+                // Streaming mode: track row + playlist membership land
+                // normally so the playlist surfaces on Home and the playlist
+                // detail screen can stream the track via Kennyy on tap. We
+                // skip the download_queue enqueue so no bytes hit disk.
+                // Offline mode: enqueue the download as usual.
                 val searchQuery = "${trackSnapshot.artist} - ${trackSnapshot.title}"
-                Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
-                downloadQueueDao.insert(
-                    DownloadQueueEntity(
-                        trackId = trackId,
-                        syncId = syncId,
-                        searchQuery = searchQuery,
-                        youtubeUrl = trackSnapshot.youtubeId?.let {
-                            "https://music.youtube.com/watch?v=$it"
-                        },
+                if (!streamingMode) {
+                    Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
+                    downloadQueueDao.insert(
+                        DownloadQueueEntity(
+                            trackId = trackId,
+                            syncId = syncId,
+                            searchQuery = searchQuery,
+                            youtubeUrl = trackSnapshot.youtubeId?.let {
+                                "https://music.youtube.com/watch?v=$it"
+                            },
+                        )
                     )
-                )
+                } else {
+                    Log.i(TAG, "QueueTrace: DiffWorker streaming-mode insert track_id=$trackId playlist=${localPlaylist.id} (download skipped)")
+                }
                 newTrackCount++
             }
         }

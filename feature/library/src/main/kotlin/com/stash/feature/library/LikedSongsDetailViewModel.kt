@@ -38,6 +38,7 @@ class LikedSongsDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : ViewModel() {
 
     private val sourceFilter: MusicSource? =
@@ -96,18 +97,43 @@ class LikedSongsDetailViewModel @Inject constructor(
 
     fun playTrack(trackId: Long) {
         viewModelScope.launch {
-            val downloaded = uiState.value.tracks.filter { it.filePath != null }
-            if (downloaded.isEmpty()) return@launch
-            val index = downloaded.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
-            playerRepository.setQueue(downloaded, index)
+            // Streaming mode: keep streamable tracks in the queue (resolved
+            // via Kennyy inside setQueue). Offline mode: filter to disk-only.
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
+            playerRepository.setQueue(playable, index)
         }
     }
 
     fun shuffleAll() {
         viewModelScope.launch {
-            val downloaded = uiState.value.tracks.filter { it.filePath != null }
-            if (downloaded.isEmpty()) return@launch
-            playerRepository.setQueue(downloaded.shuffled(), 0)
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            playerRepository.setQueue(playable.shuffled(), 0)
+        }
+    }
+
+    fun playAll() {
+        viewModelScope.launch {
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            playerRepository.setQueue(playable, 0)
         }
     }
 
@@ -121,6 +147,14 @@ class LikedSongsDetailViewModel @Inject constructor(
 
     fun deleteTrack(track: Track) {
         viewModelScope.launch { musicRepository.deleteTrack(track) }
+    }
+
+    fun queueDownload(trackId: Long) {
+        viewModelScope.launch { musicRepository.queueDownload(trackId) }
+    }
+
+    fun removeDownload(trackId: Long) {
+        viewModelScope.launch { musicRepository.removeDownload(trackId) }
     }
 
     val userPlaylists = musicRepository.getUserCreatedPlaylists()

@@ -26,8 +26,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
 import com.stash.core.ui.theme.StashTheme
 import com.stash.core.ui.util.formatDuration
@@ -162,3 +164,45 @@ fun DetailTrackRow(
         )
     }
 }
+
+// ── Previews ───────────────────────────────────────────────────────────────
+
+@Preview(name = "Normal", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewDetailTrackRowNormal() {
+    StashTheme {
+        DetailTrackRow(
+            track = previewDetailTrack(),
+            trackNumber = 1,
+            isPlaying = false,
+            onClick = {},
+            onLongPress = {},
+        )
+    }
+}
+
+@Preview(name = "Playing", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewDetailTrackRowPlaying() {
+    StashTheme {
+        DetailTrackRow(
+            track = previewDetailTrack(),
+            trackNumber = 3,
+            isPlaying = true,
+            onClick = {},
+            onLongPress = {},
+        )
+    }
+}
+
+private fun previewDetailTrack(
+    isDownloaded: Boolean = true,
+): Track = Track(
+    id = 1L,
+    title = "Glory Box",
+    artist = "Portishead",
+    album = "Dummy",
+    durationMs = 308_000L,
+    source = MusicSource.SPOTIFY,
+    isDownloaded = isDownloaded,
+)

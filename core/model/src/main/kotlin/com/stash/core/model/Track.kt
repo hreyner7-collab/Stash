@@ -49,4 +49,21 @@ data class Track(
     val spotifySavedAt: Long? = null,
     val ytMusicSavedAt: Long? = null,
     val stashLikedAt: Long? = null,
+    /**
+     * v0.9.27: cached Kennyy-proxy resolvability. True = the streaming
+     * engine can play this track without a downloaded file. Defaults to
+     * false so legacy rows surface as "not yet known streamable" until
+     * `AvailabilityCheckWorker` drains the backlog. See
+     * `TrackEntity.isStreamable`.
+     */
+    val isStreamable: Boolean = false,
+    /**
+     * v0.9.27: epoch-millis of the streamability lookup (success OR
+     * failure). NULL = never checked; tristate sentinel that pairs with
+     * [isStreamable] to distinguish "unavailable on Kennyy" from "we
+     * haven't asked yet." Drives the library row's greyed-out treatment
+     * — only checked-and-unavailable rows go grey. See
+     * `TrackEntity.isStreamableCheckedAt`.
+     */
+    val isStreamableCheckedAt: Long? = null,
 )

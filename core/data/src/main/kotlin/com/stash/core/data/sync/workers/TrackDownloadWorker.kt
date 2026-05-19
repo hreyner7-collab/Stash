@@ -54,6 +54,7 @@ class TrackDownloadWorker @AssistedInject constructor(
     private val tokenManager: com.stash.core.auth.TokenManager,
     private val audioDurationExtractor: AudioDurationExtractor,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -129,17 +130,31 @@ class TrackDownloadWorker @AssistedInject constructor(
             // Re-queue tracks that are undownloaded but have no active queue entry.
             // This catches tracks whose retries were all exhausted and entries cleaned up,
             // or tracks that somehow never got queued.
-            val unqueuedTrackIds = downloadQueueDao.getUnqueuedTrackIds(connectedSources)
-            if (unqueuedTrackIds.isNotEmpty()) {
-                Log.i(TAG, "Re-queuing ${unqueuedTrackIds.size} undownloaded tracks with no active queue entry")
-                Log.i(TAG, "QueueTrace: TrackDownloadWorker.requeue track_ids=${unqueuedTrackIds.take(50)}${if (unqueuedTrackIds.size > 50) "...(${unqueuedTrackIds.size - 50} more)" else ""}")
-                val newEntries = unqueuedTrackIds.map { trackId ->
-                    com.stash.core.data.db.entity.DownloadQueueEntity(
-                        trackId = trackId,
-                        syncId = syncId,
-                    )
+            //
+            // v0.9.30: SKIP this auto-requeue in streaming mode. DiffWorker
+            // intentionally does NOT enqueue downloads for synced tracks
+            // when streaming is on (the user wants metadata-only sync,
+            // tracks play via Kennyy). Without this guard the auto-requeue
+            // here would silently undo DiffWorker's skip and download
+            // everything anyway. User-initiated downloads via the long-press
+            // "Download to library" path still work — they insert into
+            // download_queue directly and this worker processes the
+            // existing pending rows further down.
+            if (!streamingPreference.current()) {
+                val unqueuedTrackIds = downloadQueueDao.getUnqueuedTrackIds(connectedSources)
+                if (unqueuedTrackIds.isNotEmpty()) {
+                    Log.i(TAG, "Re-queuing ${unqueuedTrackIds.size} undownloaded tracks with no active queue entry")
+                    Log.i(TAG, "QueueTrace: TrackDownloadWorker.requeue track_ids=${unqueuedTrackIds.take(50)}${if (unqueuedTrackIds.size > 50) "...(${unqueuedTrackIds.size - 50} more)" else ""}")
+                    val newEntries = unqueuedTrackIds.map { trackId ->
+                        com.stash.core.data.db.entity.DownloadQueueEntity(
+                            trackId = trackId,
+                            syncId = syncId,
+                        )
+                    }
+                    downloadQueueDao.insertAll(newEntries)
                 }
-                downloadQueueDao.insertAll(newEntries)
+            } else {
+                Log.i(TAG, "Streaming mode: skipping auto-requeue of undownloaded tracks")
             }
 
             // Collect ALL pending items (from any sync) plus retryable failed items.

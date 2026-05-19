@@ -76,6 +76,7 @@ class ArtistProfileViewModelTest {
         artistCache = cache,
         prefetcher = prefetcher,
         delegate = delegate,
+        losslessPrefetcher = mock(),
     )
 
     /**

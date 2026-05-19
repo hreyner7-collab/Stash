@@ -1,9 +1,64 @@
 package com.stash.core.media
 
+import androidx.media3.common.MediaItem
 import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
+import com.stash.core.model.TrackItem
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * Outcome of a streaming-routing decision when the player is asked to play
+ * a track. Surfaced as a return value rather than emitting through an
+ * internal SharedFlow so the caller (a ViewModel / screen) can decide how
+ * to render each reason — typically a snackbar for the refusal variants
+ * and silent no-op for [NotAvailable] rows (which should already be
+ * greyed out in the UI).
+ *
+ * Defined here rather than in `core/model` because the [Item] variant
+ * carries a Media3 [MediaItem], a `core/media`-private type.
+ */
+sealed class StreamRoutingResult {
+    /** The track is playable — hand [mediaItem] to the controller. */
+    data class Item(val mediaItem: MediaItem) : StreamRoutingResult()
+
+    /**
+     * No local file on disk, not marked streamable in the library, OR
+     * the resolver couldn't find a stream URL. Library row should be
+     * rendered greyed-out; tap is silently ignored.
+     */
+    data object NotAvailable : StreamRoutingResult()
+
+    /**
+     * Streaming is disabled in preferences and the track has no local
+     * file. Caller surfaces "Turn on Online mode to stream this track".
+     */
+    data object OfflineMode : StreamRoutingResult()
+
+    /**
+     * Streaming is enabled but the device is on cellular and the user
+     * has not opted-in to streaming on metered networks. Caller surfaces
+     * "Streaming on cellular is off in Settings".
+     */
+    data object CellularRefused : StreamRoutingResult()
+
+    /**
+     * Streaming is enabled but the device has no validated internet
+     * connection (airplane mode, captive portal not yet accepted, etc.).
+     * Caller surfaces "You're offline — can't stream this track".
+     */
+    data object NoConnectivity : StreamRoutingResult()
+
+    /**
+     * Rapid duplicate tap while a prior resolve for the same videoId is
+     * still in flight. Caller should NOT emit any user-visible feedback:
+     * the original tap is being handled and will produce its own outcome
+     * (Item/NotAvailable/etc.) — duplicating the snackbar would just
+     * confuse the user with a "Couldn't find this track" message while
+     * the track is actually about to start playing.
+     */
+    data object Deduped : StreamRoutingResult()
+}
 
 /**
  * Abstraction over the playback engine. Consumers observe [playerState] for UI updates
@@ -83,4 +138,35 @@ interface PlayerRepository {
      * Starts from the beginning of that track.
      */
     suspend fun skipToQueueIndex(index: Int)
+
+    /**
+     * v0.9.27: Streaming-aware single-track playback entry point. Runs
+     * the routing decision tree for [track] (downloaded → local file;
+     * streamable + streaming-on → resolve + cache + stream; etc.). On
+     * [StreamRoutingResult.Item], the controller is asked to play the
+     * resolved [MediaItem] immediately, replacing the current queue with
+     * a single-item queue. On any refusal variant, the controller is
+     * **not** touched and the variant is returned so the caller can
+     * render a user-visible reason (snackbar).
+     *
+     * Distinct from [setQueue] because the latter pre-assumes local-only
+     * playback and doesn't run the streaming routing. Once Task 18's row
+     * treatment lands the Library tap path will migrate to this method.
+     */
+    suspend fun playTrack(track: Track): StreamRoutingResult
+
+    /**
+     * v0.9.27: Streaming-only playback entry point for the Search tab
+     * (Task 20). Search results carry [TrackItem], a lightweight model
+     * that doesn't yet have a [Track] / [com.stash.core.data.db.entity.TrackEntity]
+     * because the song hasn't been imported into the user's library. The
+     * routing layer inline-constructs a transient [com.stash.core.data
+     * .db.entity.TrackEntity] and runs the streaming branch directly —
+     * never a local-file branch, because by definition a search-result
+     * track isn't on disk.
+     *
+     * Returns the same [StreamRoutingResult] variants as [playTrack] so
+     * the Search ViewModel can render the same set of snackbars.
+     */
+    suspend fun playFromStream(item: TrackItem): StreamRoutingResult
 }

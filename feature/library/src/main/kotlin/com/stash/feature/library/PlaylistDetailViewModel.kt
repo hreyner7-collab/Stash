@@ -55,6 +55,7 @@ class PlaylistDetailViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
     private val playlistImageHelper: PlaylistImageHelper,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : ViewModel() {
 
     /** The playlist ID extracted from the navigation route arguments. */
@@ -136,22 +137,54 @@ class PlaylistDetailViewModel @Inject constructor(
      */
     fun playTrack(trackId: Long) {
         viewModelScope.launch {
-            val downloaded = uiState.value.tracks.filter { it.filePath != null }
-            if (downloaded.isEmpty()) return@launch
-            val index = downloaded.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
-            playerRepository.setQueue(downloaded, index)
+            // In streaming mode the queue includes synced-but-not-downloaded
+            // tracks (they'll resolve via Kennyy inside setQueue). In offline
+            // mode we still filter to downloaded-only so we don't enqueue
+            // unplayable items.
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
+            playerRepository.setQueue(playable, index)
         }
     }
 
     /**
-     * Shuffles all downloaded tracks in the playlist and begins playback.
-     * Shuffles the list itself (not just the start index).
+     * Shuffles the playlist and begins playback. Streaming mode shuffles all
+     * tracks (downloaded + synced-streamable); offline mode only shuffles
+     * tracks present on disk.
      */
     fun shuffleAll() {
         viewModelScope.launch {
-            val downloaded = uiState.value.tracks.filter { it.filePath != null }
-            if (downloaded.isEmpty()) return@launch
-            playerRepository.setQueue(downloaded.shuffled(), 0)
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            playerRepository.setQueue(playable.shuffled(), 0)
+        }
+    }
+
+    /**
+     * Plays the playlist in order starting at the first track. Streaming-mode
+     * aware — same filter as [shuffleAll].
+     */
+    fun playAll() {
+        viewModelScope.launch {
+            val streamingOn = streamingPreference.current()
+            val playable = if (streamingOn) {
+                uiState.value.tracks
+            } else {
+                uiState.value.tracks.filter { it.filePath != null }
+            }
+            if (playable.isEmpty()) return@launch
+            playerRepository.setQueue(playable, 0)
         }
     }
 
@@ -185,6 +218,28 @@ class PlaylistDetailViewModel @Inject constructor(
      * The returned cascade summary is emitted on [userMessages] as a
      * human-readable string so the detail screen can show a Snackbar.
      */
+    /**
+     * Queue [trackId] for download. Inserts a row into `download_queue`
+     * and kicks the discovery worker — see [MusicRepository.queueDownload].
+     */
+    fun queueDownload(trackId: Long) {
+        viewModelScope.launch {
+            musicRepository.queueDownload(trackId)
+            _userMessages.tryEmit("Queued for download.")
+        }
+    }
+
+    /**
+     * Delete the on-disk file but keep the streamable row. ExoPlayer's
+     * open FD keeps any currently-playing audio alive until track end.
+     */
+    fun removeDownload(trackId: Long) {
+        viewModelScope.launch {
+            musicRepository.removeDownload(trackId)
+            _userMessages.tryEmit("Download removed.")
+        }
+    }
+
     fun deleteTrackFromPlaylist(track: Track, alsoBlacklist: Boolean) {
         viewModelScope.launch {
             val isDownloadsMix = uiState.value.playlist?.type == PlaylistType.DOWNLOADS_MIX

@@ -18,6 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -225,7 +228,7 @@ fun NowPlayingScreen(
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // -- Top bar: dismiss, label, flag, like, save, queue --
+            // -- Top bar: dismiss, label, flag, like, download, save, queue --
             TopBar(
                 onDismiss = onDismiss,
                 onFlagWrongMatch = { showWrongMatchDialog = true },
@@ -235,6 +238,8 @@ fun NowPlayingScreen(
                 queueSize = uiState.queueSize,
                 onLikeTap = viewModel::onLikeTap,
                 isLiked = uiState.currentTrack?.stashLikedAt != null,
+                onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
+                isDownloaded = uiState.currentTrack?.isDownloaded == true,
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -300,18 +305,16 @@ fun NowPlayingScreen(
             // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
             // Sized smaller than the artist/album line; degrades gracefully when
             // some fields are missing (returns a partial line, not nothing).
+            // When the active MediaItem is sourced from an http(s) URI (Kennyy
+            // stream rather than a local file), a small wifi glyph prefixes
+            // the line so the user knows playback is using their connection.
             if (track != null) {
                 val qualityText = trackQualityText(track)
                 if (qualityText != null) {
                     Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = qualityText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.5f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
+                    QualityLine(
+                        qualityText = qualityText,
+                        isStreaming = uiState.isStreaming,
                     )
                 }
             }
@@ -372,6 +375,8 @@ private fun TopBar(
     queueSize: Int,
     onLikeTap: () -> Unit,
     isLiked: Boolean,
+    onDownloadTap: () -> Unit,
+    isDownloaded: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -422,6 +427,21 @@ private fun TopBar(
                 unlikedTint = Color.White,
                 modifier = Modifier.padding(horizontal = 4.dp),
             )
+        }
+
+        // Download / Remove-download toggle — single button that flips
+        // based on the current track's on-disk state. Streaming-mode
+        // users use this to grab the song they're listening to right now
+        // without leaving Now Playing.
+        if (hasTrack) {
+            IconButton(onClick = onDownloadTap) {
+                Icon(
+                    imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
+                    contentDescription = if (isDownloaded) "Remove download" else "Download",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
         }
 
         // Save to playlist — only shown when a track is loaded.
@@ -627,4 +647,86 @@ private fun trackQualityText(track: com.stash.core.model.Track): String? {
         }
         if (bitrate != null) add("$bitrate kbps")
     }.joinToString(" · ")
+}
+
+/**
+ * Renders the codec/bitrate quality line beneath the artist · album row.
+ * When [isStreaming] is `true` a small wifi glyph is prefixed so the
+ * user can tell at a glance that playback is coming from the network
+ * rather than a local file. The icon picks up
+ * [MaterialTheme.colorScheme.primary] so it stands out against the
+ * white-on-ambient quality text without clashing with the album-art
+ * palette.
+ *
+ * Centered as a Row so the prefix-icon variant stays visually balanced
+ * with the icon-less variant — the original `Text(textAlign = Center)`
+ * call is preserved when there is nothing to prefix.
+ */
+@Composable
+private fun QualityLine(
+    qualityText: String,
+    isStreaming: Boolean,
+) {
+    if (isStreaming) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Wifi,
+                contentDescription = "Streaming",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(12.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = qualityText,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.5f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    } else {
+        Text(
+            text = qualityText,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White.copy(alpha = 0.5f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@androidx.compose.ui.tooling.preview.Preview(
+    name = "QualityLine — streaming",
+    showBackground = true,
+    backgroundColor = 0xFF101012,
+)
+@Composable
+private fun PreviewQualityLineStreaming() {
+    com.stash.core.ui.theme.StashTheme {
+        QualityLine(
+            qualityText = "OPUS \u00B7 160 kbps",
+            isStreaming = true,
+        )
+    }
+}
+
+@androidx.compose.ui.tooling.preview.Preview(
+    name = "QualityLine — local",
+    showBackground = true,
+    backgroundColor = 0xFF101012,
+)
+@Composable
+private fun PreviewQualityLineLocal() {
+    com.stash.core.ui.theme.StashTheme {
+        QualityLine(
+            qualityText = "FLAC \u00B7 24-bit/96.0 kHz \u00B7 4233 kbps",
+            isStreaming = false,
+        )
+    }
 }

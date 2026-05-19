@@ -266,4 +266,25 @@ data class TrackEntity(
      */
     @ColumnInfo(name = "loudness_measured_at")
     val loudnessMeasuredAt: Long? = null,
+
+    /**
+     * v0.9.27: Cached result of an `AvailabilityCheckWorker` lookup
+     * against Kennyy's Qobuz proxy. True = the proxy can resolve a
+     * stream URL for this track (the streaming engine can play it
+     * without a downloaded file); false = lookup failed and the track
+     * is offline-only. Defaults to false so legacy rows surface as
+     * "not yet known streamable" until the worker drains them.
+     */
+    @ColumnInfo(name = "is_streamable", defaultValue = "0")
+    val isStreamable: Boolean = false,
+
+    /**
+     * v0.9.27: Epoch-millis timestamp of the streamability lookup
+     * (success OR failure). NULL = never checked — the tristate
+     * sentinel the `AvailabilityCheckWorker` queries to find rows
+     * still in need of an initial check. Mirrors the
+     * `loudness_measured_at` pattern from v0.9.25.
+     */
+    @ColumnInfo(name = "is_streamable_checked_at")
+    val isStreamableCheckedAt: Long? = null,
 )

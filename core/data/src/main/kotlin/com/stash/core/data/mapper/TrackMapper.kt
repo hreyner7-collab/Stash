@@ -38,6 +38,8 @@ fun TrackEntity.toDomain(): Track = Track(
     spotifySavedAt = spotifySavedAt,
     ytMusicSavedAt = ytMusicSavedAt,
     stashLikedAt = stashLikedAt,
+    isStreamable = isStreamable,
+    isStreamableCheckedAt = isStreamableCheckedAt,
 )
 
 /**
@@ -73,4 +75,6 @@ fun Track.toEntity(): TrackEntity = TrackEntity(
     spotifySavedAt = spotifySavedAt,
     ytMusicSavedAt = ytMusicSavedAt,
     stashLikedAt = stashLikedAt,
+    isStreamable = isStreamable,
+    isStreamableCheckedAt = isStreamableCheckedAt,
 )

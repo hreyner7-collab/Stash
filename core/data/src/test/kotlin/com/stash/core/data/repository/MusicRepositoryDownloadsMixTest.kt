@@ -70,7 +70,7 @@ class MusicRepositoryDownloadsMixTest {
         // addTrackToPlaylist calls trackDao.getByPlaylist(...).first() to update the
         // track count — return an empty list so first() doesn't block.
         val trackDao = mockk<TrackDao>(relaxed = true)
-        coEvery { trackDao.getByPlaylist(42L) } returns flowOf(emptyList())
+        coEvery { trackDao.getByPlaylist(42L, includeStreamable = false) } returns flowOf(emptyList())
 
         val repo = buildRepo(playlistDao = playlistDao, trackDao = trackDao)
         repo.linkTrackToDownloadsMix(trackId = 99L)
@@ -116,5 +116,6 @@ class MusicRepositoryDownloadsMixTest {
         trackMatcher = mockk(relaxed = true),
         stashMixRecipeDao = mockk(relaxed = true),
         downloadNetworkPreference = mockk(relaxed = true),
+        streamingPreference = mockk(relaxed = true),
     )
 }

@@ -28,8 +28,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
 import com.stash.core.ui.theme.StashTheme
 
@@ -176,6 +178,43 @@ fun TrackListItem(
         }
     }
 }
+
+// ── Previews ───────────────────────────────────────────────────────────────
+
+@Preview(name = "Normal", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewTrackListItemNormal() {
+    StashTheme {
+        TrackListItem(
+            track = previewTrack(),
+            onClick = {},
+        )
+    }
+}
+
+@Preview(name = "Playing", showBackground = true, backgroundColor = 0xFF101012)
+@Composable
+private fun PreviewTrackListItemPlaying() {
+    StashTheme {
+        TrackListItem(
+            track = previewTrack(),
+            onClick = {},
+            isPlaying = true,
+        )
+    }
+}
+
+private fun previewTrack(
+    isDownloaded: Boolean = true,
+): Track = Track(
+    id = 1L,
+    title = "Wandering Star",
+    artist = "Portishead",
+    album = "Dummy",
+    durationMs = 287_000L,
+    source = MusicSource.SPOTIFY,
+    isDownloaded = isDownloaded,
+)
 
 /**
  * Formats a duration in milliseconds to a human-readable "m:ss" or "h:mm:ss" string.

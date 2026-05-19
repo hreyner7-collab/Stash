@@ -273,6 +273,12 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
         applicationScope.launch { maybeBackfillTrackAlbums() }
 
+        // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker
+        // were removed when Library reverted to downloaded-only. They populated
+        // is_streamable for the "show streamable rows in Library" surface that
+        // no longer exists. Streaming-tap availability is determined per-call
+        // by KennyySource at the moment the user taps a search result.
+
         // Start the local listening-history recorder + optional Last.fm
         // and YouTube Music scrobbler. All are safe to start unconditionally —
         // they no-op until configuration/authentication is in place, and the
