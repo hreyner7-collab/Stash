@@ -179,7 +179,14 @@ class PlayerRepositoryImpl @Inject constructor(
         librarySnapshot = emptyList()
 
         val controller = ensureController() ?: return
+
+        // Build lightweight MediaItems. Downloaded tracks carry their
+        // file:// URI here; streaming-only tracks ship with NO URI —
+        // LazyResolvingMediaSourceFactory resolves them via Kennyy when
+        // ExoPlayer actually plays each one. This means setQueue is
+        // instant even for 2000+ track queues (Liked Songs et al.).
         val mediaItems = tracks.map { it.toMediaItem() }
+
         controller.setMediaItems(mediaItems, startIndex, /* startPositionMs = */ 0L)
         controller.prepare()
         controller.play()
