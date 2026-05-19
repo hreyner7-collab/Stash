@@ -1,9 +1,12 @@
 package com.stash.core.media.di
 
 import android.content.Context
+import androidx.annotation.OptIn
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.PlayerRepositoryImpl
 import com.stash.core.media.equalizer.EqStore
@@ -65,5 +68,21 @@ abstract class MediaModule {
         fun provideLoudnessStore(
             @ApplicationContext context: Context,
         ): LoudnessStore = LoudnessStore(context.loudnessDataStore)
+
+        /**
+         * Provides the inner [DefaultMediaSourceFactory] consumed by the
+         * [com.stash.core.media.streaming.LazyResolvingMediaSourceFactory]
+         * wrapper. Kept as a separate provider so the wrapper stays
+         * constructor-injected and easy to test in isolation; the wrapper
+         * forwards every Media3 `MediaSource.Factory` method to this
+         * instance for already-resolved items (file:// for downloads,
+         * http(s):// for tracks resolved on the fly).
+         */
+        @Provides
+        @Singleton
+        @OptIn(UnstableApi::class)
+        fun provideDefaultMediaSourceFactory(
+            @ApplicationContext context: Context,
+        ): DefaultMediaSourceFactory = DefaultMediaSourceFactory(context)
     }
 }

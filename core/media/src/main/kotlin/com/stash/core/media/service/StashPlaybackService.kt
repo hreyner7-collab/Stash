@@ -28,6 +28,7 @@ import com.stash.core.media.equalizer.EqController
 import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
+import com.stash.core.media.streaming.LazyResolvingMediaSourceFactory
 import com.stash.core.media.streaming.PrefetchOrchestrator
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +67,7 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
     @Inject lateinit var prefetchOrchestrator: PrefetchOrchestrator
+    @Inject lateinit var lazyResolvingMediaSourceFactory: LazyResolvingMediaSourceFactory
 
     companion object {
         /** Custom command action for toggling shuffle mode. */
@@ -146,6 +148,12 @@ class StashPlaybackService : MediaLibraryService() {
 
         val player = ExoPlayer.Builder(this)
             .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
+            // Lazy URI resolution: setQueue ships URI-less MediaItems for
+            // streaming-only tracks; this factory resolves each track's
+            // signed Qobuz URL on demand when ExoPlayer needs the source.
+            // Avoids the 2000+ simultaneous proxy lookups that the eager
+            // path used to fire for "Play All" on Liked Songs.
+            .setMediaSourceFactory(lazyResolvingMediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
@@ -422,15 +430,29 @@ class StashPlaybackService : MediaLibraryService() {
                 return item
             }
 
-            // 2. If it's a library item (has mediaId), resolve it from DB
+            // 2. If it's a library item (has mediaId), resolve it from DB.
+            // For downloaded tracks, set the file URI. For streaming-only
+            // tracks (no filePath), leave the URI absent so
+            // LazyResolvingMediaSourceFactory can resolve via Kennyy when
+            // ExoPlayer actually loads the source. Setting an empty-string
+            // URI here would build a non-null localConfiguration and bypass
+            // the lazy-resolve branch.
             val trackId = item.mediaId.toLongOrNull()
             if (trackId != null) {
                 val track = trackDao.getById(trackId)
                 if (track != null) {
-                    return item.buildUpon()
-                        .setUri(track.filePath ?: "")
+                    val builder = item.buildUpon()
                         .setMediaMetadata(track.toMediaMetadata())
-                        .build()
+                    val localPath = track.filePath
+                    if (!localPath.isNullOrBlank()) {
+                        val fileUri = if (localPath.startsWith("/")) {
+                            "file://$localPath".toUri()
+                        } else {
+                            localPath.toUri()
+                        }
+                        builder.setUri(fileUri)
+                    }
+                    return builder.build()
                 }
             }
 
