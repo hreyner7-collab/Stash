@@ -49,7 +49,7 @@ import javax.inject.Singleton
 @Singleton
 class PrefetchOrchestrator @Inject constructor(
     private val streamingPreference: StreamingPreference,
-    private val streamResolver: KennyyStreamResolver,
+    private val streamResolver: StreamSourceRegistry,
     private val streamUrlCache: StreamUrlCache,
     private val trackDao: TrackDao,
 ) {

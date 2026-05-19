@@ -258,7 +258,7 @@ interface TrackDao {
         WHERE pt.playlist_id = :playlistId
           AND pt.removed_at IS NULL
           AND bl.canonical_key IS NULL
-          AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
+          AND (t.is_downloaded = 1 OR :includeStreamable)
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC
@@ -1284,6 +1284,26 @@ interface TrackDao {
      */
     @Query("UPDATE tracks SET album_art_url = :albumArtUrl WHERE id = :trackId")
     suspend fun updateAlbumArtUrl(trackId: Long, albumArtUrl: String)
+
+    /**
+     * Clears the download state for a track without removing the row.
+     * Used by the streaming-mode "Remove download" action: file deleted
+     * from disk, flags cleared, row stays so the track is still streamable.
+     *
+     * Sets `is_downloaded = 0`, nulls `file_path`. Preserves loudness,
+     * format, art and every other field — re-downloading just rewrites
+     * the file path on success.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET is_downloaded = 0,
+            file_path = NULL,
+            file_size_bytes = 0
+        WHERE id = :trackId
+        """
+    )
+    suspend fun clearDownloadState(trackId: Long)
 
     /**
      * Duration-only sibling of [fillMissingMetadata]. Used by the primary

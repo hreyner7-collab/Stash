@@ -370,16 +370,25 @@ class DownloadManager @Inject constructor(
                 )
 
                 // Persist album art surfaced by the source's catalog API.
-                // fillMissingAlbumArtUrl is fill-only-if-blank, so a Spotify-
-                // sourced track that already has artwork keeps it; Stash-Discover
-                // tracks that came in metadata-less get the Qobuz image. Failure
-                // here is non-fatal — the file is on disk and playable; only the
-                // visual is degraded.
+                // We OVERWRITE when the stored URL is blank OR is a YouTube
+                // *video* thumbnail (`i.ytimg.com/vi/...`) — both YOUTUBE-
+                // sourced rows AND Spotify rows that got deduped against a
+                // YT-Music match can carry these. We leave other URLs alone
+                // (proper YT Music catalog art on lh3.googleusercontent.com,
+                // Spotify scdn art) since those are generally fine.
+                // Mirrors PlayerRepositoryImpl's on-stream art swap (A1) for
+                // the download path. Failure here is non-fatal — file is on
+                // disk and playable; only the visual is degraded.
                 match.coverArtUrl?.let { url ->
                     runCatching {
-                        trackDao.fillMissingAlbumArtUrl(track.id, url)
+                        val existingArt = trackDao.getById(track.id)?.albumArtUrl
+                        val needsUpgrade = existingArt.isNullOrBlank() ||
+                            com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(existingArt)
+                        if (needsUpgrade) {
+                            trackDao.updateAlbumArtUrl(track.id, url)
+                        }
                     }.onFailure { e ->
-                        Log.w(TAG, "lossless: fillMissingAlbumArtUrl failed for ${track.id}: ${e.message}")
+                        Log.w(TAG, "lossless: album-art update failed for ${track.id}: ${e.message}")
                     }
                 }
 

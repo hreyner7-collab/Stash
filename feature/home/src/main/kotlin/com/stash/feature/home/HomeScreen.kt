@@ -60,6 +60,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -108,7 +110,8 @@ import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.theme.LocalIsDarkTheme
-import com.stash.feature.home.streaming.StreamingModeToggle
+import com.stash.feature.home.streaming.StreamingModeChip
+import com.stash.feature.home.streaming.StreamingModeSheet
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
@@ -127,11 +130,19 @@ fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    // Master streaming-mode flag for the Home `StreamingModeToggle`. The
-    // composable itself early-returns to nothing while the build-time
-    // kill-switch (`StashConstants.STREAMING_ENGINE_ENABLED`) is off, so
-    // observing this flow is essentially free until the engine ships.
+    // Master streaming-mode flag. Both the top-bar StreamingModeChip and
+    // the sheet (StreamingModeSheet) render from this single source of
+    // truth; the chip itself early-returns to nothing while the build-
+    // time kill-switch (StashConstants.STREAMING_ENGINE_ENABLED) is off.
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
+
+    // Bottom-sheet state for the playback-mode picker triggered by the
+    // top-bar chip. The sheet is the chip's tap target — keeps the chip
+    // a single thumb-friendly icon-and-label while still routing a flip
+    // through the OnlineOfflinePicker so the user explicitly chooses a
+    // tile rather than accidentally toggling mid-scroll.
+    var showStreamingSheet by remember { mutableStateOf(false) }
+    val streamingSheetState = rememberModalBottomSheetState()
 
     // One-time privacy disclosure dialog for streaming. Shown the first
     // time the user enables streaming; the ViewModel persists the
@@ -197,6 +208,17 @@ fun HomeScreen(
                     modifier = Modifier.height(48.dp),
                 )
                 Spacer(modifier = Modifier.weight(1f))
+
+                // Streaming-mode quick-access chip. Tap → opens the
+                // StreamingModeSheet for the picker. Gated on
+                // STREAMING_ENGINE_ENABLED inside the composable so it
+                // renders nothing when the flag is off.
+                StreamingModeChip(
+                    streamingEnabled = streamingEnabled,
+                    onClick = { showStreamingSheet = true },
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
 
                 val socialUriHandler = LocalUriHandler.current
                 androidx.compose.material3.IconButton(
@@ -395,27 +417,6 @@ fun HomeScreen(
             }
         }
 
-        // ── Streaming Mode toggle ────────────────────────────────────
-        // Master kill-switch for the Online-Streaming Engine. Hidden
-        // entirely while `StashConstants.STREAMING_ENGINE_ENABLED` is
-        // `false` (the composable early-returns), so the LazyColumn slot
-        // is effectively a no-op until Task 23 of the streaming plan
-        // flips the flag. Placed above "Recently Added" per the plan so
-        // the toggle reads as the screen's primary mode switch.
-        item {
-            StreamingModeToggle(
-                enabled = streamingEnabled,
-                onToggle = { requested ->
-                    // v0.9.30 Path A: flip the pref immediately. The VM
-                    // emits a one-shot disclosure signal on first-ever
-                    // Off→On so the LaunchedEffect above raises the
-                    // privacy dialog. On→Off has no prompt at all.
-                    viewModel.onStreamingToggle(requested)
-                },
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
-        }
-
         // ── Recently Added ───────────────────────────────────────────
         if (uiState.recentlyAdded.isNotEmpty()) {
             item {
@@ -554,6 +555,24 @@ fun HomeScreen(
         )
     }
 
+    // ── Streaming-mode picker sheet (chip → bottom sheet) ──────────────
+    // Opens from the top-bar chip. The picker writes through the same
+    // applyStreamingMode path as Settings; here we also run the
+    // first-time disclosure handshake (HomeViewModel.onStreamingToggle).
+    // Sheet auto-dismisses on tile selection so a flip is exactly two
+    // taps: chip → tile.
+    if (showStreamingSheet) {
+        StreamingModeSheet(
+            streamingEnabled = streamingEnabled,
+            onSelect = { requested ->
+                viewModel.onStreamingToggle(requested)
+                showStreamingSheet = false
+            },
+            onDismiss = { showStreamingSheet = false },
+            sheetState = streamingSheetState,
+        )
+    }
+
     // ── Playlist context-menu bottom sheet ──────────────────────────────
     selectedPlaylist?.let { playlist ->
         val sheetState = rememberModalBottomSheetState()
@@ -611,6 +630,22 @@ fun HomeScreen(
                 label = "Add to Queue",
                 onClick = {
                     viewModel.addPlaylistToQueue(playlist)
+                    selectedPlaylist = null
+                },
+            )
+            HomeBottomSheetActionRow(
+                icon = Icons.Default.Download,
+                label = "Download All",
+                onClick = {
+                    viewModel.queueDownloadsForPlaylist(playlist)
+                    selectedPlaylist = null
+                },
+            )
+            HomeBottomSheetActionRow(
+                icon = Icons.Default.DownloadDone,
+                label = "Remove Downloads",
+                onClick = {
+                    viewModel.removeDownloadsForPlaylist(playlist)
                     selectedPlaylist = null
                 },
             )

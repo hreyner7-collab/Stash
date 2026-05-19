@@ -58,7 +58,7 @@ import javax.inject.Singleton
 @Singleton
 class StreamingMediaSourceFactory @Inject constructor(
     @StreamCache private val streamCache: SimpleCache,
-    private val resolver: KennyyStreamResolver,
+    private val resolver: StreamSourceRegistry,
     private val urlCache: StreamUrlCache,
     private val trackDao: TrackDao,
 ) {

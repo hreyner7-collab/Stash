@@ -49,7 +49,7 @@ private val REFRESH_TRIGGERS = setOf(403, 410)
 @OptIn(UnstableApi::class)
 class RefreshingDataSource(
     private val inner: HttpDataSource,
-    private val resolver: KennyyStreamResolver,
+    private val resolver: StreamSourceRegistry,
     private val cache: StreamUrlCache,
     private val trackId: Long,
     private val trackDao: TrackDao,
@@ -87,7 +87,7 @@ class RefreshingDataSource(
 @OptIn(UnstableApi::class)
 class RefreshingDataSourceFactory(
     private val innerFactory: HttpDataSource.Factory,
-    private val resolver: KennyyStreamResolver,
+    private val resolver: StreamSourceRegistry,
     private val cache: StreamUrlCache,
     private val trackDao: TrackDao,
     private val trackId: Long,

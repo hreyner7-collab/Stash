@@ -56,14 +56,17 @@ class KennyySource @Inject constructor(
         resolveInternal(query, bypassRateLimit = false)
 
     /**
-     * User-initiated immediate resolve for the streaming path. Skips the
-     * token bucket so a tap doesn't queue behind background workers
-     * (AvailabilityCheckWorker, LosslessRetryWorker, etc.) that are
-     * draining the limiter at 1 req/s. Still respects the circuit
-     * breaker — if Kennyy is genuinely 429-ing us, user taps fail fast
-     * rather than burning further requests against a broken upstream.
-     * Burst risk is low because [PlayerRepositoryImpl.playFromStream]
-     * already dedupes rapid duplicate taps.
+     * User-initiated immediate resolve for the streaming path. Skips
+     * BOTH the token bucket AND the circuit breaker. Rationale: a tap
+     * is a deliberate user action, infrequent and self-rate-limited
+     * (user can only press play so fast). The breaker exists to stop
+     * background workers from spamming a sick upstream; it should not
+     * stand between a user and their music. If Kennyy is genuinely
+     * down, each user-initiated call fails on its own merits and the
+     * user notices immediately — vastly better UX than a 30-minute
+     * silent dead zone after a transient burst of 5 failures earlier
+     * in the session. Background paths ([resolve]) still respect the
+     * breaker.
      */
     suspend fun resolveImmediate(query: TrackQuery): SourceResult? =
         resolveInternal(query, bypassRateLimit = true)
@@ -150,10 +153,11 @@ class KennyySource @Inject constructor(
      */
     private suspend fun <T> callLimited(bypassRateLimit: Boolean = false, block: suspend () -> T): T? {
         if (bypassRateLimit) {
-            // User-initiated path: skip the token bucket but still
-            // fast-fail if the circuit breaker is open. Reports
-            // outcomes so the breaker state stays accurate.
-            if (rateLimiter.stateOf(id).isCircuitBroken) return null
+            // User-initiated path: skip BOTH the token bucket and the
+            // circuit breaker. A user tap should never be blocked by
+            // either gate — see [resolveImmediate] KDoc for rationale.
+            // We still report outcomes below so the breaker state
+            // continues to reflect reality for background paths.
         } else {
             if (!rateLimiter.acquire(id)) return null
         }

@@ -115,10 +115,7 @@ fun LikedSongsDetailScreen(
                         LikedSongsHeader(
                             state = state,
                             onBack = onBack,
-                            onPlayAll = {
-                                val firstTrack = state.tracks.firstOrNull { it.filePath != null }
-                                if (firstTrack != null) viewModel.playTrack(firstTrack.id)
-                            },
+                            onPlayAll = { viewModel.playAll() },
                             onShuffle = { viewModel.shuffleAll() },
                             onToggleSearch = { viewModel.toggleSearch() },
                         )
@@ -203,6 +200,14 @@ fun LikedSongsDetailScreen(
                 },
                 onDelete = {
                     viewModel.deleteTrack(it)
+                    selectedTrack = null
+                },
+                onDownload = {
+                    viewModel.queueDownload(it.id)
+                    selectedTrack = null
+                },
+                onRemoveDownload = {
+                    viewModel.removeDownload(it.id)
                     selectedTrack = null
                 },
             )

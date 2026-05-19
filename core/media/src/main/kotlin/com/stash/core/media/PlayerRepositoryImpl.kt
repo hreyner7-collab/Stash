@@ -18,17 +18,26 @@ import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.service.StashPlaybackService
 import com.stash.core.media.streaming.ConnectivityMonitor
-import com.stash.core.media.streaming.KennyyStreamResolver
+import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrlCache
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BIT_DEPTH
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BITRATE
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_CODEC
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_SAMPLE_RATE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
 import com.stash.core.model.TrackItem
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +48,9 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -58,7 +69,7 @@ class PlayerRepositoryImpl @Inject constructor(
     private val playbackStateStore: PlaybackStateStore,
     private val musicRepository: MusicRepository,
     private val streamingPreference: StreamingPreference,
-    private val streamResolver: KennyyStreamResolver,
+    private val streamResolver: StreamSourceRegistry,
     private val streamUrlCache: StreamUrlCache,
     private val connectivity: ConnectivityMonitor,
     private val trackDao: TrackDao,
@@ -149,6 +160,15 @@ class PlayerRepositoryImpl @Inject constructor(
     /** Serializes auto-grow operations so multiple state updates can't fan out. */
     private val growMutex = Mutex()
 
+    /**
+     * Background coroutine that resolves the rest of the queue while
+     * the user is already listening to the first track. Cancelled when
+     * [setQueue] is invoked again so a stale fill can't pollute a new
+     * playlist's queue.
+     */
+    @Volatile
+    private var queueBuildJob: Job? = null
+
     // ---- Public API ----
 
     override suspend fun play() {
@@ -172,6 +192,11 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     override suspend fun setQueue(tracks: List<Track>, startIndex: Int) {
+        // Any prior background fill belongs to a previous queue; kill it
+        // so its addMediaItem calls can't pollute the new one.
+        queueBuildJob?.cancel()
+        queueBuildJob = null
+
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
         // list doesn't grow back into a different queue later.
@@ -179,17 +204,165 @@ class PlayerRepositoryImpl @Inject constructor(
         librarySnapshot = emptyList()
 
         val controller = ensureController() ?: return
+        if (tracks.isEmpty()) return
 
-        // Build lightweight MediaItems. Downloaded tracks carry their
-        // file:// URI here; streaming-only tracks ship with NO URI —
-        // LazyResolvingMediaSourceFactory resolves them via Kennyy when
-        // ExoPlayer actually plays each one. This means setQueue is
-        // instant even for 2000+ track queues (Liked Songs et al.).
-        val mediaItems = tracks.map { it.toMediaItem() }
+        val streamingOn = streamingPreference.current()
+        val safeStart = startIndex.coerceIn(0, tracks.size - 1)
+        val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
 
-        controller.setMediaItems(mediaItems, startIndex, /* startPositionMs = */ 0L)
+        // Resolve the tapped track first so playback can begin immediately,
+        // regardless of queue size. For a 2671-track Liked Songs queue,
+        // pre-resolving the whole list at the start used to take minutes;
+        // resolving just the tapped track is one Kennyy round-trip (~1-2 s)
+        // and the rest of the queue fills in below while the user listens.
+        //
+        // If the tapped track itself can't be resolved (niche track not in
+        // Qobuz, transient 5xx, etc.), probe forward up to
+        // [START_TRACK_PROBE_LIMIT] entries before giving up — most queues
+        // have at least one playable track near the tap.
+        var startTrackIndex = -1
+        var startItem: MediaItem? = null
+        val probeEnd = (safeStart + START_TRACK_PROBE_LIMIT).coerceAtMost(tracks.size)
+        for (i in safeStart until probeEnd) {
+            val item = resolveTrackToMediaItem(tracks[i], semaphore, streamingOn)
+            if (item != null) {
+                startTrackIndex = i
+                startItem = item
+                break
+            }
+        }
+
+        if (startItem == null) {
+            Log.w(
+                TAG,
+                "setQueue: no resolvable track in tracks[$safeStart .. ${probeEnd - 1}] " +
+                    "(streamingOn=$streamingOn) — nothing to play",
+            )
+            return
+        }
+
+        Log.i(
+            TAG,
+            "setQueue: starting playback on track $startTrackIndex; " +
+                "${tracks.size - 1} more to resolve in background",
+        )
+
+        controller.setMediaItems(listOf(startItem), /* startIndex = */ 0, /* startPositionMs = */ 0L)
         controller.prepare()
         controller.play()
+
+        // Fill the rest of the queue in the background. Tracks after the
+        // start anchor are appended first (skip-next is the common case);
+        // tracks before are prepended afterwards so skip-back still works
+        // once the fill catches up. Cancellable — see queueBuildJob KDoc.
+        val forward = tracks.subList(startTrackIndex + 1, tracks.size)
+        val backward = tracks.subList(0, startTrackIndex)
+        queueBuildJob = scope.launch {
+            try {
+                fillQueueAppend(controller, forward, semaphore, streamingOn)
+                fillQueuePrepend(controller, backward, semaphore, streamingOn)
+                Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
+            } catch (e: CancellationException) {
+                // Expected when the user starts a new queue. Don't log as failure.
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "setQueue: background fill failed", e)
+            }
+        }
+    }
+
+    /**
+     * Resolves [tracks] in parallel batches of [BACKGROUND_FILL_BATCH] and
+     * appends each batch to the controller's timeline as it completes.
+     * Order within the input list is preserved. Failed resolutions are
+     * silently dropped — they would only contribute URI-less MediaItems
+     * that ExoPlayer can't play anyway.
+     */
+    private suspend fun fillQueueAppend(
+        controller: MediaController,
+        tracks: List<Track>,
+        semaphore: Semaphore,
+        streamingOn: Boolean,
+    ) {
+        tracks.chunked(BACKGROUND_FILL_BATCH).forEach { batch ->
+            if (!currentCoroutineActive()) return
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn)
+            if (resolved.isNotEmpty()) controller.addMediaItems(resolved)
+        }
+    }
+
+    /**
+     * Like [fillQueueAppend] but prepends. The input is iterated in reverse
+     * batch chunks so the *first* tracks of the original list end up at
+     * index 0 of the controller's timeline once fill completes.
+     */
+    private suspend fun fillQueuePrepend(
+        controller: MediaController,
+        tracks: List<Track>,
+        semaphore: Semaphore,
+        streamingOn: Boolean,
+    ) {
+        // Process from the END of [tracks] backwards in chunks. The chunk
+        // closest to the current playback head is processed last so the
+        // skip-prev experience improves monotonically.
+        val reversed = tracks.asReversed()
+        reversed.chunked(BACKGROUND_FILL_BATCH).forEach { batchReversed ->
+            if (!currentCoroutineActive()) return
+            // Resolve the batch in original (forward) order so the
+            // semaphore-bounded async fan-out doesn't reshuffle results.
+            val batch = batchReversed.asReversed()
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn)
+            if (resolved.isNotEmpty()) controller.addMediaItems(/* index = */ 0, resolved)
+        }
+    }
+
+    private suspend fun resolveBatchParallel(
+        batch: List<Track>,
+        semaphore: Semaphore,
+        streamingOn: Boolean,
+    ): List<MediaItem> = coroutineScope {
+        batch.map { track ->
+            async(Dispatchers.IO) {
+                resolveTrackToMediaItem(track, semaphore, streamingOn)
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    /**
+     * Helper that bridges [isActive] (a CoroutineScope extension) into a
+     * plain suspend function context. Returns false once the enclosing
+     * job has been cancelled so background-fill loops can bail out.
+     */
+    private suspend fun currentCoroutineActive(): Boolean =
+        kotlin.coroutines.coroutineContext[Job]?.isActive ?: true
+
+    /**
+     * Resolves a single [Track] to a Media3 [MediaItem] with a playable URI,
+     * or `null` if the track is unplayable in the current mode.
+     *
+     * - Downloaded tracks: returns the local file:// MediaItem immediately
+     *   (no network needed even when streaming is on — local is faster).
+     * - Streaming-only tracks: when streaming is enabled, acquires a
+     *   [semaphore] permit and resolves via [buildMediaItemForTrack] which
+     *   consults the URL cache and falls through to [streamResolver].
+     * - Streaming off + no file: returns `null` (dropped from the queue).
+     */
+    private suspend fun resolveTrackToMediaItem(
+        track: Track,
+        semaphore: Semaphore,
+        streamingOn: Boolean,
+    ): MediaItem? {
+        val localPath = track.filePath
+        if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
+            return track.toMediaItem()
+        }
+        if (!streamingOn) return null
+
+        return semaphore.withPermit {
+            val entity = trackDao.getById(track.id) ?: track.toEntity()
+            val result = buildMediaItemForTrack(entity)
+            (result as? StreamRoutingResult.Item)?.mediaItem
+        }
     }
 
     override suspend fun shuffleLibrary() {
@@ -419,19 +592,22 @@ class PlayerRepositoryImpl @Inject constructor(
      * 1. Local file present + actually on disk → play it. Cheap, no
      *    network, works in airplane mode. Always preferred even when
      *    streaming is enabled — caching what you already have is free.
-     * 2. Not streamable → [StreamRoutingResult.NotAvailable]. The
-     *    library row should already be greyed out (Task 18); this is
-     *    defense-in-depth.
-     * 3. Streaming pref off → [StreamRoutingResult.OfflineMode]. The
+     * 2. Streaming pref off → [StreamRoutingResult.OfflineMode]. The
      *    track is theoretically streamable but the user has opted out.
-     * 4. No validated internet → [StreamRoutingResult.NoConnectivity].
+     * 3. No validated internet → [StreamRoutingResult.NoConnectivity].
      *    Includes airplane mode, captive-portal-not-yet-accepted, and
      *    any other "associated but no real internet" state.
-     * 5. Cellular + cellular pref off → [StreamRoutingResult.CellularRefused].
+     * 4. Cellular + cellular pref off → [StreamRoutingResult.CellularRefused].
      *    The user has a data plan they want to protect.
-     * 6. URL cache hit → use the cached signed URL.
-     * 7. Cache miss → resolve via Kennyy and cache the result. Resolver
+     * 5. URL cache hit → use the cached signed URL.
+     * 6. Cache miss → resolve via Kennyy and cache the result. Resolver
      *    null = no match in the proxy's catalog → [NotAvailable].
+     *
+     * Note: the `is_streamable` column is no longer consulted here.
+     * AvailabilityCheckWorker (which set that flag) was removed; Kennyy
+     * is now the sole source of truth on whether a track has a stream URL.
+     * If `streamResolver.resolve()` returns null, we surface NotAvailable
+     * at step 6 — no need to pre-gate on a stale flag.
      */
     internal suspend fun buildMediaItemForTrack(track: TrackEntity): StreamRoutingResult {
         val localPath = track.filePath
@@ -455,7 +631,6 @@ class PlayerRepositoryImpl @Inject constructor(
                     .build()
             )
         }
-        if (!track.isStreamable) return StreamRoutingResult.NotAvailable
         if (!streamingPreference.current()) return StreamRoutingResult.OfflineMode
         if (!connectivity.isConnected()) return StreamRoutingResult.NoConnectivity
         if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) {
@@ -467,6 +642,27 @@ class PlayerRepositoryImpl @Inject constructor(
             streamUrlCache.put(track.id, it)
         } ?: return StreamRoutingResult.NotAvailable
 
+        // YouTube *video* thumbnails (i.ytimg.com/vi/...) leak into
+        // album_art_url for both YOUTUBE-sourced rows AND for Spotify
+        // rows that the sync de-duped against a YT match. Source alone
+        // can't tell us which rows have bad art — check the URL itself.
+        // We also fill blank rows. Proper YT Music catalog art
+        // (lh3.googleusercontent.com) is left alone; Spotify scdn URLs
+        // are left alone. Fire-and-forget; never block playback on a
+        // cosmetic DB write.
+        val betterArt = stream.coverArtUrl
+        val currentArt = track.albumArtUrl
+        val needsUpgrade = currentArt.isNullOrBlank() ||
+            com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(currentArt)
+        if (betterArt != null && needsUpgrade && betterArt != currentArt) {
+            scope.launch { trackDao.updateAlbumArtUrl(track.id, betterArt) }
+        }
+        val displayArtUrl = if (betterArt != null && needsUpgrade) {
+            betterArt
+        } else {
+            track.albumArtPath ?: currentArt
+        }
+
         return StreamRoutingResult.Item(
             MediaItem.Builder()
                 .setMediaId(track.id.toString())
@@ -477,9 +673,18 @@ class PlayerRepositoryImpl @Inject constructor(
                         .setArtist(track.artist)
                         .setAlbumTitle(track.album)
                         .setArtworkUri(
-                            (track.albumArtPath ?: track.albumArtUrl)?.let { Uri.parse(it) }
+                            displayArtUrl?.let { Uri.parse(it) }
                         )
-                        .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, track.id) })
+                        .setExtras(Bundle().apply {
+                            putLong(EXTRA_TRACK_ID, track.id)
+                            // Surface the actual format Qobuz served so Now Playing
+                            // shows "FLAC · 24-bit/96 kHz" instead of the stale Room
+                            // default ("opus") that streaming-only rows carry forever.
+                            stream.codec?.let { putString(EXTRA_STREAM_CODEC, it) }
+                            stream.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
+                            stream.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
+                            stream.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
+                        })
                         .build()
                 )
                 .build()
@@ -703,6 +908,31 @@ class PlayerRepositoryImpl @Inject constructor(
 
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
         private const val LIBRARY_SHUFFLE_GROW_BATCH = 50
+
+        /**
+         * Max in-flight Kennyy resolves while building a streaming queue.
+         * Higher = faster queue-build but risks overwhelming the Qobuz
+         * proxy (it's a community resource, not an SLA endpoint). 16 was
+         * comfortably handled by a 2.6k-track Liked Songs queue in
+         * dogfood testing.
+         */
+        private const val STREAM_RESOLVE_PARALLELISM = 16
+
+        /**
+         * If the tapped track itself fails to resolve, probe this many
+         * adjacent tracks forward before giving up. Keeps playback alive
+         * when the user lands on a single dead row (niche track not in
+         * Qobuz, transient 5xx).
+         */
+        private const val START_TRACK_PROBE_LIMIT = 5
+
+        /**
+         * Tracks per background-fill batch. Each batch fires off a
+         * parallel resolve fan-out up to [STREAM_RESOLVE_PARALLELISM] in
+         * flight. Same value as the resolve cap so one batch saturates
+         * the semaphore — keeps proxy pressure consistent.
+         */
+        private const val BACKGROUND_FILL_BATCH = 16
     }
 
     /**
@@ -744,10 +974,21 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     private fun MediaItem.toTrack(): Track {
         val meta = mediaMetadata
+        val extras = meta.extras
         // v0.9.27: allow id=0 fallback for non-library tracks (e.g. search
         // previews with videoId strings). This makes the Like button and
         // other actions visible in Now Playing for non-library content.
-        val trackId = meta.extras?.getLong(EXTRA_TRACK_ID) ?: mediaId.toLongOrNull() ?: 0L
+        val trackId = extras?.getLong(EXTRA_TRACK_ID) ?: mediaId.toLongOrNull() ?: 0L
+
+        // Streaming tracks carry the Qobuz-reported format in extras so the
+        // Now Playing screen can show "FLAC · 24-bit/96 kHz" instead of the
+        // Room row's default ("opus") that streaming-only library entries
+        // inherit. Absent for downloaded tracks — those keep Room's truth.
+        val streamCodec = extras?.getString(EXTRA_STREAM_CODEC)
+        val streamBitDepth = extras?.getInt(EXTRA_STREAM_BIT_DEPTH, 0)?.takeIf { it > 0 }
+        val streamSampleRate = extras?.getInt(EXTRA_STREAM_SAMPLE_RATE, 0)?.takeIf { it > 0 }
+        val streamBitrate = extras?.getInt(EXTRA_STREAM_BITRATE, 0)?.takeIf { it > 0 }
+
         return Track(
             id = trackId,
             title = meta.title?.toString() ?: "",
@@ -756,7 +997,11 @@ class PlayerRepositoryImpl @Inject constructor(
             albumArtUrl = meta.artworkUri?.toString(),
             // For non-library tracks, the mediaId is the YouTube videoId.
             youtubeId = if (trackId == 0L) mediaId else null,
-            source = if (trackId == 0L) com.stash.core.model.MusicSource.YOUTUBE else com.stash.core.model.MusicSource.SPOTIFY
+            source = if (trackId == 0L) com.stash.core.model.MusicSource.YOUTUBE else com.stash.core.model.MusicSource.SPOTIFY,
+            fileFormat = streamCodec ?: "opus",
+            bitsPerSample = streamBitDepth,
+            sampleRateHz = streamSampleRate,
+            qualityKbps = streamBitrate ?: 0,
         )
     }
 }

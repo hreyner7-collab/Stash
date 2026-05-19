@@ -18,6 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
@@ -226,7 +228,7 @@ fun NowPlayingScreen(
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // -- Top bar: dismiss, label, flag, like, save, queue --
+            // -- Top bar: dismiss, label, flag, like, download, save, queue --
             TopBar(
                 onDismiss = onDismiss,
                 onFlagWrongMatch = { showWrongMatchDialog = true },
@@ -236,6 +238,8 @@ fun NowPlayingScreen(
                 queueSize = uiState.queueSize,
                 onLikeTap = viewModel::onLikeTap,
                 isLiked = uiState.currentTrack?.stashLikedAt != null,
+                onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
+                isDownloaded = uiState.currentTrack?.isDownloaded == true,
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -371,6 +375,8 @@ private fun TopBar(
     queueSize: Int,
     onLikeTap: () -> Unit,
     isLiked: Boolean,
+    onDownloadTap: () -> Unit,
+    isDownloaded: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -421,6 +427,21 @@ private fun TopBar(
                 unlikedTint = Color.White,
                 modifier = Modifier.padding(horizontal = 4.dp),
             )
+        }
+
+        // Download / Remove-download toggle — single button that flips
+        // based on the current track's on-disk state. Streaming-mode
+        // users use this to grab the song they're listening to right now
+        // without leaving Now Playing.
+        if (hasTrack) {
+            IconButton(onClick = onDownloadTap) {
+                Icon(
+                    imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
+                    contentDescription = if (isDownloaded) "Remove download" else "Download",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
         }
 
         // Save to playlist — only shown when a track is loaded.

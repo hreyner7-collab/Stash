@@ -582,28 +582,71 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Loads the downloaded tracks for [playlist] and begins playback from the first track.
-     * Only tracks with a non-null [Track.filePath] (i.e. downloaded) are queued.
+     * Loads the tracks for [playlist] and begins playback from the first
+     * track. In streaming mode every member is playable (Kennyy resolves
+     * on demand inside setQueue); in offline mode only on-disk tracks
+     * are queued.
      */
     fun playPlaylist(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val downloaded = tracks.filter { it.filePath != null }
-            if (downloaded.isNotEmpty()) {
-                playerRepository.setQueue(downloaded, startIndex = 0)
+            val playable = if (streamingPreference.current()) {
+                tracks
+            } else {
+                tracks.filter { it.filePath != null }
+            }
+            if (playable.isNotEmpty()) {
+                playerRepository.setQueue(playable, startIndex = 0)
             }
         }
     }
 
     /**
-     * Loads the downloaded tracks for [playlist] and appends each to the playback queue.
-     * Only tracks with a non-null [Track.filePath] (i.e. downloaded) are queued.
+     * Queue every undownloaded track in [playlist] for download. Surfaces
+     * a snackbar with the count so the user knows it took effect even
+     * though the download chain runs in WorkManager background context.
+     */
+    fun queueDownloadsForPlaylist(playlist: Playlist) {
+        viewModelScope.launch {
+            val count = musicRepository.queueDownloadsForPlaylist(playlist.id)
+            val msg = when (count) {
+                0 -> "Nothing to download — all tracks are already on disk."
+                1 -> "Queued 1 track for download."
+                else -> "Queued $count tracks for download."
+            }
+            _userMessages.tryEmit(msg)
+        }
+    }
+
+    /**
+     * Remove the on-disk file for every downloaded track in [playlist].
+     * Rows stay (still streamable). Counterpart to [queueDownloadsForPlaylist].
+     */
+    fun removeDownloadsForPlaylist(playlist: Playlist) {
+        viewModelScope.launch {
+            val count = musicRepository.removeDownloadsForPlaylist(playlist.id)
+            val msg = when (count) {
+                0 -> "No downloads to remove."
+                1 -> "Removed 1 download."
+                else -> "Removed downloads for $count tracks."
+            }
+            _userMessages.tryEmit(msg)
+        }
+    }
+
+    /**
+     * Loads the tracks for [playlist] and appends each to the playback
+     * queue. Streaming-mode-aware (same filter as [playPlaylist]).
      */
     fun addPlaylistToQueue(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val downloaded = tracks.filter { it.filePath != null }
-            downloaded.forEach { playerRepository.addToQueue(it) }
+            val playable = if (streamingPreference.current()) {
+                tracks
+            } else {
+                tracks.filter { it.filePath != null }
+            }
+            playable.forEach { playerRepository.addToQueue(it) }
         }
     }
 
@@ -786,11 +829,12 @@ class HomeViewModel @Inject constructor(
             }
             if (mixes.isEmpty()) return@launch
 
+            val streamingOn = streamingPreference.current()
             val allTracks = mixes
                 .flatMap { mix ->
                     musicRepository.getTracksByPlaylist(mix.id).first()
                 }
-                .filter { it.filePath != null }
+                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
                 .distinctBy { it.id }
 
             if (allTracks.isNotEmpty()) {
@@ -825,11 +869,12 @@ class HomeViewModel @Inject constructor(
             if (playlistsToPlay.isEmpty()) return@launch
 
             // Fetch each liked playlist's tracks in parallel and flatten
+            val streamingOn = streamingPreference.current()
             val allTracks = playlistsToPlay
                 .flatMap { playlist ->
                     musicRepository.getTracksByPlaylist(playlist.id).first()
                 }
-                .filter { it.filePath != null }
+                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
                 .distinctBy { it.id }
 
             if (allTracks.isNotEmpty()) {

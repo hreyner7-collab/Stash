@@ -28,7 +28,6 @@ import com.stash.core.media.equalizer.EqController
 import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
-import com.stash.core.media.streaming.LazyResolvingMediaSourceFactory
 import com.stash.core.media.streaming.PrefetchOrchestrator
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -67,7 +66,6 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
     @Inject lateinit var prefetchOrchestrator: PrefetchOrchestrator
-    @Inject lateinit var lazyResolvingMediaSourceFactory: LazyResolvingMediaSourceFactory
 
     companion object {
         /** Custom command action for toggling shuffle mode. */
@@ -81,6 +79,21 @@ class StashPlaybackService : MediaLibraryService() {
 
         /** Extra key for the track ID in MediaMetadata extras. */
         const val EXTRA_TRACK_ID = "stash_track_id"
+
+        // ── Streaming-format extras ───────────────────────────────────
+        // Written into MediaMetadata.extras when a streaming-only track
+        // gets its URL resolved (PlayerRepositoryImpl.buildMediaItemForTrack).
+        // Read back by MediaItem.toTrack so the Now Playing screen can
+        // show the actual codec/bit-depth/sample-rate Qobuz is serving
+        // instead of the stale Room defaults (`fileFormat = "opus"`).
+        /** Lowercase codec tag from Qobuz, e.g. `"flac"`, `"mp3"`. */
+        const val EXTRA_STREAM_CODEC = "stash_stream_codec"
+        /** Bits per sample (16, 24); absent for lossy. */
+        const val EXTRA_STREAM_BIT_DEPTH = "stash_stream_bit_depth"
+        /** Sample rate in Hz (44100, 96000…). */
+        const val EXTRA_STREAM_SAMPLE_RATE = "stash_stream_sample_rate"
+        /** Stated bitrate in kbps. */
+        const val EXTRA_STREAM_BITRATE = "stash_stream_bitrate"
 
         private const val ROOT_ID = "ROOT"
         private const val PLAYLISTS_ID = "PLAYLISTS"
@@ -148,12 +161,6 @@ class StashPlaybackService : MediaLibraryService() {
 
         val player = ExoPlayer.Builder(this)
             .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
-            // Lazy URI resolution: setQueue ships URI-less MediaItems for
-            // streaming-only tracks; this factory resolves each track's
-            // signed Qobuz URL on demand when ExoPlayer needs the source.
-            // Avoids the 2000+ simultaneous proxy lookups that the eager
-            // path used to fire for "Play All" on Liked Songs.
-            .setMediaSourceFactory(lazyResolvingMediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
@@ -431,12 +438,13 @@ class StashPlaybackService : MediaLibraryService() {
             }
 
             // 2. If it's a library item (has mediaId), resolve it from DB.
-            // For downloaded tracks, set the file URI. For streaming-only
-            // tracks (no filePath), leave the URI absent so
-            // LazyResolvingMediaSourceFactory can resolve via Kennyy when
-            // ExoPlayer actually loads the source. Setting an empty-string
-            // URI here would build a non-null localConfiguration and bypass
-            // the lazy-resolve branch.
+            // For downloaded tracks, set the file URI. Streaming-only items
+            // are pre-resolved upstream in PlayerRepositoryImpl.setQueue
+            // (semaphore-capped Kennyy lookups), so by the time they reach
+            // here they already carry an http(s) URI and short-circuit on
+            // the check above. If we ever see a streaming-only item with
+            // no URI here, leaving URI absent will surface as an
+            // onPlayerError → skip-next recovery.
             val trackId = item.mediaId.toLongOrNull()
             if (trackId != null) {
                 val track = trackDao.getById(trackId)

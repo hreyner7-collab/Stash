@@ -118,7 +118,29 @@ class NowPlayingViewModel @Inject constructor(
             optimisticLikeState,
         ) { state, positionMs, liveTrack, optimistic ->
             _uiState.update { current ->
-                val track = liveTrack ?: state.currentTrack
+                val baseTrack = liveTrack ?: state.currentTrack
+                // When the player is streaming, the Room row's format fields
+                // are stale or default ("opus") — the row was synced without
+                // actually downloading the audio, so it has no real codec/bit
+                // depth/sample rate. The active MediaItem carries the Qobuz-
+                // reported format in its extras; overlay those onto the
+                // displayed Track so Now Playing shows the right badge.
+                val streamFormat = state.currentTrack
+                val track = if (
+                    state.isStreaming &&
+                    baseTrack != null &&
+                    streamFormat != null &&
+                    streamFormat.id == baseTrack.id &&
+                    streamFormat.fileFormat.isNotBlank() &&
+                    streamFormat.fileFormat != "opus"
+                ) {
+                    baseTrack.copy(
+                        fileFormat = streamFormat.fileFormat,
+                        bitsPerSample = streamFormat.bitsPerSample ?: baseTrack.bitsPerSample,
+                        sampleRateHz = streamFormat.sampleRateHz ?: baseTrack.sampleRateHz,
+                        qualityKbps = if (streamFormat.qualityKbps > 0) streamFormat.qualityKbps else baseTrack.qualityKbps,
+                    )
+                } else baseTrack
                 val trackKey = if (track?.id == 0L) track.youtubeId.hashCode().toLong() else track?.id
                 val finalTrack = if (track != null && trackKey != null && optimistic.containsKey(trackKey)) {
                     val optLiked = optimistic[trackKey]!!
@@ -297,6 +319,26 @@ class NowPlayingViewModel @Inject constructor(
      * FLAC (UI hides the button in that case, but defensive guard here
      * in case state changes mid-tap).
      */
+    /**
+     * Toggle download state for the currently-playing track. Queues a
+     * download when not yet on disk; removes the file (keeping the row)
+     * when already downloaded. Streaming-mode users may never have
+     * downloaded the track being played — this is the in-the-moment
+     * shortcut to keep what's currently playing.
+     */
+    fun toggleDownloadForCurrentTrack() {
+        val track = _uiState.value.currentTrack ?: return
+        viewModelScope.launch {
+            if (track.isDownloaded) {
+                musicRepository.removeDownload(track.id)
+                _userMessages.tryEmit("Download removed.")
+            } else {
+                musicRepository.queueDownload(track.id)
+                _userMessages.tryEmit("Queued for download.")
+            }
+        }
+    }
+
     fun findInFlacForCurrentTrack() {
         val track = _uiState.value.currentTrack ?: return
         if (track.isFlac) return

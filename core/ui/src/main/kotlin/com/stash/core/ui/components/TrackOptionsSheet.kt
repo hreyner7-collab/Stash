@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -45,6 +47,11 @@ import com.stash.core.ui.theme.StashTheme
  * @param onAddToQueue        Appends the track to the end of the queue.
  * @param onSaveToPlaylist    Opens the save-to-playlist flow.
  * @param onDelete            Deletes the track from the device.
+ * @param onDownload          Queue this streaming-only track for download. Pass
+ *                            null to hide the option (e.g. on screens where the
+ *                            download flow doesn't make sense).
+ * @param onRemoveDownload    Remove the on-disk file but keep the row (track
+ *                            stays streamable). Pass null to hide.
  */
 @Composable
 fun TrackOptionsSheet(
@@ -53,6 +60,8 @@ fun TrackOptionsSheet(
     onAddToQueue: (Track) -> Unit,
     onSaveToPlaylist: (Track) -> Unit,
     onDelete: (Track) -> Unit,
+    onDownload: ((Track) -> Unit)? = null,
+    onRemoveDownload: ((Track) -> Unit)? = null,
 ) {
     val extendedColors = StashTheme.extendedColors
 
@@ -140,6 +149,25 @@ fun TrackOptionsSheet(
             label = "Save to Playlist",
             onClick = { onSaveToPlaylist(track) },
         )
+
+        // -- Download / Remove Download option --
+        // The two states are mutually exclusive: a track is either on disk
+        // (offer Remove) or it's not (offer Download). Both callbacks are
+        // optional so screens that don't wire them (e.g. Library detail
+        // under Path A) can simply leave them null and the rows vanish.
+        if (track.isDownloaded && onRemoveDownload != null) {
+            SheetOptionRow(
+                icon = Icons.Default.DownloadDone,
+                label = "Remove download",
+                onClick = { onRemoveDownload(track) },
+            )
+        } else if (!track.isDownloaded && onDownload != null) {
+            SheetOptionRow(
+                icon = Icons.Default.Download,
+                label = "Download",
+                onClick = { onDownload(track) },
+            )
+        }
 
         Spacer(modifier = Modifier.height(4.dp))
 

@@ -165,6 +165,36 @@ interface MusicRepository {
      */
     suspend fun deleteTrack(track: Track): Boolean
 
+    /**
+     * Queue [trackId] for a user-initiated download. Inserts a row into
+     * `download_queue` with `sync_id = null` (distinguishing it from
+     * sync-time downloads) and kicks the discovery download worker.
+     * No-op if the track is already downloaded or is missing.
+     */
+    suspend fun queueDownload(trackId: Long)
+
+    /**
+     * Remove the on-disk file for [trackId] and clear its download flags.
+     * The row is preserved so the track remains streamable. Safe to call
+     * while the track is playing — ExoPlayer's open file descriptor keeps
+     * playback alive until the next track or until the user navigates
+     * away (Unix unlink semantics).
+     */
+    suspend fun removeDownload(trackId: Long)
+
+    /**
+     * Bulk queueDownload for every undownloaded track in [playlistId].
+     * Returns the number of tracks queued (those already downloaded are
+     * skipped). Caller can show "Queued N tracks" snackbar.
+     */
+    suspend fun queueDownloadsForPlaylist(playlistId: Long): Int
+
+    /**
+     * Bulk removeDownload for every downloaded track in [playlistId].
+     * Returns the number of tracks whose downloads were removed.
+     */
+    suspend fun removeDownloadsForPlaylist(playlistId: Long): Int
+
     /** Insert or replace a playlist. Returns the row ID. */
     suspend fun insertPlaylist(playlist: Playlist): Long
 

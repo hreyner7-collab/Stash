@@ -78,11 +78,41 @@ class QobuzSource @Inject constructor(
         return true
     }
 
-    override suspend fun resolve(query: TrackQuery): SourceResult? {
+    /**
+     * Streaming-only enablement gate. Same captcha-cookie check as
+     * [isEnabled] but **ignores the circuit breaker** — user-initiated
+     * taps bypass the breaker (see [resolveImmediate]) so it would be
+     * inconsistent to gate enablement on it here.
+     *
+     * Used by the streaming registry to avoid wasting an HTTP call when
+     * we already know squid will 403 on the captcha gate (no cookie
+     * pasted, or current cookie was previously rejected).
+     */
+    suspend fun isEnabledForStreaming(): Boolean {
+        val currentCookie = losslessPrefs.captchaCookieValueNow()
+        if (currentCookie.isNullOrBlank()) return false
+        if (currentCookie == _lastKnownBadCookie.value) return false
+        return true
+    }
+
+    override suspend fun resolve(query: TrackQuery): SourceResult? =
+        resolveInternal(query, bypassRateLimit = false)
+
+    /**
+     * User-initiated immediate resolve for the streaming path. Mirrors
+     * [KennyySource.resolveImmediate] — skips BOTH the token bucket and
+     * the circuit breaker so a tap can't be blocked by background-worker
+     * traffic OR by a stale breaker state. Background paths ([resolve])
+     * still respect both gates.
+     */
+    suspend fun resolveImmediate(query: TrackQuery): SourceResult? =
+        resolveInternal(query, bypassRateLimit = true)
+
+    private suspend fun resolveInternal(query: TrackQuery, bypassRateLimit: Boolean): SourceResult? {
         // 1. Search squid.wtf for candidates. ISRC is Qobuz's best
         // index key — when we have one, send it as the query directly.
         val searchTerm = query.isrc ?: "${query.artist} ${query.title}"
-        val searchData = callLimited { apiClient.search(searchTerm) }
+        val searchData = callLimited(bypassRateLimit) { apiClient.search(searchTerm) }
             ?: return null
 
         val candidates = searchData.tracks?.items.orEmpty()
@@ -120,7 +150,7 @@ class QobuzSource @Inject constructor(
         val tier = losslessPrefs.qualityTierNow()
         val requestedQuality = tier.qobuzCode
         Log.d(TAG, "squid_qobuz: requested quality=$requestedQuality (tier=${tier.name})")
-        val download = callLimited {
+        val download = callLimited(bypassRateLimit) {
             apiClient.getFileUrl(best.first.id, requestedQuality)
         } ?: return null
 
@@ -172,8 +202,14 @@ class QobuzSource @Inject constructor(
      * any failure mode (rate-limit denial, exception, circuit-break)
      * so callers can simply `?: return null` to skip cleanly.
      */
-    private suspend fun <T> callLimited(block: suspend () -> T): T? {
-        if (!rateLimiter.acquire(id)) return null
+    private suspend fun <T> callLimited(bypassRateLimit: Boolean = false, block: suspend () -> T): T? {
+        if (!bypassRateLimit) {
+            if (!rateLimiter.acquire(id)) return null
+        }
+        // bypassRateLimit = true: user-initiated streaming path. Skip the
+        // token bucket AND the breaker (we don't call acquire). Failure
+        // reporting below still updates the breaker state so background
+        // [resolve] calls see accurate health.
         return try {
             val result = block()
             rateLimiter.reportSuccess(id)

@@ -20,6 +20,24 @@ import javax.inject.Singleton
 data class StreamUrl(
     val url: String,
     val expiresAtMs: Long,
+    /**
+     * Lowercase codec tag from the Qobuz API (`"flac"`, `"mp3"`, etc.).
+     * Null when the source didn't surface it.
+     */
+    val codec: String? = null,
+    /** Bits per sample (16, 24). Null/0 for lossy codecs. */
+    val bitsPerSample: Int? = null,
+    /** Sample rate in Hz. Null when unknown. */
+    val sampleRateHz: Int? = null,
+    /** Stated bitrate in kbps. Null when unknown. */
+    val bitrateKbps: Int? = null,
+    /**
+     * Studio cover-art URL from the upstream catalog. Used to overwrite
+     * YouTube-sourced tracks' Music-Video thumbnails with proper album
+     * art whenever a Qobuz match is found at stream time. Null when the
+     * source didn't surface it.
+     */
+    val coverArtUrl: String? = null,
 )
 
 /**
@@ -68,7 +86,15 @@ class KennyyStreamResolver @Inject constructor(
         // req/s. See KennyySource.resolveImmediate KDoc for rationale.
         val result = source.resolveImmediate(query) ?: return null
         val etspMs = parseEtspMs(result.downloadUrl) ?: return null
-        return StreamUrl(url = result.downloadUrl, expiresAtMs = etspMs)
+        return StreamUrl(
+            url = result.downloadUrl,
+            expiresAtMs = etspMs,
+            codec = result.format.codec.takeIf { it.isNotBlank() },
+            bitsPerSample = result.format.bitsPerSample.takeIf { it > 0 },
+            sampleRateHz = result.format.sampleRateHz.takeIf { it > 0 },
+            bitrateKbps = result.format.bitrateKbps.takeIf { it > 0 },
+            coverArtUrl = result.coverArtUrl?.takeIf { it.isNotBlank() },
+        )
     }
 
     private fun parseEtspMs(url: String): Long? {
