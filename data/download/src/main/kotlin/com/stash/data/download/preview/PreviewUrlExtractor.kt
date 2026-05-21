@@ -95,9 +95,18 @@ class PreviewUrlExtractor @Inject constructor(
         private const val INNERTUBE_TIMEOUT_MS = 10_000L
         private const val FORMAT_SELECTOR = "251/250/bestaudio"
 
-        /** Concurrency caps for the two extractors. Shared process-wide. */
+        /**
+         * Concurrency caps for the two extractors. Shared process-wide.
+         *
+         * yt-dlp-android throws YoutubeDLException at ~120ms when a second
+         * execute() runs while one is in flight (or shortly after a cancelled
+         * one). On-device LATDIAG from feat/tap-cancel-hardening showed
+         * cascading failures with cap=2. Cap=1 forces serialization at the
+         * JNI boundary; coalescing (above) ensures redundant calls for the
+         * same videoId never reach the semaphore at all.
+         */
         private const val INNERTUBE_CONCURRENCY = 8
-        private const val YTDLP_CONCURRENCY = 2
+        private const val YTDLP_CONCURRENCY = 1   // was 2 — see spec
 
         /**
          * Shared so parallel callers (e.g. `PreviewPrefetcher`) respect the
