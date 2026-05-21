@@ -27,10 +27,10 @@ import javax.inject.Singleton
 /**
  * Extracts a direct audio stream URL from YouTube for preview playback.
  *
- * ## Strategy: InnerTube vs yt-dlp race (parallel, split concurrency)
+ * ## Strategy: three-arm race with sequential preference
  *
- * Both extractors run concurrently, each bounded by its own shared
- * [Semaphore] so the two pools don't starve each other:
+ * Three extractors run concurrently, each bounded by its own shared
+ * [Semaphore] so the pools never starve each other.
  *
  *  - **InnerTube player API (~1-2s)**: Calls the YouTube Music player
  *    endpoint with authenticated cookies. Parses
@@ -38,22 +38,26 @@ import javax.inject.Singleton
  *    be n-parameter throttled (~50KB/s) but that's more than enough for
  *    audio preview (Opus is ~20KB/s). Cap: 8 concurrent.
  *
+ *  - **NewPipe Extractor (~1-4s) — feasibility spike**: In-process cipher
+ *    solving via Rhino. Faster than yt-dlp; no Python runtime / JNI.
+ *    Currently being evaluated against yt-dlp via LATDIAG `newpipe-end`
+ *    + `winner` instrumentation. Cap: 4 concurrent.
+ *
  *  - **yt-dlp fallback (~15-35s)**: Heavier path using QuickJS for full
- *    signature solving. Slow but reliable, so we cap it at 2 concurrent
- *    to avoid thrashing CPU / the yt-dlp JNI surface.
+ *    signature solving. Slow but reliable correctness backstop, so we
+ *    cap it at 2 concurrent to avoid thrashing CPU / the yt-dlp JNI
+ *    surface.
  *
- * The race returns whichever extractor succeeds first:
- *  - InnerTube returns a non-null URL → cancel yt-dlp and return it.
- *  - InnerTube returns null (ciphered/geo-blocked/unavailable) or
- *    throws → await yt-dlp and return its result (throws on hard fail).
+ * Race semantics are sequential-preference: InnerTube → NewPipe → yt-dlp.
+ * InnerTube is awaited first; if it returns a URL, NewPipe and yt-dlp are
+ * cancelled and that URL wins. If InnerTube returns null, NewPipe's
+ * result is awaited; if it also returned null, the race falls through to
+ * yt-dlp (which must throw on hard failure, never return null).
  *
- * Any non-cancellation failure in InnerTube is rescued inside the async
- * as a null result, so the race transparently falls back to yt-dlp
- * without poisoning the enclosing [coroutineScope].
- *
- * Because the InnerTube fast path succeeds for most YouTube Music
- * tracks, previews feel near-instant while preserving yt-dlp as a
- * correctness backstop.
+ * Any non-cancellation failure in InnerTube or NewPipe is rescued
+ * inside the async (via [rescueNull]) as a null result, so the race
+ * transparently falls through. CancellationException must always
+ * propagate to preserve structured concurrency.
  */
 @Singleton
 class PreviewUrlExtractor @Inject constructor(
@@ -61,6 +65,7 @@ class PreviewUrlExtractor @Inject constructor(
     private val ytDlpManager: YtDlpManager,
     private val tokenManager: TokenManager,
     private val innerTubeClient: InnerTubeClient,
+    private val newPipeStreamExtractor: NewPipeStreamExtractor,
 ) {
     /** Test-only injection point for race logic. Not wired in production. */
     internal interface TestHooks {
@@ -180,7 +185,7 @@ class PreviewUrlExtractor @Inject constructor(
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "extract-start videoId=$videoId")
         return try {
-            val (url, _winner) = race(
+            val (url, winner) = race(
                 videoId = videoId,
                 innerTubeExtract = { id ->
                     val it0 = System.currentTimeMillis()
@@ -193,7 +198,17 @@ class PreviewUrlExtractor @Inject constructor(
                     Log.d("LATDIAG", "innertube-end videoId=$id dt=${dt}ms outcome=$outcome")
                     result.getOrThrow()
                 },
-                newPipeExtract = { _ -> null },
+                newPipeExtract = { id ->
+                    val np0 = System.currentTimeMillis()
+                    val result = runCatching { newPipeStreamExtractor.extractStreamUrl(id) }
+                    val dt = System.currentTimeMillis() - np0
+                    val outcome = result.fold(
+                        onSuccess = { if (it != null) "url" else "null" },
+                        onFailure = { "throw:${it.javaClass.simpleName}" },
+                    )
+                    Log.d("LATDIAG", "newpipe-end videoId=$id dt=${dt}ms outcome=$outcome")
+                    result.getOrThrow()
+                },
                 ytDlpExtract = { id ->
                     val yt0 = System.currentTimeMillis()
                     val result = runCatching { extractViaYtDlp(id) }
@@ -209,7 +224,7 @@ class PreviewUrlExtractor @Inject constructor(
                 npSem = newPipeSemaphore,
                 ytSem = ytDlpSemaphore,
             )
-            Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms")
+            Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms winner=$winner")
             url
         } catch (t: Throwable) {
             Log.d("LATDIAG", "extract-fail videoId=$videoId dt=${System.currentTimeMillis() - t0}ms err=${t.javaClass.simpleName}")

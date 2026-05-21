@@ -30,7 +30,7 @@ import javax.inject.Singleton
  * extraction. Subsequent calls hit a `@Volatile` fast path.
  */
 @Singleton
-class NewPipeStreamExtractor @Inject constructor(
+class NewPipeStreamExtractor internal constructor(
     private val downloader: OkHttpNewPipeDownloader,
     /**
      * Test seam — production code resolves audio streams via
@@ -38,7 +38,8 @@ class NewPipeStreamExtractor @Inject constructor(
      * the surrounding contract (timeout, rescue, cancellation, format
      * selection) without standing up NewPipe's static service registry.
      *
-     * Not annotated `@Inject` — production wiring uses the default.
+     * Not visible to Hilt — production wiring uses the default via the
+     * secondary `@Inject` constructor below.
      */
     internal val fetcher: suspend (String) -> List<AudioStream> = defaultFetcher,
     /**
@@ -49,6 +50,17 @@ class NewPipeStreamExtractor @Inject constructor(
      */
     internal val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    /**
+     * Production constructor — the only one Hilt sees. Delegates to the
+     * internal primary with the default fetcher and `Dispatchers.IO` so
+     * we don't have to register lambda / dispatcher bindings in the DI
+     * graph just to satisfy a couple of test seams.
+     */
+    @Inject constructor(downloader: OkHttpNewPipeDownloader) : this(
+        downloader = downloader,
+        fetcher = defaultFetcher,
+        dispatcher = Dispatchers.IO,
+    )
 
     @Volatile private var initialized = false
     private val initLock = Any()
