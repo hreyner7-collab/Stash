@@ -15,6 +15,12 @@ import javax.inject.Singleton
  * surface in the app — no second network stack.
  *
  * Holds no per-request state; safe to share as a `@Singleton`.
+ *
+ * **Interceptor caveat:** any interceptor added to the shared
+ * `OkHttpClient` will also run for NewPipe-bound traffic. Before
+ * adding an interceptor that mutates requests (auth headers, etc.),
+ * verify it is safe for youtube.com — otherwise we may leak session
+ * material to a third-party domain.
  */
 @Singleton
 class OkHttpNewPipeDownloader @Inject constructor(
@@ -22,6 +28,9 @@ class OkHttpNewPipeDownloader @Inject constructor(
 ) : Downloader() {
 
     override fun execute(request: Request): Response {
+        // toRequestBody(null) leaves the body's Content-Type unset so
+        // OkHttp uses whatever Content-Type header NewPipe already set
+        // in request.headers() — avoids double-specifying the type.
         val body = request.dataToSend()?.toRequestBody(null)
         val httpReq = okhttp3.Request.Builder()
             .url(request.url())
