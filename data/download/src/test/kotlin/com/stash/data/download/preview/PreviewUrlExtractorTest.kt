@@ -21,10 +21,15 @@ import java.util.concurrent.atomic.AtomicInteger
  * methods (which require Android deps + real network) are not invoked.
  *
  * Contract under test:
- *  1. When InnerTube returns a URL first, that URL wins.
- *  2. When InnerTube wins, the in-flight yt-dlp coroutine is cancelled.
- *  3. When InnerTube returns null, yt-dlp's result is returned instead.
- *  4. The split semaphores cap InnerTube at 8 concurrent and yt-dlp at 2.
+ *  1. Sequential preference: InnerTube → NewPipe → yt-dlp. The earliest
+ *     arm to return a non-null URL wins; later arms get cancelled.
+ *  2. Non-cancellation throws in InnerTube/NewPipe are rescued to null
+ *     so the race falls through to the next arm without poisoning the
+ *     enclosing coroutineScope.
+ *  3. Split semaphores cap concurrency: InnerTube 8, NewPipe 4, yt-dlp 2.
+ *     Saturating one arm cannot starve another.
+ *  4. The returned `(url, winner)` tuple identifies which arm produced
+ *     the URL — consumed by `extractStreamUrl` for LATDIAG stamping.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PreviewUrlExtractorTest {
@@ -211,5 +216,21 @@ class PreviewUrlExtractorTest {
             (1..20).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it") } }.awaitAll()
         }
         assertEquals("expected exactly 4 concurrent newpipe slots", 4, npMax.get())
+    }
+
+    @Test
+    fun `race prefers innertube when both innertube and newpipe return URLs`() = runTest {
+        // Locks the sequential-preference contract: a future refactor that
+        // reordered np.await() ahead of inner.await() would silently pass
+        // every other test in the file. This test exists purely to catch
+        // that regression.
+        val hooks = TestableExtractor(
+            innertube = { "https://it/$it" },
+            newpipe   = { "https://np/$it" },
+            ytdlp     = { delay(5_000); "https://yt/$it" },
+        )
+        val (url, winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        assertEquals("https://it/abc", url)
+        assertEquals("innertube", winner)
     }
 }

@@ -129,6 +129,10 @@ class PreviewUrlExtractor @Inject constructor(
             npSem: Semaphore,
             ytSem: Semaphore,
         ): Pair<String, String> = coroutineScope {
+            // acquire() outside try is the canonical kotlinx-Semaphore
+            // pattern: a cancelled acquire() does NOT consume the permit
+            // (it's released atomically), and there's no suspension point
+            // between acquire() returning and try entry — so no leak window.
             val inner = async {
                 itSem.acquire()
                 try { rescueNull { innerTubeExtract(videoId) } } finally { itSem.release() }
