@@ -58,6 +58,7 @@ dependencies {
     implementation(libs.media3.database)
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.truth)
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
     testImplementation("app.cash.turbine:turbine:1.1.0")
     testImplementation("org.mockito:mockito-core:5.14.2")

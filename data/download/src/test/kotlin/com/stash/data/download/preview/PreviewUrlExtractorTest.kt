@@ -1,5 +1,9 @@
 package com.stash.data.download.preview
 
+import com.google.common.truth.Truth.assertThat
+import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -132,5 +136,66 @@ class PreviewUrlExtractorTest {
             (1..10).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it") } }.awaitAll()
         }
         assertEquals("expected exactly 2 concurrent yt-dlp slots", 2, ytMax.get())
+    }
+
+    @Test
+    fun extractStreamUrl_coalesces_concurrent_calls_to_same_videoId() = runTest {
+        // Hold the underlying race open with a CompletableDeferred so we can
+        // observe coalescing while the extract is in-flight.
+        val gate = CompletableDeferred<String>()
+        val raceInvocations = AtomicInteger(0)
+        val extractor = PreviewUrlExtractor(
+            context = mockk(relaxed = true),
+            ytDlpManager = mockk(relaxed = true),
+            tokenManager = mockk(relaxed = true),
+            innerTubeClient = mockk(relaxed = true),
+        )
+        val hooks = object : PreviewUrlExtractor.TestHooks {
+            override suspend fun innerTubeExtract(id: String): String? {
+                raceInvocations.incrementAndGet()
+                return gate.await()
+            }
+            override suspend fun ytDlpExtract(id: String): String = error("unreached")
+        }
+
+        val a = async { extractor.extractStreamUrlForTest(hooks, "videoA") }
+        val b = async { extractor.extractStreamUrlForTest(hooks, "videoA") }
+        runCurrent()
+
+        gate.complete("https://result/A")
+        val urlA = a.await()
+        val urlB = b.await()
+
+        assertThat(urlA).isEqualTo("https://result/A")
+        assertThat(urlB).isEqualTo("https://result/A")
+        assertThat(raceInvocations.get()).isEqualTo(1)  // coalesced!
+    }
+
+    @Test
+    fun extractStreamUrl_cancelling_caller_does_not_abort_other_callers() = runTest {
+        val gate = CompletableDeferred<String>()
+        val extractor = PreviewUrlExtractor(
+            context = mockk(relaxed = true),
+            ytDlpManager = mockk(relaxed = true),
+            tokenManager = mockk(relaxed = true),
+            innerTubeClient = mockk(relaxed = true),
+        )
+        val hooks = object : PreviewUrlExtractor.TestHooks {
+            override suspend fun innerTubeExtract(id: String): String? = gate.await()
+            override suspend fun ytDlpExtract(id: String): String = error("unreached")
+        }
+
+        val cancellable = async { extractor.extractStreamUrlForTest(hooks, "X") }
+        val persistent  = async { extractor.extractStreamUrlForTest(hooks, "X") }
+        runCurrent()
+
+        cancellable.cancel(CancellationException("caller A bails"))
+        gate.complete("https://result/X")
+
+        // persistent's await() should still complete with the URL even though
+        // the OTHER caller cancelled. The race ran on extractorScope, not on
+        // either caller's scope, so caller A's death cannot kill the work.
+        val result = persistent.await()
+        assertThat(result).isEqualTo("https://result/X")
     }
 }
