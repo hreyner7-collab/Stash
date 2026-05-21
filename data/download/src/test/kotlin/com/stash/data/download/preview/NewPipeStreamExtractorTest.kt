@@ -47,6 +47,19 @@ class NewPipeStreamExtractorTest {
         assertNull(NewPipeStreamExtractor.pickBestAudio(emptyList()))
     }
 
+    @Test
+    fun `pickBestAudio returns the first stream on a tie`() {
+        // Locks in maxByOrNull's "first equal key wins" semantics. Future
+        // YouTube responses regularly include two streams at identical
+        // averageBitrate (Opus vs AAC at 160k, etc.); the race must not
+        // start non-deterministically picking a different URL across runs.
+        val streams = listOf(
+            fakeAudioStream(url = "https://a/first",  averageBitrate = 160_000, bitrate = 160_000),
+            fakeAudioStream(url = "https://a/second", averageBitrate = 160_000, bitrate = 160_000),
+        )
+        assertEquals("https://a/first", NewPipeStreamExtractor.pickBestAudio(streams))
+    }
+
     /**
      * Helper that constructs a minimal [AudioStream] suitable for the
      * pure-function tests.
@@ -59,6 +72,12 @@ class NewPipeStreamExtractorTest {
      * `pickBestAudio`, we attach a minimal [ItagItem] whose `bitrate`
      * is set explicitly. `id`, `content`, and (transitively defaulted)
      * `deliveryMethod` are the build()-required fields.
+     *
+     * **Upgrade path:** if a future NewPipe release introduces
+     * `Builder.setBitrate(int)`, prefer that and drop the [ItagItem]
+     * indirection. If `ItagItem`'s constructor starts rejecting
+     * arbitrary itag ids, switch from `140` to whatever `ItagItem.getItag`
+     * exposes as a stable AUDIO/M4A constant.
      */
     private fun fakeAudioStream(url: String, averageBitrate: Int, bitrate: Int): AudioStream {
         // Minimal ItagItem — `id` is arbitrary (test-only), `ItagType.AUDIO`

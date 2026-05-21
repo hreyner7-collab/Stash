@@ -10,15 +10,12 @@ import javax.inject.Singleton
  * between InnerTube (fast path, often null for restricted music) and
  * yt-dlp (slow correctness backstop).
  *
- * Behaviour: returns the highest-bitrate audio stream URL on success, or
- * null on any failure (extractor throw, parse error, timeout). Cancellation
- * is propagated, not swallowed — required so the race's structured
- * concurrency can tear down the in-flight call when InnerTube wins.
- *
- * NewPipe's static `NewPipe.init()` is called lazily on the first
- * extraction. Subsequent calls hit a `@Volatile` fast path.
- *
- * Skeleton-only at this task — full `extractStreamUrl` lands in Task 4.
+ * **Status (Task 3): skeleton only.** Only [pickBestAudio] is implemented.
+ * Task 4 will add a suspend `extractStreamUrl(videoId)` that:
+ *  - returns the highest-bitrate audio stream URL on success, or null on
+ *    extractor throw / parse error / timeout,
+ *  - propagates cancellation (required for the race's structured concurrency),
+ *  - lazily runs `NewPipe.init()` once, then takes a `@Volatile` fast path.
  */
 @Singleton
 class NewPipeStreamExtractor @Inject constructor(
@@ -37,6 +34,10 @@ class NewPipeStreamExtractor @Inject constructor(
          * averageBitrate, so naively sorting on averageBitrate would
          * push them to the bottom even when they're actually higher
          * quality than a low-but-reported alternative.
+         *
+         * **Tie-break:** on equal sort keys the **first** stream in
+         * [streams] wins — matches [maxByOrNull]'s contract. Callers
+         * that need codec preference should pre-sort the input.
          */
         internal fun pickBestAudio(streams: List<AudioStream>): String? =
             streams
