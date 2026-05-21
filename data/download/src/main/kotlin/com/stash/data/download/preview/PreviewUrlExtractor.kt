@@ -178,7 +178,7 @@ class PreviewUrlExtractor @Inject constructor(
     /**
      * Extracts a direct audio stream URL for the given YouTube video ID.
      *
-     * Races InnerTube (fast, ~1-2s) against yt-dlp (slow, ~15-35s). See
+     * Races InnerTube → NewPipe → yt-dlp with sequential preference. See
      * the class KDoc for the full strategy.
      */
     suspend fun extractStreamUrl(videoId: String): String {
@@ -227,6 +227,10 @@ class PreviewUrlExtractor @Inject constructor(
             Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms winner=$winner")
             url
         } catch (t: Throwable) {
+            // Implicit winner=ytdlp here: the InnerTube and NewPipe arms
+            // are rescued by rescueNull inside race(), so only yt-dlp can
+            // throw out of the race. If that ever changes, stamp the arm
+            // explicitly on this line so LATDIAG can still attribute fails.
             Log.d("LATDIAG", "extract-fail videoId=$videoId dt=${System.currentTimeMillis() - t0}ms err=${t.javaClass.simpleName}")
             throw t
         }
