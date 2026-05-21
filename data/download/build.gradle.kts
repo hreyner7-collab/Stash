@@ -35,6 +35,9 @@ dependencies {
     implementation(libs.youtubedl.android)
     implementation(libs.youtubedl.ffmpeg)
     implementation(libs.youtubedl.aria2c)
+    // NewPipe Extractor — third arm of PreviewUrlExtractor's race; see
+    // docs/superpowers/specs/2026-05-21-newpipe-extractor-spike-design.md
+    implementation(libs.newpipe.extractor)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     // OkHttp for the lossless-source HTTP clients (Qobuz API, future

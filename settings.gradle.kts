@@ -18,6 +18,18 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven("https://jitpack.io") {
+            content {
+                // Only resolve TeamNewPipe artifacts via JitPack to avoid
+                // expanding the supply-chain surface unnecessarily.
+                // JitPack publishes the umbrella artifact under
+                // com.github.TeamNewPipe and its multi-module sub-artifacts
+                // (extractor, timeago-parser, timeago-generator) under the
+                // sibling group com.github.TeamNewPipe.NewPipeExtractor —
+                // the regex matches both.
+                includeGroupByRegex("com\\.github\\.TeamNewPipe(\\..*)?")
+            }
+        }
     }
 }
 
