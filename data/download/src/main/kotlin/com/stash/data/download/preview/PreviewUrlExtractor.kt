@@ -218,6 +218,19 @@ class PreviewUrlExtractor @Inject constructor(
      * The Deferred lives on a scope independent of any caller's lifetime —
      * caller cancellation only stops the caller's own await(); the underlying
      * extract continues to completion so any other awaiter still gets a URL.
+     *
+     * **Completion ordering.** `invokeOnCompletion` fires synchronously when
+     * the Deferred completes, *before* any suspended awaiter is resumed. So
+     * by the time `await()` returns to any caller, the map entry is already
+     * gone. A racing caller arriving in that microscopic window starts a
+     * brand-new extract — which is benign because the just-completed URL
+     * is in `PreviewUrlCache` (populated by the prefetcher and other
+     * post-success caching paths), so the redundant extract returns fast
+     * from cache lookup rather than re-running yt-dlp.
+     *
+     * **Two-arg `remove(key, value)`** is used so a stale cleanup callback
+     * cannot accidentally remove a *successor's* Deferred if a new caller
+     * for the same videoId raced in just after the prior one completed.
      */
     private suspend fun coalesce(
         videoId: String,
@@ -231,9 +244,9 @@ class PreviewUrlExtractor @Inject constructor(
             doRace(videoId)
         }
         val deferred = inFlightExtracts.putIfAbsent(videoId, freshlyCreated)
-            ?: freshlyCreated.also {
-                it.invokeOnCompletion { inFlightExtracts.remove(videoId) }
-                it.start()
+            ?: freshlyCreated.also { d ->
+                d.invokeOnCompletion { inFlightExtracts.remove(videoId, d) }
+                d.start()
             }
         return deferred.await()
     }

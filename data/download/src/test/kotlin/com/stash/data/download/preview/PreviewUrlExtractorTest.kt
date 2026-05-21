@@ -202,6 +202,7 @@ class PreviewUrlExtractorTest {
     @Test
     fun extractStreamUrl_failure_propagates_to_all_callers() = runTest {
         val gate = CompletableDeferred<String>()
+        val invocations = AtomicInteger(0)
         val extractor = PreviewUrlExtractor(
             context = mockk(relaxed = true),
             ytDlpManager = mockk(relaxed = true),
@@ -211,6 +212,7 @@ class PreviewUrlExtractorTest {
         val hooks = object : PreviewUrlExtractor.TestHooks {
             override suspend fun innerTubeExtract(id: String): String? = null
             override suspend fun ytDlpExtract(id: String): String {
+                invocations.incrementAndGet()
                 gate.await()
                 throw IllegalStateException("simulated yt-dlp failure")
             }
@@ -218,7 +220,9 @@ class PreviewUrlExtractorTest {
 
         // Wrap calls in runCatching INSIDE the async so the async's own
         // Deferred completes normally with the Result rather than failing
-        // and propagating to runTest's scope.
+        // and propagating to runTest's scope. (A failing child async would
+        // cancel the parent scope before any outer try/catch sees the
+        // exception — structured-concurrency semantics.)
         val a = async { runCatching { extractor.extractStreamUrlForTest(hooks, "X") } }
         val b = async { runCatching { extractor.extractStreamUrlForTest(hooks, "X") } }
         runCurrent()
@@ -230,6 +234,12 @@ class PreviewUrlExtractorTest {
         assertThat(errA).isInstanceOf(IllegalStateException::class.java)
         assertThat(errB).isInstanceOf(IllegalStateException::class.java)
         assertThat(errA?.message).isEqualTo("simulated yt-dlp failure")
+        // Coalescing assertion: prove the failure was shared, not produced
+        // independently by each caller. Without this check the test passes
+        // even if a's Deferred completed before b's coroutine scheduled,
+        // letting b start its own fresh extract that also threw the same
+        // canned exception (same-message false positive).
+        assertThat(invocations.get()).isEqualTo(1)
     }
 
     @Test
