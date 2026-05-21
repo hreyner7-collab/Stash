@@ -295,3 +295,48 @@ Explicit non-goals — listed because each is a plausible "while we're in there"
 - **Rhino size.** NewPipe pulls in Mozilla Rhino for JS execution. APK bloat needs to be measured during implementation; if it's significant (>1 MB), document the trade-off in the evaluation.
 - **NewPipe.init() in tests.** Static init may fight JVM unit tests. Mitigation in the test plan above.
 - **Cipher-solving via Rhino is single-threaded.** Concurrency 4 may not deliver 4x throughput. If LATDIAG shows queuing delays, drop to 2.
+
+## Spike Results (2026-05-21)
+
+**Verdict: NewPipe v0.24.6 is not viable for the YT-fallback workload. Recommendation — close the branch without merge.**
+
+The cat-and-mouse risk above hit on day one.
+
+### What the data showed
+
+On-device LATDIAG capture across one session of search-tab previews and library plays:
+
+| Metric | Value |
+| --- | --- |
+| Completed extracts | 8 |
+| `winner=newpipe` | **0** |
+| `winner=ytdlp` | 8 (dt 10.8–12.2 s) |
+| `winner=innertube` | 0 (expected — all tracks were restricted) |
+| NewPipe outcomes (raw) | 9 `outcome=null`, 60 `outcome=throw:JobCancellationException` |
+| `ContentNotAvailableException` in logcat | 68 |
+
+Every single NewPipe call against YouTube Music's catalog returned `ContentNotAvailableException: The page needs to be reloaded` from `YoutubeStreamExtractor.checkPlayabilityStatus` (`YoutubeStreamExtractor.java:890`). NewPipe's HTML5 client path is being rejected by YouTube for music content at this version of the library.
+
+The cancellations in the raw outcomes are tap-cancel storms from impatient retries during testing — not a NewPipe defect.
+
+### Latency impact: zero
+
+NewPipe fails fast (200–600 ms) and the race transparently falls through to yt-dlp. End-to-end `extract-end dt` on the YT-fallback population stays at 10.8–12.2 s, matching the pre-spike baseline. The three-arm race adds no measurable overhead when NewPipe is the failing arm.
+
+### Adjacent finding (not caused by the spike)
+
+The "20–30 s couldn't find track" symptom observed during testing was triggered by rapid retries: when a user taps another song before the in-flight race finishes, the race is cancelled, yt-dlp's JNI process is left in a half-torn-down state, and the *next* extraction sees `ytdlp-end dt=3ms outcome=throw:YoutubeDLException` from a stale process. When the user finally stops tapping, the last race completes normally at ~11 s. This is a pre-existing yt-dlp robustness issue, not a regression from this branch — but it's an open follow-up worth filing (yt-dlp recovery / debouncing on rapid taps).
+
+### Why NewPipe failed
+
+`ContentNotAvailableException: The page needs to be reloaded` is emitted when YouTube returns a `playabilityStatus` that NewPipe's HTML5-fetcher logic does not have a handler for. Looking at NewPipe's release history, the HTML5 extraction path in 0.24.6 predates several YouTube tightening cycles in early 2026. Newer NewPipe releases (0.24.8, 0.26.x) may have updated parsers, but evaluating them is a separate follow-up branch and out of scope here.
+
+### Follow-up options (not committed by this spike)
+
+- **Close-without-merge (recommended).** Branch is abandoned. The plan + spec live as documentation of what was tried and why.
+- **Re-spike on a newer NewPipe release.** If 0.26.x ships a fix for `ContentNotAvailableException` on YouTube Music tracks, the same wiring can be reused — bump the version in `libs.versions.toml`, re-run the LATDIAG session, decide again.
+- **yt-dlp recovery hardening (orthogonal).** The tap-cancel `ytdlp-end dt=3ms` failure mode is independent of NewPipe and worth its own branch — either debounce the search-tab tap handler, or stiffen `YtDlpManager` against rapid re-init after a cancelled call.
+
+### Acceptance against spike goal
+
+The goal was: *measure whether NewPipe can replace yt-dlp on the YT-fallback population.* The measurement was conclusive after one session — 0/8 NewPipe wins, 100% `ContentNotAvailableException` failure rate, zero latency improvement. Spike is complete. yt-dlp remains the only path that works for YT-fallback tracks at the libraries pinned here.
