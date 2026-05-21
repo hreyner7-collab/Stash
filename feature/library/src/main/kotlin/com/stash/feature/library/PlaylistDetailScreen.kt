@@ -90,6 +90,7 @@ fun PlaylistDetailScreen(
     viewModel: PlaylistDetailViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
     // Bottom sheet state for the long-press track menu.
@@ -188,6 +189,7 @@ fun PlaylistDetailScreen(
                         isPlaying = track.id == state.currentlyPlayingTrackId,
                         onClick = { viewModel.playTrack(track.id) },
                         onLongPress = { selectedTrack = track },
+                        isResolving = track.id == tappedTrackId,
                     )
 
                     // Subtle divider between rows (skip after last item).

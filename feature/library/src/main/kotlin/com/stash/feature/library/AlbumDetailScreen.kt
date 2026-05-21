@@ -79,6 +79,7 @@ fun AlbumDetailScreen(
     viewModel: AlbumDetailViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
     // Bottom sheet state for the long-press track menu.
@@ -157,6 +158,7 @@ fun AlbumDetailScreen(
                         onClick = { viewModel.playTrack(track.id) },
                         onLongPress = { selectedTrack = track },
                         showArtist = false,
+                        isResolving = track.id == tappedTrackId,
                     )
 
                     if (index < state.tracks.lastIndex) {
