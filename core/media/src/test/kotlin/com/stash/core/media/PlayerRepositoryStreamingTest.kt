@@ -85,14 +85,15 @@ class PlayerRepositoryStreamingTest {
     }
 
     @Test
-    fun buildMediaItem_downloadedTrackButFileMissing_fallsThroughToStreamable() = runTest {
-        // Edge case: row says downloaded=true but the file is gone (user
-        // cleared external storage, e.g.). isStreamable=false here so we
-        // expect NotAvailable, proving the file-existence check actually
-        // matters rather than blindly trusting the column.
-        // streamingPreference.current() returns false (the post-Stash-v0.9.30
-        // routing checks this before the isStreamable fall-through, but the
-        // path then surfaces NotAvailable for a non-streamable row).
+    fun buildMediaItem_downloadedTrackButFileMissing_withStreamingOff_returnsOfflineMode() = runTest {
+        // Row says downloaded=true but the file is gone, isStreamable=false,
+        // streaming-pref off. The post-Stash-v0.9.30 routing exits at the
+        // streaming-pref check (PlayerRepositoryImpl.kt:725) before reaching
+        // the isStreamable fall-through, so the result is OfflineMode.
+        //
+        // Coverage gap (TODO): a separate test with streamingPreference=true
+        // is needed to actually exercise the file-missing → stream-resolution
+        // path. This test only covers the streaming-off short-circuit.
         coEvery { streamingPreference.current() } returns false
         repo.filePathExistsOnDisk = { false }
         val track = downloaded(id = 1L, path = "/storage/music/missing.flac")
@@ -100,8 +101,6 @@ class PlayerRepositoryStreamingTest {
 
         val result = repo.buildMediaItemForTrack(track)
 
-        // With streaming pref off and the file missing, the routing returns
-        // OfflineMode (streaming-off check fires before isStreamable check).
         assertThat(result).isEqualTo(StreamRoutingResult.OfflineMode)
     }
 
