@@ -65,6 +65,7 @@ class PreviewUrlExtractor @Inject constructor(
     /** Test-only injection point for race logic. Not wired in production. */
     internal interface TestHooks {
         suspend fun innerTubeExtract(id: String): String?
+        suspend fun newPipeExtract(id: String): String?
         suspend fun ytDlpExtract(id: String): String
     }
 
@@ -74,8 +75,9 @@ class PreviewUrlExtractor @Inject constructor(
         private const val INNERTUBE_TIMEOUT_MS = 10_000L
         private const val FORMAT_SELECTOR = "251/250/bestaudio"
 
-        /** Concurrency caps for the two extractors. Shared process-wide. */
+        /** Concurrency caps for the three extractors. Shared process-wide. */
         private const val INNERTUBE_CONCURRENCY = 8
+        private const val NEWPIPE_CONCURRENCY = 4
         private const val YTDLP_CONCURRENCY = 2
 
         /**
@@ -83,58 +85,52 @@ class PreviewUrlExtractor @Inject constructor(
          * cap regardless of how many [PreviewUrlExtractor] instances exist.
          */
         private val innerTubeSemaphore = Semaphore(INNERTUBE_CONCURRENCY)
+        private val newPipeSemaphore = Semaphore(NEWPIPE_CONCURRENCY)
         private val ytDlpSemaphore = Semaphore(YTDLP_CONCURRENCY)
 
         /**
          * Test-only: exercises [race] directly without Android deps. Reuses
          * the shared semaphores so the tests also assert the real caps.
+         *
+         * Returns `(url, winner)` so the winner-field assertion in
+         * [PreviewUrlExtractorTest] can verify the race stamped the right
+         * arm name for LATDIAG.
          */
-        internal suspend fun raceForTest(hooks: TestHooks, videoId: String): String =
+        internal suspend fun raceForTest(hooks: TestHooks, videoId: String): Pair<String, String> =
             race(
                 videoId = videoId,
                 innerTubeExtract = hooks::innerTubeExtract,
-                ytDlpExtract = hooks::ytDlpExtract,
+                newPipeExtract  = hooks::newPipeExtract,
+                ytDlpExtract    = hooks::ytDlpExtract,
                 itSem = innerTubeSemaphore,
+                npSem = newPipeSemaphore,
                 ytSem = ytDlpSemaphore,
             )
 
         /**
-         * Races the two extractors. InnerTube is preferred when it succeeds
-         * (non-null return); otherwise yt-dlp's result wins. Each extractor
-         * acquires/releases its own semaphore, so a flood of InnerTube
-         * requests can never block yt-dlp (or vice versa).
-         *
-         * Wrapped in [coroutineScope] so a cancel on either side also tears
-         * down the sibling job — important so `yt.cancel()` actually stops
-         * work and frees the yt-dlp permit.
-         *
-         * Any non-cancellation failure in InnerTube is rescued *inside* the
-         * async (via [runCatching]) and surfaced as a null result. This
-         * keeps the exception from escaping the async and poisoning the
-         * enclosing [coroutineScope] (which would cancel yt-dlp and rethrow),
-         * so the race transparently falls back to yt-dlp on any throw.
+         * Placeholder during Task 5 — accepts the new 3-arm signature but
+         * still races only InnerTube vs yt-dlp. The actual three-way logic
+         * lands in Task 6. Keeping this step behaviour-preserving lets us
+         * commit the SPI widening on its own.
          */
         private suspend fun race(
             videoId: String,
             innerTubeExtract: suspend (String) -> String?,
+            @Suppress("UNUSED_PARAMETER") newPipeExtract: suspend (String) -> String?,
             ytDlpExtract: suspend (String) -> String,
             itSem: Semaphore,
+            @Suppress("UNUSED_PARAMETER") npSem: Semaphore,
             ytSem: Semaphore,
-        ): String = coroutineScope {
+        ): Pair<String, String> = coroutineScope {
             val inner = async {
                 itSem.acquire()
                 try {
-                    // Treat any non-cancellation failure as null so the
-                    // race falls back to yt-dlp. CancellationException MUST
-                    // propagate to preserve structured concurrency.
                     runCatching { innerTubeExtract(videoId) }
                         .getOrElse { t ->
                             if (t is CancellationException) throw t
                             null
                         }
-                } finally {
-                    itSem.release()
-                }
+                } finally { itSem.release() }
             }
             val yt = async {
                 ytSem.acquire()
@@ -143,9 +139,9 @@ class PreviewUrlExtractor @Inject constructor(
             val itResult = inner.await()
             if (itResult != null) {
                 yt.cancel(CancellationException("InnerTube won the race"))
-                itResult
+                itResult to "innertube"
             } else {
-                yt.await()
+                yt.await() to "ytdlp"
             }
         }
     }
@@ -160,7 +156,7 @@ class PreviewUrlExtractor @Inject constructor(
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "extract-start videoId=$videoId")
         return try {
-            val url = race(
+            val (url, _winner) = race(
                 videoId = videoId,
                 innerTubeExtract = { id ->
                     val it0 = System.currentTimeMillis()
@@ -173,6 +169,7 @@ class PreviewUrlExtractor @Inject constructor(
                     Log.d("LATDIAG", "innertube-end videoId=$id dt=${dt}ms outcome=$outcome")
                     result.getOrThrow()
                 },
+                newPipeExtract = { _ -> null },
                 ytDlpExtract = { id ->
                     val yt0 = System.currentTimeMillis()
                     val result = runCatching { extractViaYtDlp(id) }
@@ -185,6 +182,7 @@ class PreviewUrlExtractor @Inject constructor(
                     result.getOrThrow()
                 },
                 itSem = innerTubeSemaphore,
+                npSem = newPipeSemaphore,
                 ytSem = ytDlpSemaphore,
             )
             Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms")

@@ -29,12 +29,14 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(ExperimentalCoroutinesApi::class)
 class PreviewUrlExtractorTest {
 
-    /** Test-double: adapts two lambdas into the [PreviewUrlExtractor.TestHooks] SPI. */
+    /** Test-double: adapts three lambdas into the [PreviewUrlExtractor.TestHooks] SPI. */
     private class TestableExtractor(
         val innertube: suspend (String) -> String?,
+        val newpipe: suspend (String) -> String? = { null },
         val ytdlp: suspend (String) -> String,
     ) : PreviewUrlExtractor.TestHooks {
         override suspend fun innerTubeExtract(id: String) = innertube(id)
+        override suspend fun newPipeExtract(id: String) = newpipe(id)
         override suspend fun ytDlpExtract(id: String) = ytdlp(id)
     }
 
@@ -44,7 +46,7 @@ class PreviewUrlExtractorTest {
             innertube = { "https://fast/$it" },
             ytdlp = { delay(5_000); "https://slow/$it" },
         )
-        val url = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://fast/abc", url)
     }
 
@@ -77,7 +79,7 @@ class PreviewUrlExtractorTest {
             innertube = { null },
             ytdlp = { "https://ytdlp/$it" },
         )
-        val url = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://ytdlp/abc", url)
     }
 
@@ -92,7 +94,7 @@ class PreviewUrlExtractorTest {
             innertube = { throw java.io.IOException("boom") },
             ytdlp = { "https://ytdlp/$it" },
         )
-        val url = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://ytdlp/abc", url)
     }
 
@@ -109,7 +111,7 @@ class PreviewUrlExtractorTest {
             ytdlp = { delay(100_000); "y" },
         )
         coroutineScope {
-            (1..30).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it") } }.awaitAll()
+            (1..30).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it").first } }.awaitAll()
         }
         // Assert the *exact* observed cap. 30 concurrent callers saturate
         // the pool, so we should hit exactly 8 — not merely <= 8.
@@ -129,7 +131,7 @@ class PreviewUrlExtractorTest {
             },
         )
         coroutineScope {
-            (1..10).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it") } }.awaitAll()
+            (1..10).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it").first } }.awaitAll()
         }
         assertEquals("expected exactly 2 concurrent yt-dlp slots", 2, ytMax.get())
     }
