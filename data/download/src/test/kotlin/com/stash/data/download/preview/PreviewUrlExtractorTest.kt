@@ -46,7 +46,7 @@ class PreviewUrlExtractorTest {
             innertube = { "https://fast/$it" },
             ytdlp = { delay(5_000); "https://slow/$it" },
         )
-        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://fast/abc", url)
     }
 
@@ -79,7 +79,7 @@ class PreviewUrlExtractorTest {
             innertube = { null },
             ytdlp = { "https://ytdlp/$it" },
         )
-        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://ytdlp/abc", url)
     }
 
@@ -94,7 +94,7 @@ class PreviewUrlExtractorTest {
             innertube = { throw java.io.IOException("boom") },
             ytdlp = { "https://ytdlp/$it" },
         )
-        val (url, _winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        val (url, _) = PreviewUrlExtractor.raceForTest(hooks, "abc")
         assertEquals("https://ytdlp/abc", url)
     }
 
