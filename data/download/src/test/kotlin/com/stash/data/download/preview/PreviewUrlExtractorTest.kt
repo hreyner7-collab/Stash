@@ -135,4 +135,81 @@ class PreviewUrlExtractorTest {
         }
         assertEquals("expected exactly 2 concurrent yt-dlp slots", 2, ytMax.get())
     }
+
+    // ----- Three-way race semantics (Task 6) -----
+
+    @Test
+    fun `race returns newpipe URL when innertube returns null and newpipe wins`() = runTest {
+        val hooks = TestableExtractor(
+            innertube = { null },
+            newpipe = { "https://newpipe/$it" },
+            ytdlp = { delay(5_000); "https://ytdlp/$it" },
+        )
+        val (url, winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        assertEquals("https://newpipe/abc", url)
+        assertEquals("newpipe", winner)
+    }
+
+    @Test
+    fun `race cancels ytdlp when newpipe wins`() = runTest {
+        val ytDlpCancelled = AtomicBoolean(false)
+        val hooks = TestableExtractor(
+            innertube = { null },
+            newpipe = { "https://newpipe/$it" },
+            ytdlp = {
+                try {
+                    delay(5_000); "https://ytdlp/$it"
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    ytDlpCancelled.set(true); throw ce
+                }
+            },
+        )
+        PreviewUrlExtractor.raceForTest(hooks, "abc")
+        runCurrent()
+        assertTrue(ytDlpCancelled.get())
+    }
+
+    @Test
+    fun `race falls back to ytdlp when innertube and newpipe both return null`() = runTest {
+        val hooks = TestableExtractor(
+            innertube = { null },
+            newpipe = { null },
+            ytdlp = { "https://ytdlp/$it" },
+        )
+        val (url, winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        assertEquals("https://ytdlp/abc", url)
+        assertEquals("ytdlp", winner)
+    }
+
+    @Test
+    fun `race falls back to ytdlp when newpipe throws`() = runTest {
+        // Regression lock for the same poisoning concern as the existing
+        // `innertube throws` test, applied to the new arm.
+        val hooks = TestableExtractor(
+            innertube = { null },
+            newpipe = { throw java.io.IOException("newpipe boom") },
+            ytdlp = { "https://ytdlp/$it" },
+        )
+        val (url, winner) = PreviewUrlExtractor.raceForTest(hooks, "abc")
+        assertEquals("https://ytdlp/abc", url)
+        assertEquals("ytdlp", winner)
+    }
+
+    @Test
+    fun `newpipe semaphore caps concurrency at 4`() = runTest {
+        val npMax = AtomicInteger(0); val npCur = AtomicInteger(0)
+        val hooks = TestableExtractor(
+            // Force the race to wait for newpipe by returning null from innertube.
+            innertube = { null },
+            newpipe = {
+                npMax.updateAndGet { m -> maxOf(m, npCur.incrementAndGet()) }
+                try { delay(50); "u" } finally { npCur.decrementAndGet() }
+            },
+            ytdlp = { delay(100_000); "y" },
+        )
+        coroutineScope {
+            (1..20).map { async { PreviewUrlExtractor.raceForTest(hooks, "id$it") } }.awaitAll()
+        }
+        assertEquals("expected exactly 4 concurrent newpipe slots", 4, npMax.get())
+    }
 }

@@ -108,42 +108,62 @@ class PreviewUrlExtractor @Inject constructor(
             )
 
         /**
-         * Placeholder during Task 5 — accepts the new 3-arm signature but
-         * still races only InnerTube vs yt-dlp. The actual three-way logic
-         * lands in Task 6. Keeping this step behaviour-preserving lets us
-         * commit the SPI widening on its own.
+         * Races the three extractors. Sequential preference:
+         * InnerTube → NewPipe → yt-dlp. Each acquires/releases its own
+         * semaphore, so flooding one arm can never starve another.
+         *
+         * Wrapped in [coroutineScope] so a cancellation on the winner's
+         * sibling jobs actually frees their permits — important so a
+         * winning InnerTube doesn't leave NewPipe / yt-dlp work running.
+         *
+         * Returns `(url, winner)` where `winner` is one of "innertube",
+         * "newpipe", "ytdlp" — used to stamp the LATDIAG `extract-end`
+         * line so on-device evaluation can slice latency by arm.
          */
         private suspend fun race(
             videoId: String,
             innerTubeExtract: suspend (String) -> String?,
-            @Suppress("UNUSED_PARAMETER") newPipeExtract: suspend (String) -> String?,
-            ytDlpExtract: suspend (String) -> String,
+            newPipeExtract:  suspend (String) -> String?,
+            ytDlpExtract:    suspend (String) -> String,
             itSem: Semaphore,
-            @Suppress("UNUSED_PARAMETER") npSem: Semaphore,
+            npSem: Semaphore,
             ytSem: Semaphore,
         ): Pair<String, String> = coroutineScope {
             val inner = async {
                 itSem.acquire()
-                try {
-                    runCatching { innerTubeExtract(videoId) }
-                        .getOrElse { t ->
-                            if (t is CancellationException) throw t
-                            null
-                        }
-                } finally { itSem.release() }
+                try { rescueNull { innerTubeExtract(videoId) } } finally { itSem.release() }
+            }
+            val np = async {
+                npSem.acquire()
+                try { rescueNull { newPipeExtract(videoId) } } finally { npSem.release() }
             }
             val yt = async {
                 ytSem.acquire()
                 try { ytDlpExtract(videoId) } finally { ytSem.release() }
             }
-            val itResult = inner.await()
-            if (itResult != null) {
+
+            inner.await()?.let { url ->
+                np.cancel(CancellationException("InnerTube won the race"))
                 yt.cancel(CancellationException("InnerTube won the race"))
-                itResult to "innertube"
-            } else {
-                yt.await() to "ytdlp"
+                return@coroutineScope url to "innertube"
             }
+            np.await()?.let { url ->
+                yt.cancel(CancellationException("NewPipe won the race"))
+                return@coroutineScope url to "newpipe"
+            }
+            yt.await() to "ytdlp"
         }
+
+        /**
+         * Rescues any non-cancellation throw from [block] as a null result.
+         * Cancellation must still propagate so structured concurrency can
+         * tear down sibling jobs cleanly.
+         */
+        private suspend inline fun <T> rescueNull(block: suspend () -> T?): T? =
+            runCatching { block() }.getOrElse { t ->
+                if (t is CancellationException) throw t
+                null
+            }
     }
 
     /**
