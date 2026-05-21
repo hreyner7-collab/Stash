@@ -2,6 +2,7 @@ package com.stash.data.download.preview
 
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
@@ -40,6 +41,13 @@ class NewPipeStreamExtractor @Inject constructor(
      * Not annotated `@Inject` — production wiring uses the default.
      */
     internal val fetcher: suspend (String) -> List<AudioStream> = defaultFetcher,
+    /**
+     * Test seam — production uses `Dispatchers.IO`. Tests pass the
+     * test scheduler so `withTimeout` and `delay` advance virtual
+     * time and the suite doesn't pay 15 s of real wall-clock per
+     * timeout test.
+     */
+    internal val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
     @Volatile private var initialized = false
@@ -68,8 +76,11 @@ class NewPipeStreamExtractor @Inject constructor(
      * falls through to yt-dlp. [CancellationException] is rethrown so the
      * structured-concurrency teardown still works when InnerTube wins.
      */
-    suspend fun extractStreamUrl(videoId: String): String? = withContext(Dispatchers.IO) {
+    suspend fun extractStreamUrl(videoId: String): String? = withContext(dispatcher) {
         ensureInitialized()
+        // Catch order matters: CancellationException MUST come first.
+        // If swapped, the Throwable handler would swallow cancellation
+        // and break the race's structured-concurrency teardown.
         try {
             withTimeout(NEWPIPE_TIMEOUT_MS) {
                 pickBestAudio(fetcher(videoId))
@@ -86,7 +97,11 @@ class NewPipeStreamExtractor @Inject constructor(
                 throw ce
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "NewPipe extract failed for $videoId: ${t.javaClass.simpleName} ${t.message}")
+            // 3-arg Log.w includes the full stacktrace — important for
+            // Task 8's on-device data capture so we can see the cause
+            // chain (NewPipe wraps SocketTimeoutException, JsonParserException,
+            // etc. with generic "Could not parse" messages).
+            Log.w(TAG, "NewPipe extract failed for $videoId", t)
             null
         }
     }

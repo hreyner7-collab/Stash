@@ -121,9 +121,12 @@ class NewPipeStreamExtractorTest {
     fun `extractStreamUrl returns null on timeout`() = kotlinx.coroutines.test.runTest {
         val sut = NewPipeStreamExtractor(
             downloader = fakeDownloader(),
-            // Stretches well past NEWPIPE_TIMEOUT_MS. `runTest`'s virtual
-            // time skips the wall-clock wait so the test still runs fast.
+            // Stretches well past NEWPIPE_TIMEOUT_MS. Injecting the test
+            // scheduler keeps withContext on virtual time so `delay(60_000)`
+            // and the inner `withTimeout(15_000)` both skip wall-clock —
+            // the test completes in milliseconds instead of waiting 15 s.
             fetcher = { kotlinx.coroutines.delay(60_000); emptyList() },
+            dispatcher = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler),
         )
         assertNull(sut.extractStreamUrl("anyVideoId"))
     }
@@ -139,6 +142,7 @@ class NewPipeStreamExtractorTest {
                 downloader = fakeDownloader(),
                 // Never returns — only outer cancellation should end this call.
                 fetcher = { kotlinx.coroutines.delay(Long.MAX_VALUE); emptyList() },
+                dispatcher = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler),
             )
             val completed = java.util.concurrent.atomic.AtomicBoolean(false)
             val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -150,7 +154,11 @@ class NewPipeStreamExtractorTest {
                     cancelled.set(true)
                 }
             }
-            // Yield once so the inner withTimeout/withContext registers.
+            // runCurrent() is MANDATORY here, not defensive: without it the
+            // child's withContext(dispatcher) hasn't yet reached delay() when
+            // job.cancel fires, so the CancellationException would be thrown
+            // before reaching extractStreamUrl's own try/catch — bypassing
+            // the contract under test.
             runCurrent()
             job.cancel(kotlinx.coroutines.CancellationException("outer cancel"))
             job.join()
