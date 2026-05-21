@@ -51,6 +51,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   private, age-gated, etc).
  * - Either step times out.
  *
+ * **Cancellation:** foreign [CancellationException] (parent scope cancelled
+ * by a newer tap, etc.) propagates to the caller — only the internal
+ * [YT_RESOLVE_TIMEOUT_MS] / [YT_SEARCH_TIMEOUT_MS] timeouts map to null.
+ * This is what stops a tap-supersede from misfiring as "Couldn't find this
+ * track" upstream.
+ *
  * **URL expiry.** YouTube signed URLs carry an `expire=<unix-seconds>`
  * query param. We parse it for the StreamUrl TTL; on miss we use a
  * conservative 1-hour default, then [RefreshingDataSourceFactory]
@@ -125,6 +131,9 @@ class YouTubeStreamResolver @Inject constructor(
         return withTimeoutOrNull(YT_SEARCH_TIMEOUT_MS) {
             val results = runCatching { ytMusicApiClient.searchAll(query) }
                 .onFailure { t ->
+                    // CancellationException MUST propagate — see resolve()
+                    // above for the rationale (NotAvailable snackbar on a
+                    // tap-supersede would be wrong).
                     if (t is CancellationException) throw t
                     Log.d(TAG, "search failed for '$query': ${t.message}")
                 }
