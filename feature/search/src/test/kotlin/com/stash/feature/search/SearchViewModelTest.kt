@@ -16,10 +16,12 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -243,6 +245,39 @@ class SearchViewModelTest {
             assertTrue(msg.contains("couldn't find", ignoreCase = true))
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun `tappedTrackId emits on tap and clears after playFromStream returns`() = runTest {
+        val gate = CompletableDeferred<StreamRoutingResult>()
+        val playerRepo = mock<PlayerRepository> {
+            onBlocking { playFromStream(any()) } doSuspendableAnswer { gate.await() }
+        }
+        val streamingPref = mock<StreamingPreference> {
+            onBlocking { current() } doReturn true
+        }
+        val vm = newVm(
+            playerRepository = playerRepo,
+            streamingPreference = streamingPref,
+        )
+
+        val emissions = mutableListOf<Long?>()
+        val collectJob = backgroundScope.launch {
+            vm.tappedTrackId.collect { emissions.add(it) }
+        }
+
+        val item = sampleTrack()
+        vm.onResultTap(item)
+        runCurrent()
+
+        val expectedId = item.videoId.hashCode().toLong()
+        assertTrue(expectedId in emissions)
+
+        gate.complete(StreamRoutingResult.Item(mock()))
+        runCurrent()
+        assertEquals(null, emissions.last())
+
+        collectJob.cancel()
     }
 
     // ------------------------------------------------------------------

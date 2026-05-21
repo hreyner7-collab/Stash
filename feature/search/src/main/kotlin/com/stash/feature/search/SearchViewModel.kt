@@ -75,6 +75,17 @@ class SearchViewModel @Inject constructor(
     val uiState: StateFlow<SearchUiState> = _uiState.asStateFlow()
 
     /**
+     * Synthetic id of the track currently being resolved-on-tap. Set when
+     * `onResultTap` enters the streaming branch and cleared in a `finally`
+     * so success, snackbar refusal, cancellation, and any throw all reset
+     * the spinner. The screen pairs this with `PlayerRepository
+     * .resolvingTrackVideoId` to render a row-level spinner during the
+     * resolve-then-play hand-off.
+     */
+    private val _tappedTrackId = MutableStateFlow<Long?>(null)
+    val tappedTrackId: StateFlow<Long?> = _tappedTrackId.asStateFlow()
+
+    /**
      * One-shot user-facing messages (snackbars). Buffered so a message emitted
      * before the UI subscribes (e.g. during init crash-paths) isn't dropped.
      *
@@ -172,22 +183,27 @@ class SearchViewModel @Inject constructor(
      */
     fun onResultTap(item: TrackItem) {
         viewModelScope.launch {
-            if (streamingPreference.current()) {
-                val result = playerRepository.playFromStream(item)
-                when (result) {
-                    is StreamRoutingResult.Item -> Unit // playback started by the repo
-                    StreamRoutingResult.Deduped -> Unit // earlier tap is handling it
-                    StreamRoutingResult.NotAvailable ->
-                        _userMessages.emit("Couldn't find this track.")
-                    StreamRoutingResult.OfflineMode ->
-                        _userMessages.emit("Turn on Online mode to stream this track.")
-                    StreamRoutingResult.CellularRefused ->
-                        _userMessages.emit("Streaming on cellular is off in Settings.")
-                    StreamRoutingResult.NoConnectivity ->
-                        _userMessages.emit("You're offline — can't stream this track.")
+            _tappedTrackId.value = item.syntheticId()
+            try {
+                if (streamingPreference.current()) {
+                    val result = playerRepository.playFromStream(item)
+                    when (result) {
+                        is StreamRoutingResult.Item -> Unit // playback started by the repo
+                        StreamRoutingResult.Deduped -> Unit // earlier tap is handling it
+                        StreamRoutingResult.NotAvailable ->
+                            _userMessages.emit("Couldn't find this track.")
+                        StreamRoutingResult.OfflineMode ->
+                            _userMessages.emit("Turn on Online mode to stream this track.")
+                        StreamRoutingResult.CellularRefused ->
+                            _userMessages.emit("Streaming on cellular is off in Settings.")
+                        StreamRoutingResult.NoConnectivity ->
+                            _userMessages.emit("You're offline — can't stream this track.")
+                    }
+                } else {
+                    delegate.previewTrack(item)
                 }
-            } else {
-                delegate.previewTrack(item)
+            } finally {
+                _tappedTrackId.value = null
             }
         }
     }
