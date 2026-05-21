@@ -380,30 +380,31 @@ private suspend fun coalesce(
 }
 ```
 
-**3e.** Add the `extractStreamUrlForTest` helper in the companion (alongside `raceForTest`):
+**3e.** Add the `extractStreamUrlForTest` helper as an `internal` **instance member** (NOT in the companion — it needs `this` to access `inFlightExtracts` / `extractorScope` via `coalesce`). Place it next to the public `extractStreamUrl`:
 
 ```kotlin
 /**
  * Test-only: exercises the coalescing wrapper with the existing
  * TestHooks SPI. The race body is replaced by a hook-driven function
  * so the test can observe coalescing without needing real Android deps.
+ *
+ * Does NOT exercise the real race(...) semantics — those are tested
+ * by raceForTest in the same file. This helper tests only the
+ * single-flight / coalescing layer above the race.
+ *
+ * Instance member (not companion) because `coalesce` needs `this`.
  */
 internal suspend fun extractStreamUrlForTest(
     hooks: TestHooks,
     videoId: String,
 ): String = coalesce(videoId) { id ->
-    // Use the race hook's innerTube arm directly so we observe the
-    // coalescing layer; the real race semantics are tested elsewhere
-    // via raceForTest.
     hooks.innerTubeExtract(id) ?: hooks.ytDlpExtract(id)
 }
 ```
 
-Note: `coalesce` is a `private` member function but `extractStreamUrlForTest` is in the companion. To make this work, either:
-- Mark `coalesce` `internal` (cleaner — same module, won't leak past `:data:download`), OR
-- Move `extractStreamUrlForTest` to a member function (since it needs `coalesce`).
+`coalesce` stays `private` (instance member). The test calls `extractStreamUrlForTest` on a `PreviewUrlExtractor` instance — already the shape of the Step 1 test code (`extractor.extractStreamUrlForTest(hooks, "videoA")`).
 
-Pick whichever feels cleaner; the design favours `internal` on `coalesce`.
+**Test-scheduler caveat**: `extractorScope` uses `Dispatchers.IO`, which is real threads, not `runTest`'s virtual scheduler. The new tests rely entirely on `CompletableDeferred` gates for synchronization — do NOT assume `runCurrent()` will advance work running on `extractorScope`. If a test starts flaking, the cause is almost certainly a missing `CompletableDeferred.complete(...)` or `runCurrent()` call letting unsynchronized IO work proceed.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -727,21 +728,23 @@ git commit -m "feat(search): TrackItem.syntheticId helper for spinner-key deriva
 
 - [ ] **Step 1: Write the failing test**
 
+The existing `SearchViewModelTest.kt` uses **Mockito-Kotlin** (`org.mockito.kotlin.*`) and has private helpers `newVm(...)` (line ~252) and `sampleTrack()` (line ~269). Match that style — do not introduce MockK in this file.
+
 Append to `SearchViewModelTest.kt`:
 
 ```kotlin
 @Test
 fun `tappedTrackId emits on tap and clears after playFromStream returns`() = runTest {
     val gate = CompletableDeferred<StreamRoutingResult>()
-    val streamingPref = mockk<StreamingPreference> {
-        coEvery { current() } returns true
+    val playerRepo = mock<PlayerRepository> {
+        onBlocking { playFromStream(any()) } doSuspendableAnswer { gate.await() }
     }
-    val playerRepo = mockk<PlayerRepository>(relaxed = true) {
-        coEvery { playFromStream(any()) } coAnswers { gate.await() }
+    val streamingPref = mock<StreamingPreference> {
+        onBlocking { current() } doReturn true
     }
-    val vm = buildSearchViewModel(
-        streamingPreference = streamingPref,
+    val vm = newVm(
         playerRepository = playerRepo,
+        streamingPreference = streamingPref,
     )
 
     val emissions = mutableListOf<Long?>()
@@ -749,33 +752,22 @@ fun `tappedTrackId emits on tap and clears after playFromStream returns`() = run
         vm.tappedTrackId.collect { emissions.add(it) }
     }
 
-    val item = trackItem(videoId = "abc123")
+    val item = sampleTrack()  // videoId is set inside the helper
     vm.onResultTap(item)
     runCurrent()
 
     val expectedId = item.videoId.hashCode().toLong()
-    assertThat(emissions).contains(expectedId)
+    assertTrue(expectedId in emissions)
 
-    gate.complete(StreamRoutingResult.Item(mockk()))
+    gate.complete(StreamRoutingResult.Item(mock()))
     runCurrent()
-    assertThat(emissions.last()).isNull()
+    assertEquals(null, emissions.last())
 
     collectJob.cancel()
 }
 ```
 
-`buildSearchViewModel(...)` and `trackItem(...)` may need to be added as test helpers if not present. Look at the existing `SearchViewModelTest.kt` for the constructor pattern; the test file already builds the VM via a helper or directly. Imports needed:
-
-```kotlin
-import com.stash.core.media.StreamRoutingResult
-import com.stash.core.media.PlayerRepository
-import com.stash.core.data.prefs.StreamingPreference
-import io.mockk.coAnswers
-import io.mockk.coEvery
-import io.mockk.mockk
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.test.runCurrent
-```
+The existing `newVm(...)` helper already accepts `playerRepository` and `streamingPreference` as named args (look at its signature around line 252 — adapt the call to whatever args it takes). Imports — all already present in the test file (`mock`, `onBlocking`, `doReturn`, `doSuspendableAnswer`, `any`, `CompletableDeferred`, `runCurrent`); no new imports needed unless `backgroundScope` requires `kotlinx-coroutines-test ≥1.7`, in which case verify the project's version supports it (it does at `1.10.1` per `gradle/libs.versions.toml`).
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -895,14 +887,17 @@ TopResultCard(
 
 (Use `top.track.videoId.hashCode().toLong()` since `TrackSummary` doesn't have a `TrackItem.syntheticId()` helper — inline the derivation. Alternative: extract a parallel helper on `TrackSummary` if you want one. Keep inline for now; the duplication is one place.)
 
-**`PreviewDownloadRow` (around line 339):**
+**`PreviewDownloadRow` (around line 339):** the actual call site uses `item = item` (or the lambda's `t` parameter), not `track = track`. Match the existing parameter name. The lambda param is `t`, so:
+
 ```kotlin
 PreviewDownloadRow(
-    track = track,
+    item = t,
     // ... existing args ...
-    isResolving = (track.videoId.hashCode().toLong() == tappedTrackId),
+    isResolving = (t.videoId.hashCode().toLong() == tappedTrackId),
 )
 ```
+
+Verify by reading the existing call site before editing — adapt to whatever the actual parameter shape is.
 
 - [ ] **Step 4: Compile**
 
@@ -958,9 +953,26 @@ fun playTrack(trackId: Long) {
 
 The existing body is different in each VM (different stream-vs-disk filtering, different snapshot sources). Don't change any of that — just wrap.
 
-- [ ] **Step 3: Write a test on `LikedSongsDetailViewModel`**
+- [ ] **Step 3: Prepare the `feature/library` test classpath**
 
-Look at the existing `LikedSongsDetailViewModelTest.kt` (or create it if missing — follow the pattern from other Library VM tests if present, or from `SearchViewModelTest.kt`). Append:
+`feature/library/src/` currently has no `test/` directory and `feature/library/build.gradle.kts` declares zero `testImplementation` deps. Before writing a test, set up the classpath.
+
+**3a.** Open `feature/library/build.gradle.kts` and add a `dependencies { }` block (or extend the existing one) to mirror `feature/search/build.gradle.kts`'s test block:
+
+```kotlin
+testImplementation("junit:junit:4.13.2")
+testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
+testImplementation("com.google.truth:truth:1.4.4")
+testImplementation(libs.mockk)
+```
+
+(Cross-reference with `feature/search/build.gradle.kts` for the exact set; copy verbatim.)
+
+**3b.** Create the test directory: `feature/library/src/test/kotlin/com/stash/feature/library/`.
+
+- [ ] **Step 4: Write a test on `LikedSongsDetailViewModel`**
+
+Create `feature/library/src/test/kotlin/com/stash/feature/library/LikedSongsDetailViewModelTest.kt`. Follow the pattern from `SearchViewModelTest.kt`. Append:
 
 ```kotlin
 @Test
@@ -990,13 +1002,14 @@ fun `tappedTrackId emits on playTrack and clears after setQueue returns`() = run
 
 If `LikedSongsDetailViewModelTest.kt` doesn't exist, create it using the same setup pattern as `SearchViewModelTest.kt` for VM construction.
 
-- [ ] **Step 4: Run + commit per-VM**
+- [ ] **Step 5: Run + commit**
 
 Run: `./gradlew :feature:library:testDebugUnitTest`
 Expected: PASS, including the new test.
 
 ```bash
-git add feature/library/src/main/kotlin/com/stash/feature/library/ \
+git add feature/library/build.gradle.kts \
+        feature/library/src/main/kotlin/com/stash/feature/library/ \
         feature/library/src/test/kotlin/com/stash/feature/library/
 git commit -m "feat(library): 4 *DetailViewModels expose tappedTrackId + wrap playTrack"
 ```
@@ -1083,7 +1096,8 @@ For each behaviour: perform the action and note the observed result.
 
 **Behaviour 2: No false snackbar on different-track rapid taps (Search).**
 - Same search, different tracks. Tap Track A, then within 500ms tap Track B.
-- **Expected:** No snackbars. Track B's spinner overrides Track A's (because the tap handler set `_tappedTrackId.value = B.id` and the row comparison only matches one row at a time). Audio for Track B plays at ~11s. Track A's underlying extract continues in the background; its URL lands in `PreviewUrlCache` for next time. (Track A's `viewModelScope` coroutine got cancelled by Track B's tap launch, but Track A's `Deferred` lives on `extractorScope`, so the work completes anyway.)
+- **Expected:** No snackbars. Track B's spinner overrides Track A's (because the tap handler set `_tappedTrackId.value = B.id` and the row comparison only matches one row at a time). Audio for Track B plays at ~11s. Track A's underlying extract continues on `extractorScope` and runs to completion in the background. (Track A's caller-side `viewModelScope` coroutine was cancelled when Track B's tap fired, but the singleton-scoped Deferred is unaffected — that's the entire point of the caller-independent design.)
+- **Cache-fill verification:** does Track A's URL also reach `PreviewUrlCache`? Today `PreviewUrlCache` is written by `PreviewPrefetcher` after a successful `extractStreamUrl` (`PreviewPrefetcher.kt:71`). Direct `extractStreamUrl` callers (including the Search VM via `playerRepository.playFromStream`) DON'T write the cache. So Track A's URL lives only in `inFlightExtracts` until that Deferred completes — and then the map entry is removed. The URL is NOT cached for next time unless a subsequent caller calls `extractStreamUrl(A)` while the Deferred is still in-flight. This is a real gap to flag in the verification notes; addressing it is out of scope for this branch.
 
 **Behaviour 3: Library tap shows a spinner.**
 - Open Liked Songs (or a playlist). Tap a streaming-only (non-FLAC) track.
