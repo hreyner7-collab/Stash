@@ -1,7 +1,11 @@
 package com.stash.data.download.preview
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.services.youtube.ItagItem
@@ -18,6 +22,7 @@ import org.schabi.newpipe.extractor.stream.AudioStream
  * paths. Real NewPipe parsing is not under test here — the spike's
  * answer comes from on-device LATDIAG, not from JVM round-trips.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class NewPipeStreamExtractorTest {
 
     @Test
@@ -79,6 +84,84 @@ class NewPipeStreamExtractorTest {
      * arbitrary itag ids, switch from `140` to whatever `ItagItem.getItag`
      * exposes as a stable AUDIO/M4A constant.
      */
+    // ----- extractStreamUrl behavioural contract -----
+
+    @Test
+    fun `extractStreamUrl returns null when fetcher throws`() = kotlinx.coroutines.test.runTest {
+        val sut = NewPipeStreamExtractor(
+            downloader = fakeDownloader(),
+            fetcher = { throw java.io.IOException("simulated NewPipe failure") },
+        )
+        assertNull(sut.extractStreamUrl("anyVideoId"))
+    }
+
+    @Test
+    fun `extractStreamUrl returns null when fetcher returns empty stream list`() = kotlinx.coroutines.test.runTest {
+        val sut = NewPipeStreamExtractor(
+            downloader = fakeDownloader(),
+            fetcher = { emptyList() },
+        )
+        assertNull(sut.extractStreamUrl("anyVideoId"))
+    }
+
+    @Test
+    fun `extractStreamUrl returns highest-bitrate URL on success`() = kotlinx.coroutines.test.runTest {
+        val streams = listOf(
+            fakeAudioStream(url = "https://x/low",  averageBitrate = 64_000,  bitrate = 64_000),
+            fakeAudioStream(url = "https://x/high", averageBitrate = 256_000, bitrate = 256_000),
+        )
+        val sut = NewPipeStreamExtractor(
+            downloader = fakeDownloader(),
+            fetcher = { streams },
+        )
+        assertEquals("https://x/high", sut.extractStreamUrl("anyVideoId"))
+    }
+
+    @Test
+    fun `extractStreamUrl returns null on timeout`() = kotlinx.coroutines.test.runTest {
+        val sut = NewPipeStreamExtractor(
+            downloader = fakeDownloader(),
+            // Stretches well past NEWPIPE_TIMEOUT_MS. `runTest`'s virtual
+            // time skips the wall-clock wait so the test still runs fast.
+            fetcher = { kotlinx.coroutines.delay(60_000); emptyList() },
+        )
+        assertNull(sut.extractStreamUrl("anyVideoId"))
+    }
+
+    @Test
+    fun `extractStreamUrl propagates cancellation`() = kotlinx.coroutines.test.runTest {
+        // Use supervisorScope so a child cancellation doesn't propagate up
+        // and fail the test harness. We want to observe that the suspend
+        // call ends in cancellation, not normal completion (which would
+        // mean extractStreamUrl swallowed CancellationException).
+        kotlinx.coroutines.supervisorScope {
+            val sut = NewPipeStreamExtractor(
+                downloader = fakeDownloader(),
+                // Never returns — only outer cancellation should end this call.
+                fetcher = { kotlinx.coroutines.delay(Long.MAX_VALUE); emptyList() },
+            )
+            val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+            val job = launch {
+                try {
+                    sut.extractStreamUrl("anyVideoId")
+                    completed.set(true)
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    cancelled.set(true)
+                }
+            }
+            // Yield once so the inner withTimeout/withContext registers.
+            runCurrent()
+            job.cancel(kotlinx.coroutines.CancellationException("outer cancel"))
+            job.join()
+            assertTrue("extractStreamUrl must propagate cancellation, not return null", cancelled.get())
+            org.junit.Assert.assertFalse(completed.get())
+        }
+    }
+
+    private fun fakeDownloader(): OkHttpNewPipeDownloader =
+        OkHttpNewPipeDownloader(client = okhttp3.OkHttpClient())
+
     private fun fakeAudioStream(url: String, averageBitrate: Int, bitrate: Int): AudioStream {
         // Minimal ItagItem — `id` is arbitrary (test-only), `ItagType.AUDIO`
         // matches the AudioStream context, and MediaFormat is duplicated
