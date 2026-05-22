@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.model.Track
 import com.stash.core.ui.components.DetailTrackRow
 import com.stash.core.ui.components.SearchFilterBar
@@ -75,6 +76,7 @@ fun LikedSongsDetailScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
+    val bulkPlayInFlight by viewModel.bulkPlayInFlight.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
     // Bottom sheet state for the long-press track menu.
@@ -115,6 +117,7 @@ fun LikedSongsDetailScreen(
                     item(key = "header") {
                         LikedSongsHeader(
                             state = state,
+                            bulkPlayInFlight = bulkPlayInFlight,
                             onBack = onBack,
                             onPlayAll = { viewModel.playAll() },
                             onShuffle = { viewModel.shuffleAll() },
@@ -310,6 +313,7 @@ private fun LikedSongsEmptyState(
 @Composable
 private fun LikedSongsHeader(
     state: LikedSongsDetailUiState,
+    bulkPlayInFlight: BulkPlayAction?,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onShuffle: () -> Unit,
@@ -425,34 +429,44 @@ private fun LikedSongsHeader(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Button(
-                    onClick = onPlayAll,
+                BulkPlayButtonBox(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 12.dp),
-                    shape = RoundedCornerShape(12.dp),
+                    showProgress = bulkPlayInFlight == BulkPlayAction.PLAY_ALL,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Play All", style = MaterialTheme.typography.labelLarge)
+                    Button(
+                        onClick = onPlayAll,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Play All", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
 
-                OutlinedButton(
-                    onClick = onShuffle,
+                BulkPlayButtonBox(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 12.dp),
-                    shape = RoundedCornerShape(12.dp),
+                    showProgress = bulkPlayInFlight == BulkPlayAction.SHUFFLE_ALL,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Shuffle,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                    OutlinedButton(
+                        onClick = onShuffle,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shuffle,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))

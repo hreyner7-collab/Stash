@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.model.Track
 import com.stash.core.ui.components.DetailTrackRow
 import com.stash.core.ui.components.SearchFilterBar
@@ -74,6 +75,7 @@ fun ArtistDetailScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
+    val bulkPlayInFlight by viewModel.bulkPlayInFlight.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
     // Bottom sheet state for the long-press track menu.
@@ -101,6 +103,7 @@ fun ArtistDetailScreen(
                 item(key = "header") {
                     ArtistDetailHeader(
                         state = state,
+                        bulkPlayInFlight = bulkPlayInFlight,
                         onBack = onBack,
                         onPlayAll = {
                             val firstTrack = state.tracks.firstOrNull { it.filePath != null }
@@ -225,6 +228,7 @@ fun ArtistDetailScreen(
 @Composable
 private fun ArtistDetailHeader(
     state: ArtistDetailUiState,
+    bulkPlayInFlight: BulkPlayAction?,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onShuffle: () -> Unit,
@@ -337,19 +341,24 @@ private fun ArtistDetailHeader(
                 Text(text = "Play All", style = MaterialTheme.typography.labelLarge)
             }
 
-            OutlinedButton(
-                onClick = onShuffle,
+            BulkPlayButtonBox(
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(vertical = 12.dp),
-                shape = RoundedCornerShape(12.dp),
+                showProgress = bulkPlayInFlight == BulkPlayAction.SHUFFLE_ALL,
             ) {
-                Icon(
-                    imageVector = Icons.Default.Shuffle,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                OutlinedButton(
+                    onClick = onShuffle,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(vertical = 12.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shuffle,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(text = "Shuffle", style = MaterialTheme.typography.labelLarge)
+                }
             }
 
             // Search toggle button — same glass-background style as PlaylistHeader

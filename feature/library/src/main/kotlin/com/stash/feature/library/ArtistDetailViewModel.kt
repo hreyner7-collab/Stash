@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.data.repository.MusicRepository
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.Track
 import com.stash.core.ui.util.withSearchFilter
@@ -66,6 +67,9 @@ class ArtistDetailViewModel @Inject constructor(
 
     private val _tappedTrackId = MutableStateFlow<Long?>(null)
     val tappedTrackId: StateFlow<Long?> = _tappedTrackId.asStateFlow()
+
+    private val _bulkPlayInFlight = MutableStateFlow<BulkPlayAction?>(null)
+    val bulkPlayInFlight: StateFlow<BulkPlayAction?> = _bulkPlayInFlight.asStateFlow()
 
     /** Update the live search query; results filter immediately with debounce. */
     fun onSearchQueryChanged(query: String) { _searchQuery.value = query }
@@ -139,10 +143,12 @@ class ArtistDetailViewModel @Inject constructor(
             if (downloaded.isEmpty()) return@launch
             val shuffled = downloaded.shuffled()
             _tappedTrackId.value = shuffled[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.SHUFFLE_ALL
             try {
                 playerRepository.setQueue(shuffled, 0)
             } finally {
                 _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.SHUFFLE_ALL, null)
             }
         }
     }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.net.Uri
 import com.stash.core.data.repository.MusicRepository
+import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
@@ -69,6 +70,9 @@ class PlaylistDetailViewModel @Inject constructor(
 
     private val _tappedTrackId = MutableStateFlow<Long?>(null)
     val tappedTrackId: StateFlow<Long?> = _tappedTrackId.asStateFlow()
+
+    private val _bulkPlayInFlight = MutableStateFlow<BulkPlayAction?>(null)
+    val bulkPlayInFlight: StateFlow<BulkPlayAction?> = _bulkPlayInFlight.asStateFlow()
 
     fun onSearchQueryChanged(query: String) { _searchQuery.value = query }
     fun clearSearch() { _searchQuery.value = "" }
@@ -178,10 +182,12 @@ class PlaylistDetailViewModel @Inject constructor(
             if (playable.isEmpty()) return@launch
             val shuffled = playable.shuffled()
             _tappedTrackId.value = shuffled[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.SHUFFLE_ALL
             try {
                 playerRepository.setQueue(shuffled, 0)
             } finally {
                 _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.SHUFFLE_ALL, null)
             }
         }
     }
@@ -200,10 +206,12 @@ class PlaylistDetailViewModel @Inject constructor(
             }
             if (playable.isEmpty()) return@launch
             _tappedTrackId.value = playable[0].id
+            _bulkPlayInFlight.value = BulkPlayAction.PLAY_ALL
             try {
                 playerRepository.setQueue(playable, 0)
             } finally {
                 _tappedTrackId.value = null
+                _bulkPlayInFlight.compareAndSet(BulkPlayAction.PLAY_ALL, null)
             }
         }
     }
