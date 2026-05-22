@@ -249,7 +249,7 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private val cascadeGuard = StreamErrorCascadeGuard()
     private val _streamingHaltedEvents = MutableSharedFlow<StreamingHaltedEvent>(
-        replay = 0,
+        replay = 1,
         extraBufferCapacity = 1,
     )
     override val streamingHaltedEvents: SharedFlow<StreamingHaltedEvent> =
@@ -1072,14 +1072,14 @@ class PlayerRepositoryImpl @Inject constructor(
                 error,
             )
 
-            when (verdict) {
+            when (val v = verdict) {
                 StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
-                StreamErrorCascadeGuard.Verdict.Halt -> {
+                is StreamErrorCascadeGuard.Verdict.Halt -> {
                     controller?.pause()
                     _streamingHaltedEvents.tryEmit(
                         StreamingHaltedEvent(
                             failingTitle = failingTitle,
-                            consecutiveErrorCount = 3,
+                            consecutiveErrorCount = v.consecutiveErrors,
                         ),
                     )
                 }

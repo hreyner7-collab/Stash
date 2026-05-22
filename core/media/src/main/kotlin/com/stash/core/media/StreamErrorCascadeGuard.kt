@@ -17,12 +17,15 @@ class StreamErrorCascadeGuard(
 
     private var consecutiveErrors: Int = 0
 
-    enum class Verdict { Recover, Halt }
+    sealed class Verdict {
+        data object Recover : Verdict()
+        data class Halt(val consecutiveErrors: Int) : Verdict()
+    }
 
     /** Increment and return whether to recover or halt. */
     fun onError(): Verdict {
         consecutiveErrors += 1
-        return if (consecutiveErrors >= threshold) Verdict.Halt else Verdict.Recover
+        return if (consecutiveErrors >= threshold) Verdict.Halt(consecutiveErrors) else Verdict.Recover
     }
 
     /** A track actually started playing — backend is alive. */

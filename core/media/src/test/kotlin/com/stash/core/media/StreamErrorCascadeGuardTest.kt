@@ -18,7 +18,7 @@ class StreamErrorCascadeGuardTest {
         guard.onError()
         guard.onError()
         val verdict = guard.onError()
-        assertThat(verdict).isEqualTo(StreamErrorCascadeGuard.Verdict.Halt)
+        assertThat(verdict).isInstanceOf(StreamErrorCascadeGuard.Verdict.Halt::class.java)
     }
 
     @Test
@@ -46,7 +46,7 @@ class StreamErrorCascadeGuardTest {
         guard.onError(); guard.onError(); guard.onError()  // Halt
         val verdict = guard.onError()
         // Still halted — 4th error after a halt also halts.
-        assertThat(verdict).isEqualTo(StreamErrorCascadeGuard.Verdict.Halt)
+        assertThat(verdict).isInstanceOf(StreamErrorCascadeGuard.Verdict.Halt::class.java)
     }
 
     @Test
@@ -54,7 +54,7 @@ class StreamErrorCascadeGuardTest {
         val guard = StreamErrorCascadeGuard(threshold = 2)
         guard.onError()
         val verdict = guard.onError()
-        assertThat(verdict).isEqualTo(StreamErrorCascadeGuard.Verdict.Halt)
+        assertThat(verdict).isInstanceOf(StreamErrorCascadeGuard.Verdict.Halt::class.java)
     }
 
     @Test
@@ -62,5 +62,13 @@ class StreamErrorCascadeGuardTest {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             StreamErrorCascadeGuard(threshold = 0)
         }
+    }
+
+    @Test
+    fun haltVerdict_carriesCount() {
+        val guard = StreamErrorCascadeGuard(threshold = 3)
+        guard.onError(); guard.onError()
+        val verdict = guard.onError() as StreamErrorCascadeGuard.Verdict.Halt
+        assertThat(verdict.consecutiveErrors).isEqualTo(3)
     }
 }
