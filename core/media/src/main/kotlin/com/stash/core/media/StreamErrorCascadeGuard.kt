@@ -13,6 +13,8 @@ package com.stash.core.media
 class StreamErrorCascadeGuard(
     private val threshold: Int = 3,
 ) {
+    init { require(threshold >= 1) { "threshold must be >= 1, got $threshold" } }
+
     private var consecutiveErrors: Int = 0
 
     enum class Verdict { Recover, Halt }

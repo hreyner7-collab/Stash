@@ -48,4 +48,19 @@ class StreamErrorCascadeGuardTest {
         // Still halted — 4th error after a halt also halts.
         assertThat(verdict).isEqualTo(StreamErrorCascadeGuard.Verdict.Halt)
     }
+
+    @Test
+    fun customThreshold_halsOnSecondErrorWhenTwo() {
+        val guard = StreamErrorCascadeGuard(threshold = 2)
+        guard.onError()
+        val verdict = guard.onError()
+        assertThat(verdict).isEqualTo(StreamErrorCascadeGuard.Verdict.Halt)
+    }
+
+    @Test
+    fun thresholdZero_rejected() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            StreamErrorCascadeGuard(threshold = 0)
+        }
+    }
 }
