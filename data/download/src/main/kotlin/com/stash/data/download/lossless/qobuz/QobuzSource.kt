@@ -64,6 +64,18 @@ class QobuzSource @Inject constructor(
     /** Observable view of the most recently rejected captcha cookie. */
     val lastKnownBadCookie: StateFlow<String?> = _lastKnownBadCookie.asStateFlow()
 
+    /**
+     * Clear the lastKnownBad flag. Called by [SquidCookieAutoRefresher]
+     * after a successful `/api/altcha/verify` round-trip — that endpoint
+     * IS the server's authoritative cookie validation, so if it accepted
+     * the cookie any subsequent transient 403 (e.g. cookie-validator
+     * propagation lag across edge nodes) shouldn't pin the UI to "Expired"
+     * indefinitely. Effectively a "I just proved this cookie works" reset.
+     */
+    fun clearLastKnownBad() {
+        _lastKnownBadCookie.value = null
+    }
+
     override suspend fun isEnabled(): Boolean {
         // Circuit-broken via repeated failures? Skip.
         if (rateLimiter.stateOf(id).isCircuitBroken) return false

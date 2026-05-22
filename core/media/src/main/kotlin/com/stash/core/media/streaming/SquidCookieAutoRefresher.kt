@@ -2,6 +2,7 @@ package com.stash.core.media.streaming
 
 import android.util.Log
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.lossless.squid.NativeSquidCaptchaSolver
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -39,13 +40,14 @@ class SquidCookieAutoRefresher(
     private val solver: NativeSquidCaptchaSolver,
     private val healthMonitor: KennyyHealthMonitor,
     private val prefs: LosslessSourcePreferences,
+    private val qobuzSource: QobuzSource,
     private val scope: CoroutineScope,
 ) {
     /**
      * Hilt-injectable constructor. Dagger does NOT honour Kotlin default
      * parameter values on `@Inject` constructors (it sees the parameter
      * as a required binding regardless), so the production scope is
-     * constructed explicitly here. Tests use the four-arg primary
+     * constructed explicitly here. Tests use the five-arg primary
      * constructor to pass a `TestScope` directly.
      */
     @Inject
@@ -53,10 +55,12 @@ class SquidCookieAutoRefresher(
         solver: NativeSquidCaptchaSolver,
         healthMonitor: KennyyHealthMonitor,
         prefs: LosslessSourcePreferences,
+        qobuzSource: QobuzSource,
     ) : this(
         solver = solver,
         healthMonitor = healthMonitor,
         prefs = prefs,
+        qobuzSource = qobuzSource,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
     )
 
@@ -100,6 +104,7 @@ class SquidCookieAutoRefresher(
         val newCookie = solver.solve()
         if (newCookie != null) {
             prefs.setCaptchaCookieValue(newCookie)
+            qobuzSource.clearLastKnownBad()
             consecutiveFailures = 0
             Log.d(TAG, "refresh success")
         } else {
