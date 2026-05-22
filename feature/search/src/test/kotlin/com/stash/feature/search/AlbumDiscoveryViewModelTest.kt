@@ -298,7 +298,7 @@ class AlbumDiscoveryViewModelTest {
         vm.userMessages.test {
             vm.addAlbumToQueue()
             advanceUntilIdle()
-            assertEquals("Added 3 tracks to queue", awaitItem())
+            assertEquals("Adding 3 tracks to queue...", awaitItem())
             cancelAndIgnoreRemainingEvents()
         }
     }

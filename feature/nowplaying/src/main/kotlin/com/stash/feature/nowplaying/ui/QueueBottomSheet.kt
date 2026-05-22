@@ -38,9 +38,11 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -131,12 +133,23 @@ fun QueueBottomSheet(
                 modifier = Modifier.weight(1f, fill = false),
                 userScrollEnabled = draggedIdx < 0,
             ) {
-                itemsIndexed(localQueue) { idx, track ->
+                itemsIndexed(
+                    items = localQueue,
+                    key = { idx, track -> "queue-row-$idx-${track.youtubeId ?: track.id}" },
+                ) { idx, track ->
                     val isDragging = idx == draggedIdx
                     val queueIndex = currentIndex + 1 + idx
+                    val rowKey = "queue-row-$idx-${track.youtubeId ?: track.id}"
+
+                    key(rowKey) {
+                    // One-shot guard so confirmValueChange can't mass-remove if
+                    // Compose's swipe state transitions re-fire during a single
+                    // gesture. Tied to rowKey identity via the surrounding key().
+                    val dismissedOnce = remember { mutableStateOf(false) }
 
                     Box(
                         modifier = Modifier
+                            .animateItem()
                             .then(
                                 if (isDragging) Modifier
                                     .zIndex(10f)
@@ -149,7 +162,11 @@ fun QueueBottomSheet(
                         @Suppress("DEPRECATION")
                         val dismissState = rememberSwipeToDismissBoxState(
                             confirmValueChange = { value ->
-                                if (value != SwipeToDismissBoxValue.Settled && draggedIdx < 0) {
+                                if (value != SwipeToDismissBoxValue.Settled &&
+                                    draggedIdx < 0 &&
+                                    !dismissedOnce.value
+                                ) {
+                                    dismissedOnce.value = true
                                     // Remove from local queue and notify parent.
                                     // Return false so the dismiss box resets — the item
                                     // disappears because we remove it from localQueue.
@@ -303,6 +320,7 @@ fun QueueBottomSheet(
                         }
                         } // SwipeToDismissBox
                     }
+                    } // key(rowKey)
                 }
             }
 

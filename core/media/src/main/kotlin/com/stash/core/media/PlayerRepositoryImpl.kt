@@ -665,6 +665,8 @@ class PlayerRepositoryImpl @Inject constructor(
         val wasEmpty = controller.mediaItemCount == 0
         val streamingOn = streamingPreference.current()
         val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
+        val beforeCount = controller.mediaItemCount
+        Log.d(TAG, "addToQueue(batch) start: ${tracks.size} tracks, controller.mediaItemCount=$beforeCount")
         // Parallel-resolve; preserve input order so the user's queue matches
         // the order they tapped Add-to-Queue.
         val resolved = coroutineScope {
@@ -672,8 +674,10 @@ class PlayerRepositoryImpl @Inject constructor(
                 async { resolveTrackToMediaItem(track, semaphore, streamingOn) }
             }.awaitAll()
         }.filterNotNull()
+        Log.d(TAG, "addToQueue(batch) resolved ${resolved.size}/${tracks.size} tracks")
         if (resolved.isEmpty()) return
         controller.addMediaItems(resolved)
+        Log.d(TAG, "addToQueue(batch) after addMediaItems: controller.mediaItemCount=${controller.mediaItemCount}")
         if (wasEmpty) {
             controller.prepare()
             controller.play()

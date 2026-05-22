@@ -303,10 +303,10 @@ class ArtistProfileViewModel @Inject constructor(
 
         /**
          * Soft cap on the total tracks the Play Artist hybrid-fill will
-         * append. ~100 tracks ≈ hours of playback — enough for any normal
-         * session without burning unbounded album-detail network calls on
+         * append. 30 tracks ≈ enough hours of playback for a normal session
+         * without over-queuing or burning album-detail network calls on
          * artists with deep discographies.
          */
-        private const val CATALOG_CAP = 100
+        private const val CATALOG_CAP = 30
     }
 }
