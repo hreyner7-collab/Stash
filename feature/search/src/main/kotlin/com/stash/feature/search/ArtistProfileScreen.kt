@@ -79,6 +79,7 @@ fun ArtistProfileScreen(
                     hero = state.hero,
                     status = state.status,
                     onBack = onBack,
+                    onPlayArtist = vm::playArtist,
                 )
             }
 

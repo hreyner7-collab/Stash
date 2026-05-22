@@ -4,14 +4,19 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,12 +50,15 @@ import com.stash.core.common.ArtUrlUpgrader
  * @param status Load status; currently unused visually but accepted so
  *   Task 11 can add a stale badge without the call-site changing.
  * @param onBack Invoked when the top-left back arrow is tapped (spec §5.2).
+ * @param onPlayArtist Invoked when the "Play" button is tapped. Hybrid-starts
+ *   playback of the artist's catalog — see [ArtistProfileViewModel.playArtist].
  */
 @Composable
 fun ArtistHero(
     hero: HeroState,
     @Suppress("UNUSED_PARAMETER") status: ArtistProfileStatus,
     onBack: () -> Unit,
+    onPlayArtist: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val primary = MaterialTheme.colorScheme.primary
@@ -97,6 +105,28 @@ fun ArtistHero(
                     text = hero.subscribersText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Play Artist CTA — matches the AlbumHero "Play" button style
+            // (filled primary, rounded 12.dp, PlayArrow + label) so the
+            // two hero surfaces feel like siblings.
+            Button(
+                onClick = onPlayArtist,
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "Play",
+                    style = MaterialTheme.typography.labelLarge,
                 )
             }
         }

@@ -6,11 +6,16 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.common.perf.PerfLog
+import com.stash.core.data.cache.AlbumCache
 import com.stash.core.data.cache.ArtistCache
 import com.stash.core.data.cache.CachedProfile
+import com.stash.core.media.PlayerRepository
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.core.model.MusicSource
+import com.stash.core.model.Track
 import com.stash.data.ytmusic.model.ArtistProfile
+import com.stash.data.ytmusic.model.TrackSummary
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -51,7 +56,9 @@ import javax.inject.Inject
 class ArtistProfileViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val artistCache: ArtistCache,
+    private val albumCache: AlbumCache,
     private val prefetcher: PreviewPrefetcher,
+    private val playerRepository: PlayerRepository,
     val delegate: TrackActionsDelegate,
     val losslessPrefetcher: LosslessUrlPrefetcher,
 ) : ViewModel() {
@@ -166,6 +173,87 @@ class ArtistProfileViewModel @Inject constructor(
     }
 
     /**
+     * Job running the current background catalog-fill for [playArtist]. Stored
+     * so a rapid second tap on the Play Artist button cancels the prior fill
+     * before relaunching — prevents addToQueue racing against itself with
+     * stale album-cache-hit data.
+     */
+    private var fillCatalogJob: Job? = null
+
+    /**
+     * Start playing this artist. Hybrid strategy:
+     *  1. Instant start with the cached popular tracks (immediate setQueue).
+     *  2. Background-fill the queue from albums then singles via [albumCache].
+     *  3. Stop at [CATALOG_CAP] tracks total (soft cap, ~hours of playback).
+     *
+     * Double-tap-safe: a second invocation cancels the prior fill job before
+     * relaunching. Per spec, no Snackbar — actual playback IS the feedback.
+     */
+    fun playArtist() {
+        fillCatalogJob?.cancel()
+        fillCatalogJob = viewModelScope.launch {
+            val state = _uiState.value
+            val artistName = state.hero.name
+            val seen = mutableSetOf<String>()
+
+            val popularTracks = state.popular
+                .filter { seen.add(it.videoId) }
+                .map { it.toDomainTrack(albumFallback = artistName) }
+
+            if (popularTracks.isEmpty() && state.albums.isEmpty() && state.singles.isEmpty()) {
+                _userMessages.emit("No tracks available for this artist")
+                return@launch
+            }
+
+            var appended = popularTracks.size
+            if (popularTracks.isNotEmpty()) {
+                playerRepository.setQueue(popularTracks, startIndex = 0)
+            }
+
+            val catalog = state.albums + state.singles
+            for (album in catalog) {
+                if (appended >= CATALOG_CAP) break
+                val detail = runCatching { albumCache.get(album.id) }.getOrNull() ?: continue
+                val remaining = CATALOG_CAP - appended
+                val albumTracks = detail.tracks
+                    .filter { seen.add(it.videoId) }
+                    .take(remaining)
+                    .map {
+                        it.toDomainTrack(
+                            albumFallback = artistName,
+                            albumTitle = album.title,
+                            albumArtist = artistName,
+                        )
+                    }
+                if (albumTracks.isEmpty()) continue
+
+                if (appended == 0) {
+                    playerRepository.setQueue(albumTracks, startIndex = 0)
+                } else {
+                    playerRepository.addToQueue(albumTracks)
+                }
+                appended += albumTracks.size
+            }
+        }
+    }
+
+    private fun TrackSummary.toDomainTrack(
+        albumFallback: String,
+        albumTitle: String = album ?: "",
+        albumArtist: String = albumFallback,
+    ): Track = Track(
+        id = videoId.hashCode().toLong(),
+        title = title,
+        artist = artist.ifBlank { albumArtist },
+        album = albumTitle,
+        durationMs = (durationSeconds * 1000.0).toLong(),
+        albumArtUrl = thumbnailUrl,
+        youtubeId = videoId,
+        source = MusicSource.YOUTUBE,
+        isStreamable = true,
+    )
+
+    /**
      * Fold a freshly-arrived profile into the UI state and kick the preview
      * prefetcher on the first non-empty Popular list we see.
      */
@@ -212,5 +300,13 @@ class ArtistProfileViewModel @Inject constructor(
          * through [PerfLog] (tag `Perf`) and do NOT use [TAG].
          */
         private const val TAG = "ArtistProfileVM"
+
+        /**
+         * Soft cap on the total tracks the Play Artist hybrid-fill will
+         * append. ~100 tracks ≈ hours of playback — enough for any normal
+         * session without burning unbounded album-detail network calls on
+         * artists with deep discographies.
+         */
+        private const val CATALOG_CAP = 100
     }
 }

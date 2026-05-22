@@ -2,12 +2,18 @@ package com.stash.feature.search
 
 import androidx.lifecycle.SavedStateHandle
 import app.cash.turbine.test
+import com.stash.core.data.cache.AlbumCache
 import com.stash.core.data.cache.ArtistCache
 import com.stash.core.data.cache.CachedProfile
+import com.stash.core.media.PlayerRepository
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.PreviewState
+import com.stash.core.model.Track
+import com.stash.data.ytmusic.model.AlbumDetail
+import com.stash.data.ytmusic.model.AlbumSummary
 import com.stash.data.ytmusic.model.ArtistProfile
 import com.stash.data.ytmusic.model.TrackSummary
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -27,9 +33,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.doSuspendableAnswer
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 
@@ -65,6 +74,8 @@ class ArtistProfileViewModelTest {
         cache: ArtistCache,
         prefetcher: PreviewPrefetcher = mock(),
         delegate: TrackActionsDelegate = stubDelegate(),
+        albumCache: AlbumCache = mock(),
+        playerRepository: PlayerRepository = mock(),
     ): ArtistProfileViewModel = ArtistProfileViewModel(
         savedStateHandle = SavedStateHandle(
             mapOf(
@@ -74,7 +85,9 @@ class ArtistProfileViewModelTest {
             ),
         ),
         artistCache = cache,
+        albumCache = albumCache,
         prefetcher = prefetcher,
+        playerRepository = playerRepository,
         delegate = delegate,
         losslessPrefetcher = mock(),
     )
@@ -186,6 +199,162 @@ class ArtistProfileViewModelTest {
         advanceUntilIdle()
         assertTrue(vm.uiState.value.status is ArtistProfileStatus.Fresh)
         verify(cache, org.mockito.kotlin.times(2)).get(eq("UC1"))
+    }
+
+    @Test
+    fun `playArtist sets queue from popular when popular is non-empty`() = runTest {
+        val profile = ArtistProfile(
+            id = "UC1",
+            name = "A",
+            avatarUrl = null,
+            subscribersText = null,
+            popular = listOf(t("v1"), t("v2"), t("v3")),
+            albums = emptyList(),
+            singles = emptyList(),
+            related = emptyList(),
+        )
+        val cache = mock<ArtistCache>()
+        whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
+        val player = mock<PlayerRepository>()
+        val vm = vmWith(cache = cache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.playArtist()
+        advanceUntilIdle()
+
+        val tracksCaptor = argumentCaptor<List<Track>>()
+        val startCaptor = argumentCaptor<Int>()
+        verify(player).setQueue(tracksCaptor.capture(), startCaptor.capture())
+        assertEquals(listOf("v1", "v2", "v3"), tracksCaptor.firstValue.map { it.youtubeId })
+        assertEquals(0, startCaptor.firstValue)
+    }
+
+    @Test
+    fun `playArtist appends album tracks deduped by videoId`() = runTest {
+        val popular = listOf(t("x"))
+        val profile = ArtistProfile(
+            id = "UC1",
+            name = "A",
+            avatarUrl = null,
+            subscribersText = null,
+            popular = popular,
+            albums = listOf(
+                AlbumSummary(
+                    id = "ALB1",
+                    title = "Album One",
+                    artist = "A",
+                    thumbnailUrl = null,
+                    year = null,
+                ),
+            ),
+            singles = emptyList(),
+            related = emptyList(),
+        )
+        val cache = mock<ArtistCache>()
+        whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
+
+        val albumDetail = AlbumDetail(
+            id = "ALB1",
+            title = "Album One",
+            artist = "A",
+            artistId = "UC1",
+            thumbnailUrl = null,
+            year = null,
+            tracks = listOf(t("b"), t("x"), t("c")),
+            moreByArtist = emptyList(),
+        )
+        val albumCache = mock<AlbumCache>()
+        whenever(albumCache.get(eq("ALB1"))).thenReturn(albumDetail)
+
+        val player = mock<PlayerRepository>()
+        val vm = vmWith(cache = cache, albumCache = albumCache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.playArtist()
+        advanceUntilIdle()
+
+        // First call: setQueue with the [x] popular track.
+        val initialTracks = argumentCaptor<List<Track>>()
+        verify(player).setQueue(initialTracks.capture(), eq(0))
+        assertEquals(listOf("x"), initialTracks.firstValue.map { it.youtubeId })
+
+        // Second call: addToQueue with album tracks minus the dup ("x"), so [b, c].
+        val appendTracks = argumentCaptor<List<Track>>()
+        verify(player).addToQueue(appendTracks.capture())
+        assertEquals(listOf("b", "c"), appendTracks.firstValue.map { it.youtubeId })
+    }
+
+    @Test
+    fun `playArtist emits message when all shelves empty`() = runTest {
+        val profile = ArtistProfile(
+            id = "UC1",
+            name = "A",
+            avatarUrl = null,
+            subscribersText = null,
+            popular = emptyList(),
+            albums = emptyList(),
+            singles = emptyList(),
+            related = emptyList(),
+        )
+        val cache = mock<ArtistCache>()
+        whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
+        val player = mock<PlayerRepository>()
+        val vm = vmWith(cache = cache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.userMessages.test {
+            vm.playArtist()
+            advanceUntilIdle()
+            assertEquals("No tracks available for this artist", awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+        verify(player, never()).setQueue(any(), any())
+        verify(player, never()).addToQueue(any<List<Track>>())
+    }
+
+    @Test
+    fun `playArtist cancels prior fill job on second tap`() = runTest {
+        val profile = ArtistProfile(
+            id = "UC1",
+            name = "A",
+            avatarUrl = null,
+            subscribersText = null,
+            popular = listOf(t("p1")),
+            albums = listOf(
+                AlbumSummary(
+                    id = "ALB1",
+                    title = "Album One",
+                    artist = "A",
+                    thumbnailUrl = null,
+                    year = null,
+                ),
+            ),
+            singles = emptyList(),
+            related = emptyList(),
+        )
+        val cache = mock<ArtistCache>()
+        whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
+
+        // First albumCache.get suspends forever; the second tap must cancel
+        // the first job before it can append anything from the album.
+        val gate = CompletableDeferred<AlbumDetail>()
+        val albumCache = mock<AlbumCache>()
+        whenever(albumCache.get(eq("ALB1"))).doSuspendableAnswer { gate.await() }
+
+        val player = mock<PlayerRepository>()
+        val vm = vmWith(cache = cache, albumCache = albumCache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.playArtist()
+        advanceUntilIdle() // first job is now suspended on albumCache.get
+        vm.playArtist()
+        advanceUntilIdle() // second job: setQueue, then suspends on the same mock
+
+        // setQueue is called exactly twice (once per playArtist invocation),
+        // but addToQueue must never fire because both album fetches are still
+        // gated and the prior fill job was cancelled before it could append.
+        verify(player, org.mockito.kotlin.times(2)).setQueue(any(), eq(0))
+        verify(player, never()).addToQueue(any<List<Track>>())
     }
 
     private fun t(id: String) = TrackSummary(
