@@ -23,8 +23,13 @@ import kotlinx.coroutines.flow.map
  * `DataStore<Preferences>` via this delegate, which is what lets them
  * coexist on `metadata_backfill_state.preferences_pb` without tripping
  * DataStore's "multiple DataStores active for the same file" guard.
+ *
+ * `internal` so [BackfillVersionTracker] (same module) can import the
+ * delegate and resolve the same singleton; outside the module, callers
+ * interact via the [MetadataBackfillState] / [BackfillVersionTracker]
+ * APIs rather than touching the DataStore directly.
  */
-private val Context.backfillDataStore by preferencesDataStore(name = "metadata_backfill_state")
+internal val Context.backfillDataStore by preferencesDataStore(name = "metadata_backfill_state")
 
 /**
  * Persists the observable state of the metadata-backfill worker so the
