@@ -268,6 +268,7 @@ class SearchDownloadCoordinator @Inject constructor(
             }.onFailure { e ->
                 Log.e(TAG, "upsertSearchTrack failed for ${track.videoId}: ${e.message}", e)
             }
+            stampEmbeddedAt(track.videoId)
         }
 
         // Free preview-cache space now that bytes are on permanent storage.
@@ -323,8 +324,26 @@ class SearchDownloadCoordinator @Inject constructor(
             }.onFailure { e ->
                 Log.e(TAG, "upsertSearchTrack (yt-dlp) failed for ${track.videoId}: ${e.message}", e)
             }
+            stampEmbeddedAt(track.videoId)
         }
         return finalized
+    }
+
+    /**
+     * Stamps `tracks.metadata_embedded_at` after a successful finalize so the
+     * v0.9.35 backfill worker skips this row. Lookup is best-effort: when the
+     * Track row isn't found by videoId (rare — `upsertSearchTrack` always
+     * inserts before we get here, but defensive against a concurrent delete)
+     * the stamp is simply skipped. Failure is non-fatal — the file is on
+     * disk and playable regardless.
+     */
+    private suspend fun stampEmbeddedAt(videoId: String) {
+        runCatching {
+            val trackId = trackDao.findByYoutubeId(videoId)?.id ?: return
+            trackDao.setMetadataEmbeddedAt(trackId, System.currentTimeMillis())
+        }.onFailure { e ->
+            Log.w(TAG, "setMetadataEmbeddedAt failed for $videoId: ${e.message}")
+        }
     }
 
     // -------------------------------------------------------------------------

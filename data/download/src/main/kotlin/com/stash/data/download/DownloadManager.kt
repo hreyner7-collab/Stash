@@ -8,7 +8,9 @@ import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.mapper.toDomain
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
+import com.stash.data.download.files.AlbumArtCache
 import com.stash.data.download.files.FileOrganizer
+import com.stash.data.download.files.MetadataEmbedder
 import com.stash.data.download.shared.TrackFinalizer
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.LosslessSourceRegistry
@@ -85,6 +87,8 @@ class DownloadManager @Inject constructor(
     private val losslessPrefs: LosslessSourcePreferences,
     private val trackFinalizer: TrackFinalizer,
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
+    private val metadataEmbedder: MetadataEmbedder,
+    private val albumArtCache: AlbumArtCache,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -241,8 +245,18 @@ class DownloadManager @Inject constructor(
             }
         }
 
-        // Metadata is now embedded by yt-dlp via --embed-metadata flag.
-        // No separate ffmpeg step needed.
+        // Embed clean Stash-side tags + cover art into the file before
+        // commit. yt-dlp's --embed-metadata leaves YouTube-flavoured tags
+        // (uploader, video title); our pass overwrites them with the clean
+        // Spotify/YT-Music identity already on the Track row. Failure is
+        // non-fatal: the file remains playable and yt-dlp's fallback tags
+        // stay in place.
+        val art = runCatching { albumArtCache.resolveArt(effectiveTrack) }.getOrNull()
+        runCatching { metadataEmbedder.embedMetadata(downloadedFile, effectiveTrack, art) }
+            .onFailure { Log.w(TAG, "metadata embed failed for ${track.id}: ${it.message}") }
+
+        // Metadata + cover art written above by MetadataEmbedder. yt-dlp's
+        // --embed-metadata still runs as a fallback layer (see toYtDlpArgs).
 
         emitProgress(track.id, 0.9f, DownloadStatus.PROCESSING)
 
@@ -271,6 +285,8 @@ class DownloadManager @Inject constructor(
         }
 
         Log.i(TAG, "Downloaded: ${effectiveTrack.artist} - ${effectiveTrack.title} → ${committed.filePath}")
+        runCatching { trackDao.setMetadataEmbeddedAt(track.id, System.currentTimeMillis()) }
+            .onFailure { Log.w(TAG, "setMetadataEmbeddedAt failed for ${track.id}: ${it.message}") }
         emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
         return TrackDownloadResult.Success(committed.filePath)
     }
@@ -403,6 +419,8 @@ class DownloadManager @Inject constructor(
                     file = File(finalized.committed.filePath),
                 )
 
+                runCatching { trackDao.setMetadataEmbeddedAt(track.id, System.currentTimeMillis()) }
+                    .onFailure { Log.w(TAG, "setMetadataEmbeddedAt failed for ${track.id}: ${it.message}") }
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
                 return TrackDownloadResult.Success(finalized.committed.filePath)
             }

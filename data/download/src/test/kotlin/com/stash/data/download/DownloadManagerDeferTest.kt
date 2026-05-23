@@ -5,7 +5,9 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.model.Track
+import com.stash.data.download.files.AlbumArtCache
 import com.stash.data.download.files.FileOrganizer
+import com.stash.data.download.files.MetadataEmbedder
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.LosslessSourceRegistry
 import com.stash.data.download.lossless.LosslessUrlDownloader
@@ -55,6 +57,8 @@ class DownloadManagerDeferTest {
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val trackFinalizer: TrackFinalizer = mockk(relaxed = true)
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
+    private val metadataEmbedder: MetadataEmbedder = mockk(relaxed = true)
+    private val albumArtCache: AlbumArtCache = mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -74,6 +78,8 @@ class DownloadManagerDeferTest {
         losslessPrefs = losslessPrefs,
         trackFinalizer = trackFinalizer,
         loudnessMeasurer = loudnessMeasurer,
+        metadataEmbedder = metadataEmbedder,
+        albumArtCache = albumArtCache,
     )
 
     private fun stubTrack(): Track = Track(
