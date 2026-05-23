@@ -20,6 +20,9 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:data"))
     implementation(project(":core:network"))
+    // Task 5: YtMusicLyricsSource wraps the InnerTube client for plain-text
+    // lyrics fallback (when LRCLIB misses).
+    implementation(project(":data:ytmusic"))
 
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)
