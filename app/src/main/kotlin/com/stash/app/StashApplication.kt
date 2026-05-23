@@ -24,6 +24,7 @@ import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.media.listening.ListeningRecorder
 import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
+import com.stash.data.download.backfill.MetadataBackfillScheduler
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
@@ -142,6 +143,13 @@ class StashApplication : Application(), Configuration.Provider {
      */
     @Inject
     lateinit var crashReporter: CrashReporter
+
+    /**
+     * v0.9.35: once-per-version auto-enqueue gate for [MetadataBackfillWorker].
+     * Idempotent — re-installing the same binary doesn't re-fire the worker.
+     */
+    @Inject
+    lateinit var metadataBackfillScheduler: MetadataBackfillScheduler
 
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -304,6 +312,9 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeHideEmptyYouTubePlaylists() }
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
         applicationScope.launch { maybeBackfillTrackAlbums() }
+        // Auto-enqueue the v0.9.35 metadata backfill once per version.
+        // Idempotent: re-installing the same binary does not re-enqueue.
+        applicationScope.launch { metadataBackfillScheduler.scheduleIfNeeded() }
 
         // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker
         // were removed when Library reverted to downloaded-only. They populated
