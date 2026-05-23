@@ -94,7 +94,7 @@ Location: `core/data/src/main/kotlin/com/stash/core/data/db/entity/LyricsEntity.
     indices = [Index("track_id")],
 )
 data class LyricsEntity(
-    @PrimaryKey @ColumnInfo("track_id")        val trackId: String,
+    @PrimaryKey @ColumnInfo("track_id")        val trackId: Long,
     @ColumnInfo("plain_text")                  val plainText: String?,
     @ColumnInfo("synced_lrc")                  val syncedLrc: String?,
     @ColumnInfo("instrumental")                val instrumental: Boolean,
@@ -117,7 +117,7 @@ val MIGRATION_27_28 = object : Migration(27, 28) {
         db.execSQL("ALTER TABLE tracks ADD COLUMN lyrics_fetched_at INTEGER")
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS lyrics (
-              track_id TEXT NOT NULL PRIMARY KEY,
+              track_id INTEGER NOT NULL PRIMARY KEY,
               plain_text TEXT,
               synced_lrc TEXT,
               instrumental INTEGER NOT NULL DEFAULT 0,
@@ -142,16 +142,16 @@ Location: `core/data/src/main/kotlin/com/stash/core/data/db/dao/LyricsDao.kt`
 ```kotlin
 @Dao interface LyricsDao {
     @Query("SELECT * FROM lyrics WHERE track_id = :trackId")
-    suspend fun get(trackId: String): LyricsEntity?
+    suspend fun get(trackId: Long): LyricsEntity?
 
     @Query("SELECT * FROM lyrics WHERE track_id = :trackId")
-    fun observe(trackId: String): Flow<LyricsEntity?>
+    fun observe(trackId: Long): Flow<LyricsEntity?>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: LyricsEntity)
 
     @Query("DELETE FROM lyrics WHERE track_id = :trackId")
-    suspend fun delete(trackId: String)
+    suspend fun delete(trackId: Long)
 }
 ```
 
@@ -161,7 +161,7 @@ Mirror the v0.9.35 trio used by `MetadataBackfillWorker`:
 
 ```kotlin
 @Query("UPDATE tracks SET lyrics_fetched_at = :ts WHERE id = :trackId")
-suspend fun setLyricsFetchedAt(trackId: String, ts: Long)
+suspend fun setLyricsFetchedAt(trackId: Long, ts: Long)
 
 @Query("SELECT * FROM tracks WHERE lyrics_fetched_at IS NULL ORDER BY id LIMIT :limit")
 suspend fun getTracksNeedingLyrics(limit: Int): List<TrackEntity>
@@ -186,7 +186,7 @@ interface LyricsSource {
 }
 
 data class LyricsQuery(
-    val trackId: String,
+    val trackId: Long,
     val title: String,
     val artist: String,
     val album: String?,
@@ -293,10 +293,10 @@ class LyricsRepository @Inject constructor(
     private val clock: Clock,
 ) {
     /** Observe lyrics for the playing track. Used by the sheet. */
-    fun observe(trackId: String): Flow<LyricsEntity?> = lyricsDao.observe(trackId)
+    fun observe(trackId: Long): Flow<LyricsEntity?> = lyricsDao.observe(trackId)
 
     /** Whether a fetch has been attempted (any non-NULL on tracks.lyrics_fetched_at). */
-    suspend fun fetchAttempted(trackId: String): Boolean
+    suspend fun fetchAttempted(trackId: Long): Boolean
 
     /**
      * One-shot orchestration: source chain → Room upsert → sidecar write → stamp.
@@ -364,7 +364,7 @@ class LyricsFetchWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val trackId = inputData.getString(KEY_TRACK_ID) ?: return Result.failure()
+        val trackId = inputData.getLong(KEY_TRACK_ID, -1L).takeIf { it > 0L } ?: return Result.failure()
         val track = trackDao.get(trackId) ?: return Result.success()    // deleted mid-flight: no-op
         val query = LyricsQuery(
             trackId = track.id,
@@ -511,7 +511,7 @@ A new interface in `:data:download`:
 ```kotlin
 // data/download/src/main/kotlin/com/stash/data/download/lyrics/LyricsFetchTrigger.kt
 interface LyricsFetchTrigger {
-    fun enqueueFor(trackId: String)
+    fun enqueueFor(trackId: Long)
 }
 ```
 
