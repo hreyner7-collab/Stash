@@ -333,6 +333,23 @@ fun HomeScreen(
             }
         }
 
+        // ── Re-tagging library (metadata backfill progress) ──────────
+        // v0.9.35: surfaces MetadataBackfillWorker progress on upgrade
+        // so users know why disk IO / yt-dlp activity is happening. The
+        // banner renders Hidden in the steady state (post-backfill); the
+        // 2-second "Done" pulse self-acks via LaunchedEffect inside the
+        // composable.
+        if (uiState.metadataBackfillBanner !is com.stash.feature.home.banner.MetadataBackfillBannerState.Hidden) {
+            item {
+                Spacer(Modifier.height(6.dp))
+                com.stash.feature.home.banner.MetadataBackfillBanner(
+                    state = uiState.metadataBackfillBanner,
+                    onFinishedAcknowledged = viewModel::onMetadataBackfillFinishedAcknowledged,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
         // ── Mixes (split by source, each with a Play All button) ─────
         if (uiState.spotifyMixes.isNotEmpty() || uiState.youtubeMixes.isNotEmpty()) {
             item {

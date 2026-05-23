@@ -4,6 +4,7 @@ import com.stash.core.model.Playlist
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.SyncState
 import com.stash.core.model.Track
+import com.stash.feature.home.banner.MetadataBackfillBannerState
 import com.stash.feature.home.banner.WaitingForLosslessBannerState
 
 /**
@@ -95,6 +96,15 @@ data class HomeUiState(
      */
     val waitingForLosslessBanner: WaitingForLosslessBannerState =
         WaitingForLosslessBannerState.Hidden,
+
+    /**
+     * v0.9.35: state of the "re-tagging library" banner. Hidden in
+     * the steady state — only renders while [com.stash.data.download.backfill.MetadataBackfillWorker]
+     * is actively processing rows, and for a 2-second "Done" pulse
+     * after completion.
+     */
+    val metadataBackfillBanner: MetadataBackfillBannerState =
+        MetadataBackfillBannerState.Hidden,
 ) {
     /** Total liked songs across both sources. */
     val totalLikedCount: Int get() = spotifyLikedCount + youtubeLikedCount

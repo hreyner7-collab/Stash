@@ -30,8 +30,11 @@ import com.stash.data.download.lossless.LosslessRetryWorker
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.kennyy.KennyySource
 import com.stash.data.download.lossless.qobuz.QobuzSource
+import com.stash.data.download.backfill.MetadataBackfillState
+import com.stash.feature.home.banner.MetadataBackfillBannerState
 import com.stash.feature.home.banner.WaitingForLosslessBannerState
 import com.stash.feature.home.banner.bannerStateFor
+import com.stash.feature.home.banner.metadataBackfillBannerStateFor
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -93,6 +96,7 @@ class HomeViewModel @Inject constructor(
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
     private val streamingPreference: StreamingPreference,
+    private val metadataBackfillState: MetadataBackfillState,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -332,6 +336,26 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
+     * v0.9.35: drives [HomeUiState.metadataBackfillBanner]. Pure-mapped
+     * from [MetadataBackfillState.snapshot] so the banner sealed type
+     * doesn't have to plumb through the raw DataStore record. Hidden in
+     * the steady state (the dominant case post-backfill).
+     */
+    private val metadataBackfillBannerFlow: Flow<MetadataBackfillBannerState> =
+        metadataBackfillState.snapshot.map { metadataBackfillBannerStateFor(it) }
+
+    /**
+     * Bundles the two Home-banner flows ([bannerStateFlow] +
+     * [metadataBackfillBannerFlow]) into a single emission so the
+     * top-level [uiState] combine stays at its non-vararg-friendly arg
+     * count. Mirrors the [authStateFlow] precedent.
+     */
+    private val bannersInfoFlow: Flow<BannersInfo> = combine(
+        bannerStateFlow,
+        metadataBackfillBannerFlow,
+    ) { lossless, backfill -> BannersInfo(lossless, backfill) }
+
+    /**
      * Derives (spotifyConnected, youTubeConnected, lastFmPrompt,
      * losslessPrompt) from TokenManager + Last.fm session state +
      * lossless prefs. Bundled so the top-level combine stays at 5
@@ -358,7 +382,7 @@ class HomeViewModel @Inject constructor(
         sourceCountsFlow,
         _playlistSortOrder,
         tipJarRepository.state,
-        bannerStateFlow,
+        bannersInfoFlow,
     ) { args ->
         @Suppress("UNCHECKED_CAST")
         val musicData = args[0] as MusicData
@@ -370,7 +394,9 @@ class HomeViewModel @Inject constructor(
         val sourceCounts = args[3] as SourceCounts
         val playlistSortOrder = args[4] as PlaylistSortOrder
         val tipJar = args[5] as com.stash.core.data.tipjar.TipJarState
-        val bannerState = args[6] as WaitingForLosslessBannerState
+        val banners = args[6] as BannersInfo
+        val bannerState = banners.waitingForLossless
+        val metadataBackfillBanner = banners.metadataBackfill
         // Stash Mixes — recipe-driven, generated locally. Separate from
         // sync-imported Daily Mixes so the UI can label them distinctly.
         val stashMixes = musicData.playlists.filter {
@@ -429,6 +455,7 @@ class HomeViewModel @Inject constructor(
             hasEverSynced = syncStatus.lastSyncTime != null,
             tipJar = tipJar,
             waitingForLosslessBanner = bannerState,
+            metadataBackfillBanner = metadataBackfillBanner,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -477,6 +504,17 @@ class HomeViewModel @Inject constructor(
      */
     fun dismissWaitingForLosslessBanner() {
         _waitingBannerDismissed.value = true
+    }
+
+    /**
+     * v0.9.35: called by the Home re-tagging banner's `LaunchedEffect`
+     * after the 2-second "Done" pulse expires. Flips
+     * [MetadataBackfillState] back to IDLE, which causes the snapshot
+     * Flow to emit a [MetadataBackfillBannerState.Hidden] mapping and
+     * the banner vanishes from the screen.
+     */
+    fun onMetadataBackfillFinishedAcknowledged() {
+        viewModelScope.launch { metadataBackfillState.markFinishedAcknowledged() }
     }
 
     /**
@@ -921,4 +959,13 @@ private data class AuthInfo(
     val youTubeConnected: Boolean,
     val lastFmPrompt: LastFmPromptState?,
     val losslessPrompt: LosslessPromptState?,
+)
+
+/**
+ * Internal holder bundling the two Home-banner flows so the top-level
+ * combine can treat them as one positional arg (mirrors [AuthInfo]).
+ */
+private data class BannersInfo(
+    val waitingForLossless: WaitingForLosslessBannerState,
+    val metadataBackfill: MetadataBackfillBannerState,
 )
