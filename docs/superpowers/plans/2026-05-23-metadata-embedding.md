@@ -4,7 +4,7 @@
 
 **Goal:** Embed clean TITLE / ARTIST / ALBUMARTIST / ALBUM / ISRC / ENCODER tags plus cover-art picture into every downloaded audio file (yt-dlp + lossless paths), and one-shot backfill the existing library so files opened in Plex / Foobar / Symfonium / car USB no longer render blank. Closes [#76](https://github.com/rawnaldclark/Stash/issues/76) part 1 and [#90](https://github.com/rawnaldclark/Stash/issues/90).
 
-**Architecture:** Both download paths converge on `MetadataEmbedder.embedMetadata(file, track, art)`. A new `AlbumArtCache` lazily fetches the cover JPEG once per album into `cacheDir/albumart/`. A new `tracks.metadata_embedded_at` Room column (v26 → v27 migration) provides idempotency. `MetadataBackfillWorker` drains all `metadata_embedded_at IS NULL` rows once per binary version, driven by `MetadataBackfillScheduler` from `StashApp.onCreate`. A new independent banner field on `HomeUiState` surfaces progress, mirroring the existing `WaitingForLosslessBannerState` shape.
+**Architecture:** Both download paths converge on `MetadataEmbedder.embedMetadata(file, track, art)`. A new `AlbumArtCache` lazily fetches the cover JPEG once per album into `cacheDir/albumart/`. A new `tracks.metadata_embedded_at` Room column (v26 → v27 migration) provides idempotency. `MetadataBackfillWorker` drains all `metadata_embedded_at IS NULL` rows once per binary version, driven by `MetadataBackfillScheduler` from `StashApplication.onCreate`. A new independent banner field on `HomeUiState` surfaces progress, mirroring the existing `WaitingForLosslessBannerState` shape.
 
 **Tech Stack:** Kotlin / Hilt / Room / WorkManager / OkHttp / DataStore (Preferences) / Jetpack Compose / ffmpeg (bundled via youtubedl-android). Tests use JUnit4 + mockk + kotlinx-coroutines-test + Robolectric (for DataStore tests).
 
@@ -53,7 +53,8 @@
 - `feature/home/src/main/kotlin/com/stash/feature/home/HomeUiState.kt` — add `metadataBackfillBanner: MetadataBackfillBannerState = Hidden`
 - `feature/home/src/main/kotlin/com/stash/feature/home/HomeViewModel.kt` — combine `MetadataBackfillState.snapshot` into the existing assembly
 - `feature/home/src/main/kotlin/com/stash/feature/home/HomeScreen.kt` — render the new banner under `WaitingForLosslessBanner`
-- `app/src/main/kotlin/com/stash/app/StashApp.kt` — call `MetadataBackfillScheduler.scheduleIfNeeded()` from `onCreate` after the Hilt graph is up
+- `app/src/main/kotlin/com/stash/app/StashApplication.kt` — call `MetadataBackfillScheduler.scheduleIfNeeded()` from `onCreate` after the Hilt graph is up
+- `core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt` — register `StashDatabase.MIGRATION_26_27` in the `addMigrations(...)` chain
 - `app/build.gradle.kts` — bump `versionCode` and `versionName` to 0.9.35
 
 ---
@@ -338,6 +339,7 @@ Phase end state: schema bumped to 27, `tracks.metadata_embedded_at` column exist
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt`
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt`
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt` — **register the new migration here, not on StashDatabase**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/dao/TrackDao.kt`
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/mapper/TrackMapper.kt`
 - Test: `core/data/src/androidTest/kotlin/com/stash/core/data/db/Migration26To27Test.kt`
@@ -401,9 +403,16 @@ class TrackMapperMetadataFieldsTest {
         id = 1L, title = "", artist = "",
         albumArtist = albumArtist,
         metadataEmbeddedAt = metadataEmbeddedAt,
-        // ...fill remaining required TrackEntity params using existing test fixtures
-        // (search core/data/src/test for an existing TrackEntity stub helper before
-        //  hand-rolling — there's typically one in TrackEntityFactory or similar).
+        // TrackEntity has ~30 fields. Search core/data/src/test first
+        // for an existing factory (`TrackEntityFactory`,
+        // `stubTrackEntity`, or similar in any *Test.kt file) — most
+        // fields have @ColumnInfo defaultValues and Kotlin defaults so
+        // a minimal constructor call usually compiles. If you get
+        // "missing arg <fieldName>", read TrackEntity.kt line-by-line
+        // and supply empty/zero/false for every remaining required
+        // field. Do NOT add new defaults to TrackEntity itself just to
+        // shrink the call site — that would silently change schema
+        // generation.
     )
 }
 ```
@@ -440,13 +449,13 @@ Open `core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt`. A
     val metadataEmbeddedAt: Long? = null,
 ```
 
-- [ ] **Step 5: Bump the database version + add the migration**
+- [ ] **Step 5: Bump the database version + define the migration**
 
 Open `core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt`.
 
 Change `version = 26` to `version = 27`.
 
-Find where `MIGRATION_25_26` (or the latest existing migration) is defined and add the new migration alongside it:
+Find the `companion object` where the existing migrations are defined (`MIGRATION_3_4`, `MIGRATION_4_5`, … `MIGRATION_25_26`) and add the new migration:
 
 ```kotlin
 val MIGRATION_26_27 = object : Migration(26, 27) {
@@ -456,7 +465,17 @@ val MIGRATION_26_27 = object : Migration(26, 27) {
 }
 ```
 
-Register it on the database builder where the other migrations are listed (`.addMigrations(MIGRATION_25_26, MIGRATION_26_27, ...)`).
+- [ ] **Step 5b: Register the migration in `DatabaseModule.kt`**
+
+The migrations are **defined** on `StashDatabase` but **registered** in `core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt` via the `.addMigrations(...)` call on the `Room.databaseBuilder`. Without this registration the app crashes on first launch (the module deliberately does NOT call `fallbackToDestructiveMigration`).
+
+Find the `.addMigrations(...)` chain and append:
+
+```kotlin
+                StashDatabase.MIGRATION_26_27,
+```
+
+immediately after the last existing `StashDatabase.MIGRATION_25_26,` entry, preserving the trailing-comma + indentation style.
 
 - [ ] **Step 6: Update the mapper in both directions**
 
@@ -597,6 +616,7 @@ Expected: PASS (pre-existing failures aside).
 ```bash
 git add core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt \
         core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt \
+        core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt \
         core/data/src/main/kotlin/com/stash/core/data/db/dao/TrackDao.kt \
         core/data/src/main/kotlin/com/stash/core/data/mapper/TrackMapper.kt \
         core/data/schemas/com.stash.core.data.db.StashDatabase/27.json \
@@ -629,6 +649,14 @@ Phase end state: `AlbumArtCache` fetches + dedupes JPEGs; `MetadataEmbedder` wri
 **Files:**
 - Create: `data/download/src/main/kotlin/com/stash/data/download/files/AlbumArtCache.kt`
 - Test: `data/download/src/test/kotlin/com/stash/data/download/files/AlbumArtCacheTest.kt`
+
+- [ ] **Step 0: Verify the FileOrganizer methods the cache will reuse**
+
+```bash
+grep -n "getAlbumArtDir\|getAlbumArtFile" data/download/src/main/kotlin/com/stash/data/download/files/FileOrganizer.kt
+```
+
+Expected: two lines referencing `getAlbumArtDir(): File` and `getAlbumArtFile(albumId: String): File`. Confirmed exists in master at lines 65 + 68 — but verify in case the file drifted. If absent, the cache implementation has to define them itself; surface to the user before proceeding.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1568,13 +1596,16 @@ Phase end state: `MetadataBackfillState` and `BackfillVersionTracker` are persis
 - Create: `data/download/src/main/kotlin/com/stash/data/download/backfill/di/BackfillModule.kt`
 - Test: `data/download/src/test/kotlin/com/stash/data/download/backfill/MetadataBackfillStateTest.kt`
 
-- [ ] **Step 1: Survey the existing DataStore pattern**
+- [ ] **Step 1: Survey the existing DataStore pattern + test pattern**
 
 ```bash
 head -80 data/download/src/main/kotlin/com/stash/data/download/lossless/LosslessSourcePreferences.kt
+ls data/download/src/test/kotlin/com/stash/data/download/lossless/ | grep -i preferences
 ```
 
 Mirror the file/class shape: top-level `private val Context.dataStore = preferencesDataStore(name = "metadata_backfill_state")` extension, plus a `@Singleton` class with the public API.
+
+**Test isolation caveat:** `preferencesDataStore(name = ...)` is a delegate that caches a single static `SingleProcessDataStore` instance per process. Across Robolectric tests, that cache survives — instantiating a second `MetadataBackfillState(context)` in a later test against the same file path raises `IllegalStateException: There are multiple DataStores active for the same file`. The existing `LosslessSourcePreferences*Test` files in the same module already solved this. **Open one** (`LosslessSourcePreferencesYoutubeFallbackTest.kt` is a likely candidate per the build.gradle comment) and mirror its setup/teardown — typically a `@BeforeClass` that initialises the subject once, or a `@get:Rule` test rule that scopes the delegate per-test. Do not invent a new isolation strategy.
 
 - [ ] **Step 2: Write the failing test (Robolectric-driven)**
 
@@ -1891,18 +1922,35 @@ EOF
 - Create: `data/download/src/main/kotlin/com/stash/data/download/backfill/MetadataBackfillWorker.kt`
 - Test: `data/download/src/test/kotlin/com/stash/data/download/backfill/MetadataBackfillWorkerTest.kt`
 
+- [ ] **Step 0: Survey existing worker test patterns**
+
+```bash
+ls data/download/src/test/kotlin/com/stash/data/download/lossless/ | grep -i worker
+ls data/download/src/test/kotlin/com/stash/data/download/backfill/ 2>/dev/null
+```
+
+If `LosslessRetryWorkerTest.kt` exists in the lossless dir, **read it before writing the new test** — it's the precedent for testing a `@HiltWorker` with `@AssistedInject` in this project. The two viable strategies are:
+
+1. **Direct constructor instantiation:** `MetadataBackfillWorker(context, params, ...)` directly, bypassing the assisted factory. Works for `@AssistedInject` constructors because the assisted parameters (`context`, `params`) are positional. Use `TestListenableWorkerBuilder` only to manufacture the `params`.
+2. **TestListenableWorkerBuilder with a custom `WorkerFactory`:** more ceremony, used when you need to verify the Hilt factory wiring itself.
+
+Strategy 1 is correct for what we're testing here (behaviour, not wiring). Pick that and mirror `LosslessRetryWorkerTest` if it uses Strategy 1; otherwise document the deviation.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```kotlin
 class MetadataBackfillWorkerTest {
 
+    private val context: Context = ApplicationProvider.getApplicationContext()
     private val trackDao: TrackDao = mockk()
     private val metadataEmbedder: MetadataEmbedder = mockk()
     private val albumArtCache: AlbumArtCache = mockk()
     private val backfillState: MetadataBackfillState = mockk(relaxUnitFun = true)
 
-    private fun subject(context: Context, params: WorkerParameters) =
-        MetadataBackfillWorker(context, params, trackDao, metadataEmbedder, albumArtCache, backfillState)
+    private fun buildSubject(): MetadataBackfillWorker {
+        val params = TestListenableWorkerBuilder<MetadataBackfillWorker>(context).buildWorkerParameters()
+        return MetadataBackfillWorker(context, params, trackDao, metadataEmbedder, albumArtCache, backfillState)
+    }
 
     @Test fun `empty library returns success without doing work`() = runTest {
         coEvery { trackDao.observeTracksNeedingEmbedCount() } returns flowOf(0)
@@ -2076,19 +2124,21 @@ EOF
 
 **Files:**
 - Create: `data/download/src/main/kotlin/com/stash/data/download/backfill/MetadataBackfillScheduler.kt`
-- Modify: `app/src/main/kotlin/com/stash/app/StashApp.kt`
+- Modify: `app/src/main/kotlin/com/stash/app/StashApplication.kt`
 
 - [ ] **Step 1: Implement the scheduler**
+
+**WorkManager is not Hilt-injectable in this project.** Existing usages in `StashApplication.kt` (lines ~240, 276, 654, 677) all call `WorkManager.getInstance(applicationContext)` directly. Follow that pattern — inject `Context`, resolve WorkManager from it.
 
 ```kotlin
 @Singleton
 class MetadataBackfillScheduler @Inject constructor(
-    private val workManager: WorkManager,
+    @ApplicationContext private val context: Context,
     private val versionTracker: BackfillVersionTracker,
 ) {
     suspend fun scheduleIfNeeded() {
         if (!versionTracker.shouldRunForCurrentVersion()) return
-        workManager.enqueueUniqueWork(
+        WorkManager.getInstance(context).enqueueUniqueWork(
             MetadataBackfillWorker.UNIQUE_WORK_NAME,
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<MetadataBackfillWorker>()
@@ -2105,9 +2155,9 @@ class MetadataBackfillScheduler @Inject constructor(
 }
 ```
 
-- [ ] **Step 2: Wire it into `StashApp.onCreate`**
+- [ ] **Step 2: Wire it into `StashApplication.onCreate`**
 
-Open `app/src/main/kotlin/com/stash/app/StashApp.kt`. Add `@Inject lateinit var metadataBackfillScheduler: MetadataBackfillScheduler` (or, if the codebase already prefers Hilt entry-points for app-scope work, follow that precedent). Then in `onCreate()` after any existing Hilt-dependent calls, add:
+Open `app/src/main/kotlin/com/stash/app/StashApplication.kt`. Add `@Inject lateinit var metadataBackfillScheduler: MetadataBackfillScheduler`. Find the existing `applicationScope` (which exists as `CoroutineScope(SupervisorJob() + Dispatchers.IO)` — confirm by grepping). In `onCreate()` after any existing Hilt-dependent calls, add:
 
 ```kotlin
 // Auto-enqueue the v0.9.35 metadata backfill once per version.
@@ -2115,7 +2165,7 @@ Open `app/src/main/kotlin/com/stash/app/StashApp.kt`. Add `@Inject lateinit var 
 applicationScope.launch { metadataBackfillScheduler.scheduleIfNeeded() }
 ```
 
-If `applicationScope` doesn't exist by that name, use whatever the codebase's existing app-scope CoroutineScope is (search for `CoroutineScope(SupervisorJob())` in `StashApp.kt`).
+If `applicationScope` is named differently in the current source, grep for `CoroutineScope(SupervisorJob` in the file and use that name. Surface to the user if neither exists.
 
 - [ ] **Step 3: Build + installDebug to flush the Hilt graph**
 
@@ -2129,11 +2179,11 @@ Expected: APK installs on connected device. Check `adb logcat -d | grep -i 'meta
 
 ```bash
 git add data/download/src/main/kotlin/com/stash/data/download/backfill/MetadataBackfillScheduler.kt \
-        app/src/main/kotlin/com/stash/app/StashApp.kt
+        app/src/main/kotlin/com/stash/app/StashApplication.kt
 git commit -m "$(cat <<'EOF'
 feat(app): auto-enqueue MetadataBackfillWorker on app launch
 
-StashApp.onCreate kicks the scheduler once per binary version via
+StashApplication.onCreate kicks the scheduler once per binary version via
 BackfillVersionTracker. WorkManager is the queue; CONNECTED is the
 only constraint (no charging required — ffmpeg -c copy is mux-only,
 no transcode). Expedited with non-expedited fallback so user-
@@ -2490,7 +2540,12 @@ import java.io.File
 class MetadataEmbeddingIntegrationTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
-    private val fileOrganizer = FileOrganizer(context, /* storagePreference */ TODO())
+    // FileOrganizer is required by MetadataEmbedder's constructor but its
+    // methods aren't called during the embed pass — embedMetadata only
+    // uses `context.applicationInfo.nativeLibraryDir`. Mock it to satisfy
+    // the constructor and assert nothing in this test exercises its
+    // methods.
+    private val fileOrganizer: FileOrganizer = mockk(relaxed = true)
     private val versionProvider = object : AppVersionProvider {
         override val versionName: String = "0.9.35-test"
         override val versionCode: Int = 71
