@@ -116,6 +116,24 @@ class LrclibLyricsSourceTest {
         assertEquals(1, server.requestCount)
     }
 
+    @Test fun `regression — LRCLIB returns duration as JSON Number with decimal`() = runTest {
+        // Real LRCLIB responses come back as `"duration":265.0` (Number with a decimal),
+        // NOT `"duration":265` (bare int). Strict kotlinx.serialization throws when an
+        // Int? field tries to deserialize a fractional JSON Number, the runCatching in
+        // tryGet swallows the throw, and every successful fetch silently becomes a miss.
+        // Pinning here so we never regress: the DTO must accept Double for `duration`.
+        server.enqueue(MockResponse().setBody("""
+            {"id": 4578472, "trackName": "Carry On", "artistName": "Crosby, Stills, Nash & Young",
+             "albumName": "Deja Vu", "duration": 265.0, "instrumental": false,
+             "plainLyrics": "One morning I woke up and I knew",
+             "syncedLyrics": "[00:13.71] One morning I woke up and I knew"}
+        """.trimIndent()))
+        val result = source.resolve(query(durationMs = 265_000))
+        assertNotNull("decimal-duration response must deserialize", result)
+        assertEquals("4578472", result!!.sourceLyricsId)
+        assertEquals("[00:13.71] One morning I woke up and I knew", result.syncedLrc)
+    }
+
     private fun query(durationMs: Long?) = LyricsQuery(
         trackId = 1L,
         title = "Random",
