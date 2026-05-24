@@ -54,4 +54,6 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+    // TestListenableWorkerBuilder for the Task 8 worker tests.
+    testImplementation(libs.work.testing)
 }
