@@ -178,6 +178,9 @@ dependencies {
     // data:ytmusic provides AlbumSummary, used by SearchScreen/ArtistProfileScreen
     // callback signatures that StashNavHost wires up for Album Discovery.
     implementation(project(":data:ytmusic"))
+    // data:lyrics exposes LyricsBackfillScheduler for the v0.9.36 once-per-version
+    // auto-enqueue path wired in StashApplication.onCreate.
+    implementation(project(":data:lyrics"))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

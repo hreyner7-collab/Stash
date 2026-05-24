@@ -12,7 +12,18 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import javax.inject.Qualifier
 import javax.inject.Singleton
+
+/**
+ * Qualifier for the LRCLIB base URL [String] consumed by
+ * [com.stash.data.lyrics.source.LrclibLyricsSource]. A qualifier is
+ * required so Dagger can disambiguate from other module-level
+ * `@Provides String` bindings in the SingletonComponent graph.
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class LrclibBaseUrl
 
 /**
  * Hilt wiring for the `:data:lyrics` module.
@@ -62,5 +73,22 @@ abstract class LyricsModule {
         @Provides
         @Singleton
         fun provideClock(): Clock = SystemClock()
+
+        /**
+         * Base URL for the public LRCLIB API. Defined here (rather than
+         * baked into [LrclibLyricsSource] as a constructor default) so
+         * Hilt can satisfy the SingletonComponent String binding without
+         * tripping the "@Inject constructor String" missing-binding
+         * error that surfaces when the lyrics graph is materialised by
+         * the app's `:app:hiltJavaCompileDebug` task.
+         *
+         * Tests construct [LrclibLyricsSource] directly with a
+         * MockWebServer URL — the constructor default is preserved as a
+         * fallback so the test wiring doesn't change.
+         */
+        @Provides
+        @Singleton
+        @LrclibBaseUrl
+        fun provideLrclibBaseUrl(): String = LrclibLyricsSource.DEFAULT_BASE_URL
     }
 }

@@ -1,6 +1,7 @@
 package com.stash.data.lyrics.source
 
 import com.stash.core.common.AppVersionProvider
+import com.stash.data.lyrics.di.LrclibBaseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -14,7 +15,12 @@ import javax.inject.Singleton
 class LrclibLyricsSource @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val appVersion: AppVersionProvider,
-    private val baseUrl: String = DEFAULT_BASE_URL,
+    // Qualified so Hilt can resolve the SingletonComponent String binding
+    // without colliding with other module-level @Provides String. Default
+    // value is preserved for unit-test construction (see LrclibLyricsSourceTest)
+    // — Hilt overrides it with the `@Provides @LrclibBaseUrl` value in
+    // LyricsModule when the class is constructed through the graph.
+    @LrclibBaseUrl private val baseUrl: String = DEFAULT_BASE_URL,
 ) : LyricsSource {
 
     override val id: String = "lrclib"
