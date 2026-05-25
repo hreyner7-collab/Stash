@@ -29,7 +29,9 @@ import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_CODEC
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_ORIGIN
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_SAMPLE_RATE
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_DURATION_MS
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_YOUTUBE_ID
 import com.stash.core.model.TrackItem
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -872,7 +874,11 @@ class PlayerRepositoryImpl @Inject constructor(
                             .setArtworkUri(
                                 (track.albumArtPath ?: track.albumArtUrl)?.let { Uri.parse(it) }
                             )
-                            .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, track.id) })
+                            .setExtras(Bundle().apply {
+                                putLong(EXTRA_TRACK_ID, track.id)
+                                track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
+                                if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
+                            })
                             .build()
                     )
                     .build()
@@ -924,6 +930,8 @@ class PlayerRepositoryImpl @Inject constructor(
                         )
                         .setExtras(Bundle().apply {
                             putLong(EXTRA_TRACK_ID, track.id)
+                            track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
+                            if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
                             // Surface the actual format Qobuz served so Now Playing
                             // shows "FLAC · 24-bit/96 kHz" instead of the stale Room
                             // default ("opus") that streaming-only rows carry forever.
@@ -1225,7 +1233,11 @@ class PlayerRepositoryImpl @Inject constructor(
             .setArtworkUri(
                 (albumArtPath ?: albumArtUrl)?.toUri()
             )
-            .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, id) })
+            .setExtras(Bundle().apply {
+                putLong(EXTRA_TRACK_ID, id)
+                youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
+                if (durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, durationMs)
+            })
             .build()
 
         // Ensure file:// scheme so StashPlaybackService's URI validation passes.
@@ -1273,8 +1285,15 @@ class PlayerRepositoryImpl @Inject constructor(
             artist = meta.artist?.toString() ?: "",
             album = meta.albumTitle?.toString() ?: "",
             albumArtUrl = meta.artworkUri?.toString(),
-            // For non-library tracks, the mediaId is the YouTube videoId.
-            youtubeId = if (trackId == 0L) mediaId else null,
+            durationMs = extras?.getLong(EXTRA_TRACK_DURATION_MS, 0L) ?: 0L,
+            // For non-library tracks (id=0L), the mediaId is the YouTube
+            // videoId. For streaming-engine tracks (synthetic non-zero id),
+            // the videoId is carried explicitly in extras so downstream
+            // code (Now Playing's like-state observation, ensure-persisted
+            // upsert) can resolve identity without a real DB row
+            // (issue #105 follow-up).
+            youtubeId = extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
+                ?: if (trackId == 0L) mediaId else null,
             source = if (trackId == 0L) com.stash.core.model.MusicSource.YOUTUBE else com.stash.core.model.MusicSource.SPOTIFY,
             fileFormat = streamCodec ?: "opus",
             bitsPerSample = streamBitDepth,
