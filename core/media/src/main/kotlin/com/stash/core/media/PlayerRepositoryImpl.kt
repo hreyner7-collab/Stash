@@ -31,6 +31,7 @@ import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_SAMPLE_RATE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_DURATION_MS
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_IS_STREAMABLE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_YOUTUBE_ID
 import com.stash.core.model.TrackItem
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -240,13 +241,17 @@ class PlayerRepositoryImpl @Inject constructor(
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
     )
     /**
-     * Snackbar-targeted messages from playback flow ("Couldn't play this
-     * track right now."). Surfaced when [setQueue]'s tapped track can't
-     * be resolved by any source so the user knows the tap was received
-     * but the track is genuinely unavailable. Collected by Now Playing
-     * + playlist detail screens.
+     * Snackbar-targeted messages from playback flow:
+     *   - "Couldn't play this track right now." — [setQueue]'s tapped
+     *     track failed every resolver, surfaced so the user knows the
+     *     tap was received but the track is genuinely unavailable.
+     *   - "End of offline Mix" — the auto-advance silent-skip walked off
+     *     the end of the queue trying to find a playable item while the
+     *     device was offline (v0.9.37).
+     * Collected by Now Playing (forwarded into its own user-messages
+     * SharedFlow for Toast display) and the playlist detail screen.
      */
-    val userMessages: kotlinx.coroutines.flow.SharedFlow<String> =
+    override val userMessages: kotlinx.coroutines.flow.SharedFlow<String> =
         _userMessages.asSharedFlow()
 
     private val cascadeGuard = StreamErrorCascadeGuard()
@@ -878,6 +883,7 @@ class PlayerRepositoryImpl @Inject constructor(
                                 putLong(EXTRA_TRACK_ID, track.id)
                                 track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
                                 if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
+                                putBoolean(EXTRA_TRACK_IS_STREAMABLE, track.isStreamable)
                             })
                             .build()
                     )
@@ -932,6 +938,7 @@ class PlayerRepositoryImpl @Inject constructor(
                             putLong(EXTRA_TRACK_ID, track.id)
                             track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
                             if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
+                            putBoolean(EXTRA_TRACK_IS_STREAMABLE, track.isStreamable)
                             // Surface the actual format Qobuz served so Now Playing
                             // shows "FLAC · 24-bit/96 kHz" instead of the stale Room
                             // default ("opus") that streaming-only rows carry forever.
@@ -1035,6 +1042,19 @@ class PlayerRepositoryImpl @Inject constructor(
                 Log.w(TAG, "onMediaItemTransition landed in STATE_IDLE — defensive prepare()")
                 controller.prepare()
             }
+            // v0.9.37 (Mixes Stream-Only Task 6): silent-skip stream-only
+            // tracks while offline. Connectivity is dynamic — the user may
+            // toggle airplane mid-playback — so we can't filter the queue
+            // at build time; instead we observe each transition and skip
+            // forward when the now-current item is stream-only but the
+            // device can no longer reach it. Naturally tail-recursive
+            // through the listener: a single `seekToNextMediaItem` call
+            // re-fires `onMediaItemTransition` with the next item, which
+            // re-runs this guard until either a playable item is reached
+            // or `hasNextMediaItem()` returns false (handled in
+            // `maybeSkipOfflineStreamOnly`). No manual loop needed; this
+            // matches the existing `recoverOrStop` re-entrancy pattern.
+            mediaItem?.let { maybeSkipOfflineStreamOnly(controller, it) }
             updateState(controller)
         }
 
@@ -1141,6 +1161,51 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /**
+     * v0.9.37: silent-skip stream-only tracks that the queue would play
+     * but the user can't reach because the device is offline. Invoked
+     * from [Player.Listener.onMediaItemTransition] for every queue
+     * advance (whether driven by auto-advance, user skip, or a previous
+     * silent-skip).
+     *
+     * **Re-entrancy:** uses Media3's natural tail-recursion through the
+     * listener — a single [MediaController.seekToNextMediaItem] call
+     * re-fires `onMediaItemTransition`, which re-invokes this function
+     * with the new current item. No manual loop, no re-entrancy flag.
+     * Mirrors the existing [recoverOrStop] pattern used by `onPlayerError`.
+     *
+     * **Default safety:** when [EXTRA_TRACK_IS_STREAMABLE] is absent
+     * (legacy items, downloaded tracks, items built outside
+     * [buildMediaItemForTrack]), `getBoolean(..., false)` returns false
+     * and we treat the item as not-streamable → don't skip, let it play.
+     * Downloaded items always play regardless of network state.
+     *
+     * **End of queue:** when no next item exists, the player is paused
+     * (rather than [MediaController.stop]ed — pause preserves the queue
+     * for when connectivity returns) and a Snackbar is emitted via
+     * [_userMessages] so the user understands why the music stopped.
+     */
+    private fun maybeSkipOfflineStreamOnly(controller: MediaController, item: MediaItem) {
+        if (connectivity.isConnected()) return
+        val isStreamable = item.mediaMetadata.extras?.getBoolean(EXTRA_TRACK_IS_STREAMABLE, false) == true
+        if (!isStreamable) return
+        val failingTitle = item.mediaMetadata.title?.toString()
+        if (controller.hasNextMediaItem()) {
+            Log.i(
+                TAG,
+                "silent-skip: offline + stream-only '$failingTitle' — advancing to next item",
+            )
+            controller.seekToNextMediaItem()
+        } else {
+            Log.i(
+                TAG,
+                "silent-skip: offline + stream-only '$failingTitle' — end of queue, pausing",
+            )
+            controller.pause()
+            _userMessages.tryEmit("End of offline Mix")
+        }
+    }
+
+    /**
      * Reads the current state from the [MediaController] and publishes it to
      * [_playerState]. Also persists the current position via [PlaybackStateStore].
      */
@@ -1237,6 +1302,7 @@ class PlayerRepositoryImpl @Inject constructor(
                 putLong(EXTRA_TRACK_ID, id)
                 youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
                 if (durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, durationMs)
+                putBoolean(EXTRA_TRACK_IS_STREAMABLE, isStreamable)
             })
             .build()
 

@@ -100,6 +100,14 @@ class StashPlaybackService : MediaLibraryService() {
          */
         const val EXTRA_TRACK_DURATION_MS = "stash_track_duration_ms"
 
+        /**
+         * Extra key for the track's `isStreamable` flag. Carried alongside
+         * [EXTRA_TRACK_ID] so the auto-advance listener can decide whether
+         * to silent-skip a track that the queue would play but the user
+         * can't reach (stream-only + offline). v0.9.37.
+         */
+        const val EXTRA_TRACK_IS_STREAMABLE = "stash_track_is_streamable"
+
         // ── Streaming-format extras ───────────────────────────────────
         // Written into MediaMetadata.extras when a streaming-only track
         // gets its URL resolved (PlayerRepositoryImpl.buildMediaItemForTrack).

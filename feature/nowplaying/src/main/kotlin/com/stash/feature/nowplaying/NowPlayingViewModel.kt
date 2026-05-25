@@ -191,6 +191,7 @@ class NowPlayingViewModel @Inject constructor(
         observePlayerStateLive()
         observeUserPlaylists()
         observeStreamingHaltedEvents()
+        observePlayerUserMessages()
     }
 
     // ------------------------------------------------------------------
@@ -361,6 +362,21 @@ class NowPlayingViewModel @Inject constructor(
                     "Streaming is failing \u2014 try a downloaded track or check your connection"
                 )
             }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Forwards [PlayerRepository.userMessages] emissions into the screen's
+     * Toast channel. Source examples:
+     *  - "Couldn't play this track right now." (setQueue tap failure)
+     *  - "End of offline Mix" (v0.9.37 auto-advance silent-skip exhausted
+     *    the queue while offline)
+     * The player layer already paused playback when relevant; this
+     * observer is purely informational.
+     */
+    private fun observePlayerUserMessages() {
+        playerRepository.userMessages
+            .onEach { msg -> _userMessages.emit(msg) }
             .launchIn(viewModelScope)
     }
 
