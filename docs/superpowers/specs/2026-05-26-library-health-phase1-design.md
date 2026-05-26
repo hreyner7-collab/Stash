@@ -67,16 +67,16 @@ enum class DownloadFailureType {
 
 Keeping `DOWNLOAD_ERROR` as a legacy value alongside `UNKNOWN` would create two synonymous values and force every query and UI element to handle both. The rename is honest: existing rows really are "we don't know what specifically broke" — same semantic as the new `UNKNOWN`.
 
-### 1.3 DB migration (v9 → v10)
+### 1.3 DB migration (v28 → v29)
 
-`MIGRATION_9_10`:
+`StashDatabase` is currently at `version = 28`. `MIGRATION_28_29`:
 ```sql
 UPDATE download_queue
    SET failure_type = 'UNKNOWN'
  WHERE failure_type = 'DOWNLOAD_ERROR';
 ```
 
-`failure_type` is `TEXT NOT NULL DEFAULT 'NONE'` (already established by the v4→v5 migration), so the schema itself doesn't change — only data. No backfill of finer buckets for historical rows: they get `UNKNOWN` until they're retried, then the new classifier assigns the right bucket on the next failure.
+`failure_type` is `TEXT NOT NULL DEFAULT 'NONE'` (already established by an earlier migration), so the schema itself doesn't change — only data. No backfill of finer buckets for historical rows: they get `UNKNOWN` until they're retried, then the new classifier assigns the right bucket on the next failure.
 
 ---
 
@@ -226,8 +226,8 @@ data class FailedDownloadRow(
     val playlistName: String?,        // first sync-enabled playlist containing the track
     val failureType: DownloadFailureType,
     val errorMessage: String?,
-    val attempts: Int,
-    val updatedAt: Long,
+    val retryCount: Int,              // download_queue.retry_count — existing column
+    val completedAt: Long?,           // failure time — completed_at is stamped on terminal status writes
 )
 
 @Query("""
@@ -239,20 +239,76 @@ data class FailedDownloadRow(
              ORDER BY p.id ASC LIMIT 1) AS playlistName,
            dq.failure_type AS failureType,
            dq.error_message AS errorMessage,
-           dq.attempts, dq.updated_at AS updatedAt
+           dq.retry_count AS retryCount,
+           dq.completed_at AS completedAt
       FROM download_queue dq
       INNER JOIN tracks t ON t.id = dq.track_id
      WHERE dq.status = 'FAILED'
        AND dq.failure_type != 'NONE'
        AND dq.failure_type != 'NO_MATCH'
-     ORDER BY dq.updated_at DESC
+     ORDER BY COALESCE(dq.completed_at, dq.created_at) DESC
 """)
 fun getFailedDownloads(): Flow<List<FailedDownloadRow>>
 ```
 
-The `playlistName` subquery picks the first sync-enabled playlist arbitrarily (LIMIT 1). For tracks in multiple playlists, only one shows — a defensible simplification given the row is identified by track title + artist anyway.
+`download_queue` has no `updated_at` column — terminal status writes stamp `completed_at`, which doubles as "when did this fail" for FAILED rows. `retry_count` is the existing attempt counter. `playlistName` subquery picks the first sync-enabled playlist arbitrarily (LIMIT 1) — for tracks in multiple playlists, only one shows.
 
 `NO_MATCH` is explicitly excluded from this viewer (it lives in `FailedMatchesScreen`).
+
+#### Atomic claim helpers
+
+```kotlin
+/** Atomic single-row claim. Returns true iff the row was FAILED at claim time. */
+@Query("""
+    UPDATE download_queue
+       SET status = 'PENDING', error_message = NULL, failure_type = 'NONE'
+     WHERE id = :queueId AND status = 'FAILED'
+""")
+suspend fun atomicallyClaimForRetry(queueId: Long): Int   // Room returns affected-row count; >0 = claimed
+
+/** Group claim. Returns the queue ids that were claimed (so the VM can enqueue them). */
+@Transaction
+suspend fun atomicallyClaimGroupForRetry(type: DownloadFailureType): List<Long> {
+    val ids = selectFailedIdsByType(type)
+    if (ids.isNotEmpty()) resetToPending(ids)
+    return ids
+}
+
+@Query("SELECT id FROM download_queue WHERE status = 'FAILED' AND failure_type = :type")
+suspend fun selectFailedIdsByType(type: DownloadFailureType): List<Long>
+
+@Query("SELECT id FROM download_queue WHERE status = 'FAILED' AND failure_type NOT IN ('NONE', 'NO_MATCH')")
+suspend fun selectAllNonMatchFailedIds(): List<Long>
+
+@Query("UPDATE download_queue SET status='PENDING', error_message=NULL, failure_type='NONE' WHERE id IN (:ids)")
+suspend fun resetToPending(ids: List<Long>)
+
+/** All-rows claim. Same idempotency story as the group variant. */
+@Transaction
+suspend fun atomicallyClaimAllForRetry(): List<Long> {
+    val ids = selectAllNonMatchFailedIds()
+    if (ids.isNotEmpty()) resetToPending(ids)
+    return ids
+}
+
+/** Write a classified failure in one shot from the worker. */
+@Query("""
+    UPDATE download_queue
+       SET status = 'FAILED',
+           error_message = :errorMessage,
+           failure_type = :failureType,
+           completed_at = :completedAt
+     WHERE id = :queueId
+""")
+suspend fun markFailed(
+    queueId: Long,
+    errorMessage: String?,
+    failureType: DownloadFailureType,
+    completedAt: Long = System.currentTimeMillis(),
+)
+```
+
+The single-row variant uses Room's affected-row return; the batch variants return the claimed ids so the ViewModel can enqueue them through `SingleTrackDownloadEnqueuer` (§3.8). The race story holds either way: a row only gets claimed if it's still `FAILED` at the moment the `UPDATE` runs.
 
 ### 3.7 ViewModel
 
@@ -271,8 +327,8 @@ class FailedDownloadsViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FailedDownloadsUiState.Loading)
 
     fun retry(queueId: Long) = viewModelScope.launch {
-        val claimed = downloadQueueDao.atomicallyClaimForRetry(queueId)
-        if (claimed) downloadEnqueuer.enqueue(queueId)
+        val rowsAffected = downloadQueueDao.atomicallyClaimForRetry(queueId)
+        if (rowsAffected > 0) downloadEnqueuer.enqueue(queueId)
     }
 
     fun retryGroup(type: DownloadFailureType) = viewModelScope.launch {
@@ -286,10 +342,13 @@ class FailedDownloadsViewModel @Inject constructor(
     }
 
     fun block(trackId: Long) = viewModelScope.launch {
-        blocklistGuard.blockByTrackId(trackId)
+        val track = trackDao.getById(trackId) ?: return@launch
+        blocklistGuard.block(track, BlockSource.FAILED_DOWNLOADS)
     }
 }
 ```
+
+A new `BlockSource.FAILED_DOWNLOADS` enum value is added in `BlocklistGuard.kt` (the existing enum already has `NOW_PLAYING, CONTEXT_MENU, PLAYLIST_DELETE, MIGRATION_V19, INTEGRITY_WORKER, OTHER`). The ViewModel resolves `TrackEntity` from the trackId before calling `block(track, source)` — that matches the existing `BlocklistGuard.block` signature exactly. No new convenience wrapper on `BlocklistGuard` (the resolve-then-call pattern is local to this VM).
 
 ### 3.8 Single-track download path
 
@@ -318,7 +377,16 @@ Two implementations:
 
 ### 4.2 Probe invocation
 
-Sync entrypoint (`SyncOrchestrator` or equivalent worker chain head) runs probes in parallel for every connected source before the diff pass. Aggregate result becomes a `Flow<AuthExpiryState>` on the sync repository:
+The sync chain is `PlaylistFetchWorker → DiffWorker → TrackDownloadWorker → SyncFinalizeWorker`, scheduled by `SyncScheduler` as a unique work chain (`stash_daily_sync`). `SyncStateManager` already exposes an `onAuthenticating()` phase that maps perfectly to where the probe runs.
+
+The probe lives at the head of `PlaylistFetchWorker`, before any playlist fetch IO:
+
+1. `syncStateManager.onAuthenticating()`
+2. For each connected source, call its `AuthHealthProbe.isExpired()` in parallel.
+3. Always call `syncStateManager.onAuthExpiryProbed(state)` once the probes resolve. If `state.anyExpired` is true, return `Result.failure()` so the chain short-circuits — no diff, no download, run aborts cleanly.
+4. Otherwise: proceed to `syncStateManager.onFetchingPlaylists()` and the existing fetch path.
+
+#### 4.2.1 SyncStateManager additions
 
 ```kotlin
 data class AuthExpiryState(
@@ -327,9 +395,15 @@ data class AuthExpiryState(
 ) {
     val anyExpired: Boolean get() = spotifyExpired || youtubeExpired
 }
+
+// New on SyncStateManager:
+private val _authExpiry = MutableStateFlow(AuthExpiryState(false, false))
+val authExpiry: StateFlow<AuthExpiryState> = _authExpiry.asStateFlow()
+
+fun onAuthExpiryProbed(state: AuthExpiryState) { _authExpiry.value = state }
 ```
 
-If any source is expired, the sync run aborts cleanly (no download attempts that would create AUTH_EXPIRED rows for a known-bad cookie). The auth state is what the banner watches.
+The banner subscribes to `authExpiry`. A successful re-auth (handled by the existing connector flow) clears the flag for that source — the banner disappears with no extra plumbing.
 
 ### 4.3 Banner
 
@@ -375,7 +449,7 @@ core/model/
   └── DownloadFailureType.kt              # enum expansion
 
 core/data/
-  ├── db/StashDatabase.kt                  # version bump 9 → 10, Migration_9_10
+  ├── db/StashDatabase.kt                  # version bump 28 → 29, MIGRATION_28_29
   └── db/dao/DownloadQueueDao.kt           # +getFailedDownloads(), +atomic claim helpers, +markFailed()
 
 data/download/
@@ -388,9 +462,9 @@ data/download/
   └── files/MetadataEmbedder.kt                 # Opus branch rewrite (#95)
 
 core/data/sync/
-  └── workers/TrackDownloadWorker.kt       # wire classifier at every failure site
-  └── workers/SyncOrchestrator(or equivalent) # +AuthHealthProbe invocation at sync start
-  └── repository/SyncRepository(or equivalent) # +AuthExpiryState flow
+  ├── workers/TrackDownloadWorker.kt       # wire classifier at every errorMessage = … site
+  ├── workers/PlaylistFetchWorker.kt       # +AuthHealthProbe invocation at chain head
+  └── SyncStateManager.kt                  # +authExpiry: StateFlow<AuthExpiryState>, +onAuthExpiryProbed()
 
 feature/sync/
   ├── FailedDownloadsScreen.kt             # new — composable
@@ -416,7 +490,7 @@ app/
 
 ### 7.2 Migration test
 
-`StashDatabaseMigrationTest.MIGRATION_9_10_rewrites_DOWNLOAD_ERROR_to_UNKNOWN` — seed v9 with a row carrying `failure_type='DOWNLOAD_ERROR'`, run migration, assert it's `UNKNOWN`.
+`StashDatabaseMigrationTest.MIGRATION_28_29_rewrites_DOWNLOAD_ERROR_to_UNKNOWN` — seed v28 with a row carrying `failure_type='DOWNLOAD_ERROR'`, run migration, assert it's `UNKNOWN`.
 
 ### 7.3 Integration test
 
@@ -452,7 +526,7 @@ After each PR lands, install on real device (per `feedback_install_after_fix.md`
 
 - v0.9.38 ships with a Failed Downloads card in the Sync tab. Tapping it lands on a grouped viewer (6 buckets) with per-row Retry + Block.
 - Every TrackDownloadWorker failure path routes through `DownloadFailureClassifier` and writes a typed `failure_type` to `download_queue`.
-- DB migration v9 → v10 converts every existing `DOWNLOAD_ERROR` row to `UNKNOWN`.
+- DB migration v28 → v29 converts every existing `DOWNLOAD_ERROR` row to `UNKNOWN`.
 - Auth probe runs at every sync start; sync aborts cleanly if any connected source is expired; `AuthExpiredBanner` appears above `SyncStatusCard` until the user re-auths.
 - Opus downloads carry an embedded front-cover picture readable by Plex / Foobar / Symfonium / car stereo. Integration test passes.
 - Per-row tap-to-expand reveals the raw error and the failed-attempt count.
