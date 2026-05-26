@@ -395,12 +395,13 @@ class TrackDownloadWorker @AssistedInject constructor(
                                             causeChain = emptyList(),
                                         )
                                     )
+                                    val truncated = outcome.error.take(1000)
                                     downloadQueueDao.markFailed(
                                         queueId = queueItem.id,
-                                        errorMessage = outcome.error.take(1000),
+                                        errorMessage = truncated,
                                         failureType = type,
                                     )
-                                    firstError.compareAndSet(null, outcome.error.take(500))
+                                    firstError.compareAndSet(null, truncated)
                                     failedCount.incrementAndGet()
                                 }
                                 is TrackDownloadOutcome.Deferred -> {
@@ -415,7 +416,11 @@ class TrackDownloadWorker @AssistedInject constructor(
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to download track ${queueItem.trackId}", e)
-                            val causeChain = generateSequence(e as Throwable?) { it.cause }
+                            // Cycle-safe cause-chain extraction: Throwable.getCause() can
+                            // return `this` or form cycles, which would hang generateSequence
+                            // and OOM .toList(). Guard with self-reference check + depth cap.
+                            val causeChain = generateSequence<Throwable>(e) { it.cause.takeIf { c -> c !== it } }
+                                .take(16)
                                 .map { it::class.java.simpleName }
                                 .toList()
                             val type = classifier.classify(

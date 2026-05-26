@@ -58,6 +58,14 @@ class DownloadFailureClassifierTest {
         assertEquals(DownloadFailureType.FFMPEG_ERROR, result)
     }
 
+    @Test fun `ffmpeg exit code at DOWNLOADING maps to FFMPEG_ERROR`() {
+        val result = classifier.classify(FailureContext(
+            phase = DownloadPhase.DOWNLOADING,
+            errorText = "ffmpeg exited with code 234: muxer not found",
+        ))
+        assertEquals(DownloadFailureType.FFMPEG_ERROR, result)
+    }
+
     @Test fun `ENOSPC at STORAGE phase maps to STORAGE_ERROR`() {
         val result = classifier.classify(FailureContext(
             phase = DownloadPhase.STORAGE,

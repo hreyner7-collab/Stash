@@ -32,9 +32,9 @@ class DownloadFailureClassifier @Inject constructor() {
         if (NETWORK_TEXT.any { it in text }) return DownloadFailureType.NETWORK
         if (causes.any { it in NETWORK_CAUSES }) return DownloadFailureType.NETWORK
 
-        // 4. ffmpeg (only meaningful at processing phase)
-        if (ctx.phase == DownloadPhase.PROCESSING && FFMPEG_TEXT.any { it in text })
-            return DownloadFailureType.FFMPEG_ERROR
+        // 4. ffmpeg — text patterns are specific enough that phase gating
+        // isn't needed (worker can't distinguish sub-phases anyway).
+        if (FFMPEG_TEXT.any { it in text }) return DownloadFailureType.FFMPEG_ERROR
 
         // 5. Storage
         if (ctx.phase == DownloadPhase.STORAGE) return DownloadFailureType.STORAGE_ERROR
