@@ -1,4 +1,4 @@
-package com.stash.data.download.classifier
+package com.stash.core.data.sync.classifier
 
 /**
  * Phase of the download lifecycle a failure surfaced in. The classifier

@@ -23,6 +23,9 @@ import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.data.sync.SyncStateManager
 import com.stash.core.data.sync.TrackDownloadOutcome
 import com.stash.core.data.sync.TrackDownloader
+import com.stash.core.data.sync.classifier.DownloadFailureClassifier
+import com.stash.core.data.sync.classifier.DownloadPhase
+import com.stash.core.data.sync.classifier.FailureContext
 import com.stash.core.model.DownloadFailureType
 import com.stash.core.model.DownloadStatus
 import com.stash.core.model.SyncState
@@ -55,6 +58,7 @@ class TrackDownloadWorker @AssistedInject constructor(
     private val audioDurationExtractor: AudioDurationExtractor,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val classifier: DownloadFailureClassifier,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -232,10 +236,19 @@ class TrackDownloadWorker @AssistedInject constructor(
                             val trackEntity = trackDao.getById(queueItem.trackId)
                             if (trackEntity == null) {
                                 Log.w(TAG, "Track ${queueItem.trackId} not found in DB, skipping")
-                                downloadQueueDao.updateStatus(
-                                    id = queueItem.id,
-                                    status = DownloadStatus.FAILED,
-                                    errorMessage = "Track not found in database",
+                                val err = "Track not found in database"
+                                val type = classifier.classify(
+                                    FailureContext(
+                                        phase = DownloadPhase.MATCHING,
+                                        errorText = err,
+                                        httpStatus = null,
+                                        causeChain = emptyList(),
+                                    )
+                                )
+                                downloadQueueDao.markFailed(
+                                    queueId = queueItem.id,
+                                    errorMessage = err.take(1000),
+                                    failureType = type,
                                 )
                                 failedCount.incrementAndGet()
                                 return@launch
@@ -374,11 +387,18 @@ class TrackDownloadWorker @AssistedInject constructor(
                                 is TrackDownloadOutcome.Failed -> {
                                     Log.e(TAG, "Download failed for ${track.artist} - ${track.title}: ${outcome.error}")
                                     downloadQueueDao.incrementRetryCount(queueItem.id)
-                                    downloadQueueDao.updateStatus(
-                                        id = queueItem.id,
-                                        status = DownloadStatus.FAILED,
-                                        failureType = DownloadFailureType.UNKNOWN,
-                                        errorMessage = outcome.error.take(500),
+                                    val type = classifier.classify(
+                                        FailureContext(
+                                            phase = DownloadPhase.DOWNLOADING,
+                                            errorText = outcome.error,
+                                            httpStatus = null,
+                                            causeChain = emptyList(),
+                                        )
+                                    )
+                                    downloadQueueDao.markFailed(
+                                        queueId = queueItem.id,
+                                        errorMessage = outcome.error.take(1000),
+                                        failureType = type,
                                     )
                                     firstError.compareAndSet(null, outcome.error.take(500))
                                     failedCount.incrementAndGet()
@@ -395,10 +415,21 @@ class TrackDownloadWorker @AssistedInject constructor(
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to download track ${queueItem.trackId}", e)
-                            downloadQueueDao.updateStatus(
-                                id = queueItem.id,
-                                status = DownloadStatus.FAILED,
-                                errorMessage = e.message,
+                            val causeChain = generateSequence(e as Throwable?) { it.cause }
+                                .map { it::class.java.simpleName }
+                                .toList()
+                            val type = classifier.classify(
+                                FailureContext(
+                                    phase = DownloadPhase.DOWNLOADING,
+                                    errorText = e.message,
+                                    httpStatus = null,
+                                    causeChain = causeChain,
+                                )
+                            )
+                            downloadQueueDao.markFailed(
+                                queueId = queueItem.id,
+                                errorMessage = e.message?.take(1000),
+                                failureType = type,
                             )
                             failedCount.incrementAndGet()
                         }

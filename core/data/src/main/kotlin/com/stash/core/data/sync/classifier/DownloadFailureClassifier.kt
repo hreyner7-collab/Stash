@@ -1,4 +1,4 @@
-package com.stash.data.download.classifier
+package com.stash.core.data.sync.classifier
 
 import android.util.Log
 import com.stash.core.model.DownloadFailureType
