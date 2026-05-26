@@ -39,6 +39,32 @@ cd ../MP3APK-v0938
 
 Expected: BUILD SUCCESSFUL. If not, stop and fix before continuing.
 
+- [ ] **PF-4: Audit `TrackDownloadWorker` for single-track input mode**
+
+```bash
+grep -n "KEY_QUEUE_ID\|inputData\|getLong\(\"" \
+  core/data/src/main/kotlin/com/stash/core/data/sync/workers/TrackDownloadWorker.kt
+```
+
+Current state (verified 2026-05-26): the worker has `KEY_SYNC_ID, KEY_DOWNLOADED, KEY_FAILED` but no `KEY_QUEUE_ID`. `doWork()` reads the queue from the database, not from input data. A new single-track input mode must be added in **Task 9.5** below before `SingleTrackDownloadEnqueuer` (Task 9) is wired.
+
+- [ ] **PF-5: Verify androidTest/test layout in `core/data`**
+
+```bash
+ls core/data/src/    # expect: main, test  (NO androidTest directory)
+grep "room-testing\|androidx.test" core/data/build.gradle.kts
+```
+
+Verified: `core/data` has no `androidTest/`. JVM unit tests in `test/` already depend on `androidx.room:room-testing:2.7.1` and `androidx.test:core:1.6.1`. **Migration tests in this plan run as JVM unit tests via Robolectric — not instrumented androidTest.** This avoids needing to scaffold a new androidTest source set + instrumentation runner.
+
+- [ ] **PF-6: Confirm module dependency direction for AuthHealthProbe placement**
+
+```bash
+grep "project(" data/download/build.gradle.kts | head
+```
+
+Verified: `data/download` depends on `core/data` (one-way). Therefore `AuthHealthProbe` interface + both impls **live in `core/data/sync/auth/`** (not `data/download`). `core/data` already depends on `data/spotify` and `data/ytmusic` via existing sync workers, so the impls can reach `SpotifyApiClient` and `YTMusicApiClient` from there. The Phase 1 spec text uses `data/download/.../auth/` — substitute the `core/data/.../sync/auth/` package path when reading the spec.
+
 ---
 
 ## PR 1 — Failed Downloads viewer + Auth probe
@@ -387,43 +413,71 @@ git commit -m "feat(download): add DownloadFailureClassifier with 6-rule pattern
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt`
-- Locate or create: `core/data/src/androidTest/kotlin/com/stash/core/data/db/StashDatabaseMigrationTest.kt`
+- Create: `core/data/src/test/kotlin/com/stash/core/data/db/StashDatabaseMigrationTest.kt` (JVM unit test, runs under Robolectric — `core/data` has no `androidTest/`)
 
-- [ ] **Step 1: Find the existing migration test class**
+- [ ] **Step 1: Confirm test deps**
 
 ```bash
-find core/data/src/androidTest -name "StashDatabaseMigrationTest*" 2>/dev/null
+grep -E "room-testing|androidx.test:core|robolectric" core/data/build.gradle.kts
 ```
 
-If it exists, append the test below. If not, create the file with the standard `MigrationTestHelper` boilerplate from prior migration tests in the project (read the most recent migration test as a template).
+Expected: `androidx.room:room-testing:2.7.1`, `androidx.test:core:1.6.1`, `androidx.test.ext:junit:1.2.1` already on `testImplementation`. If `robolectric` isn't on `testImplementation`, add `testImplementation(libs.robolectric)` (the version catalog should already have `robolectric` — check `gradle/libs.versions.toml`; if missing, add `robolectric = "4.13"` to `[versions]` and `robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }` to `[libraries]`).
 
 - [ ] **Step 2: Write the failing migration test**
 
 ```kotlin
-@Test
-fun migration_28_29_rewrites_DOWNLOAD_ERROR_to_UNKNOWN() {
-    helper.createDatabase(TEST_DB, 28).apply {
-        execSQL("""
-            INSERT INTO download_queue
-                (id, track_id, status, failure_type, retry_count, created_at)
-            VALUES
-                (1, 1, 'FAILED', 'DOWNLOAD_ERROR', 0, ${System.currentTimeMillis()})
-        """.trimIndent())
-        close()
-    }
+package com.stash.core.data.db
 
-    val db = helper.runMigrationsAndValidate(TEST_DB, 29, true, StashDatabase.MIGRATION_28_29)
-    db.query("SELECT failure_type FROM download_queue WHERE id = 1").use { c ->
-        assertTrue(c.moveToFirst())
-        assertEquals("UNKNOWN", c.getString(0))
+import androidx.room.testing.MigrationTestHelper
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+
+@RunWith(AndroidJUnit4::class)
+@Config(application = android.app.Application::class)
+class StashDatabaseMigrationTest {
+
+    private val TEST_DB = "migration-test-db"
+
+    @get:Rule
+    val helper = MigrationTestHelper(
+        instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation(),
+        databaseClass = StashDatabase::class.java,
+    )
+
+    @Test
+    fun migration_28_29_rewrites_DOWNLOAD_ERROR_to_UNKNOWN() {
+        helper.createDatabase(TEST_DB, 28).apply {
+            execSQL(
+                "INSERT INTO download_queue " +
+                "(id, track_id, status, failure_type, retry_count, created_at) " +
+                "VALUES (1, 1, 'FAILED', 'DOWNLOAD_ERROR', 0, ${System.currentTimeMillis()})"
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            TEST_DB, 29, true, StashDatabase.MIGRATION_28_29,
+        )
+        db.query("SELECT failure_type FROM download_queue WHERE id = 1").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("UNKNOWN", c.getString(0))
+        }
     }
 }
 ```
 
+If `MigrationTestHelper` requires a `FrameworkSQLiteOpenHelperFactory` argument in this Room version, supply `androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory()` as the third constructor arg.
+
 - [ ] **Step 3: Run test — expect FAIL**
 
 ```bash
-./gradlew :core:data:connectedDebugAndroidTest --tests "*StashDatabaseMigrationTest.migration_28_29*"
+./gradlew :core:data:testDebugUnitTest --tests "*StashDatabaseMigrationTest.migration_28_29*"
 ```
 
 Expected: FAIL (migration not defined).
@@ -447,7 +501,7 @@ Then register `MIGRATION_28_29` in the `addMigrations(...)` call in `DatabaseMod
 - [ ] **Step 5: Run test — expect PASS**
 
 ```bash
-./gradlew :core:data:connectedDebugAndroidTest --tests "*StashDatabaseMigrationTest.migration_28_29*"
+./gradlew :core:data:testDebugUnitTest --tests "*StashDatabaseMigrationTest.migration_28_29*"
 ```
 
 - [ ] **Step 6: Generate the new schema JSON**
@@ -462,11 +516,12 @@ This should produce `core/data/schemas/com.stash.core.data.db.StashDatabase/29.j
 
 ```bash
 git add core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt \
-        core/data/src/androidTest/kotlin/com/stash/core/data/db/StashDatabaseMigrationTest.kt \
-        core/data/schemas/com.stash.core.data.db.StashDatabase/29.json \
-        core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt
+        core/data/src/test/kotlin/com/stash/core/data/db/StashDatabaseMigrationTest.kt \
+        core/data/schemas/com.stash.core.data.db.StashDatabase/29.json
 git commit -m "feat(db): MIGRATION_28_29 — DOWNLOAD_ERROR -> UNKNOWN"
 ```
+
+(If a `DatabaseModule.kt` exists and needed updating for the new migration, include it in the `git add`. Grep for `addMigrations` to verify whether the migration list is in `StashDatabase.kt` itself or a separate Hilt module.)
 
 ---
 
@@ -474,12 +529,35 @@ git commit -m "feat(db): MIGRATION_28_29 — DOWNLOAD_ERROR -> UNKNOWN"
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/dao/DownloadQueueDao.kt`
-- Create: `core/data/src/androidTest/kotlin/com/stash/core/data/db/dao/DownloadQueueDaoFailedDownloadsTest.kt`
+- Create: `core/data/src/test/kotlin/com/stash/core/data/db/dao/DownloadQueueDaoFailedDownloadsTest.kt` (JVM test under Robolectric)
+
+**Note on existing `updateStatus`:** the DAO already has `updateStatus(id, status, errorMessage, completedAt, failureType, rejectedVideoId)`. The new `markFailed` introduced here is a **thin wrapper** that delegates to `updateStatus(... rejectedVideoId = null)` so we preserve the row's `rejected_video_id` story (rejected matches keep their pointer for `FailedMatchesScreen`'s flagged-track flow). DO NOT remove or replace `updateStatus` — other call sites still use it.
 
 - [ ] **Step 1: Write the failing DAO test**
 
 ```kotlin
+package com.stash.core.data.db.dao
+
+import android.content.Context
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.stash.core.data.db.StashDatabase
+import com.stash.core.model.DownloadFailureType
+import com.stash.core.model.DownloadStatus
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+
 @RunWith(AndroidJUnit4::class)
+@Config(application = android.app.Application::class)
 class DownloadQueueDaoFailedDownloadsTest {
 
     private lateinit var db: StashDatabase
@@ -536,7 +614,7 @@ class DownloadQueueDaoFailedDownloadsTest {
 - [ ] **Step 2: Run test — expect compile failure (new methods missing)**
 
 ```bash
-./gradlew :core:data:connectedDebugAndroidTest --tests "*DownloadQueueDaoFailedDownloadsTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*DownloadQueueDaoFailedDownloadsTest*"
 ```
 
 - [ ] **Step 3: Add the new query methods to `DownloadQueueDao`**
@@ -607,38 +685,46 @@ suspend fun atomicallyClaimAllForRetry(): List<Long> {
     return ids
 }
 
-@Query("""
-    UPDATE download_queue
-       SET status = 'FAILED',
-           error_message = :errorMessage,
-           failure_type = :failureType,
-           completed_at = :completedAt
-     WHERE id = :queueId
-""")
+/**
+ * Thin wrapper over the existing [updateStatus] — sets status=FAILED + error
+ * + classified failure_type + completed_at in one place, while leaving the
+ * existing updateStatus contract (which supports rejected_video_id for the
+ * NO_MATCH lane) untouched. Pass rejectedVideoId=null because the classified-
+ * failure caller has no rejected match to record.
+ */
 suspend fun markFailed(
     queueId: Long,
     errorMessage: String?,
     failureType: DownloadFailureType,
     completedAt: Long = System.currentTimeMillis(),
-)
+) {
+    updateStatus(
+        id = queueId,
+        status = DownloadStatus.FAILED,
+        errorMessage = errorMessage,
+        completedAt = completedAt,
+        failureType = failureType,
+        rejectedVideoId = null,
+    )
+}
 
 @Query("SELECT * FROM download_queue WHERE id = :id LIMIT 1")
 suspend fun getById(id: Long): DownloadQueueEntity?
 ```
 
-If `getById` already exists in the interface (likely from an earlier task), don't duplicate it. If `@Transaction` import is missing at the top of the file, add `import androidx.room.Transaction`.
+`markFailed` is a default-method on the `interface` — Room accepts non-`@Query` `suspend` methods inside `@Dao` interfaces as long as they call only other DAO methods. If `getById` already exists in the interface (likely from earlier work), don't duplicate it. If `@Transaction` import is missing at the top of the file, add `import androidx.room.Transaction`. If `DownloadStatus` isn't already imported, add `import com.stash.core.model.DownloadStatus`.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
 ```bash
-./gradlew :core:data:connectedDebugAndroidTest --tests "*DownloadQueueDaoFailedDownloadsTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*DownloadQueueDaoFailedDownloadsTest*"
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add core/data/src/main/kotlin/com/stash/core/data/db/dao/DownloadQueueDao.kt \
-        core/data/src/androidTest/kotlin/com/stash/core/data/db/dao/DownloadQueueDaoFailedDownloadsTest.kt
+        core/data/src/test/kotlin/com/stash/core/data/db/dao/DownloadQueueDaoFailedDownloadsTest.kt
 git commit -m "feat(db): add FailedDownloadRow query + atomic claim/markFailed helpers"
 ```
 
@@ -649,9 +735,21 @@ git commit -m "feat(db): add FailedDownloadRow query + atomic claim/markFailed h
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/TrackDownloadWorker.kt`
 
-- [ ] **Step 1: Read the file**
+- [ ] **Step 1: Read the file + grep for failure call sites**
 
-Open `TrackDownloadWorker.kt` and find every call site that writes `errorMessage = ...` (per the earlier audit: lines ~238, 368, 381, 401, 451, 477 — line numbers may have drifted).
+```bash
+grep -n "errorMessage = \|errorMessage =$" \
+  core/data/src/main/kotlin/com/stash/core/data/sync/workers/TrackDownloadWorker.kt
+```
+
+You should see ~6 occurrences. Each is a call to `downloadQueueDao.updateStatus(...)` (or similar) that sets `status = FAILED`. Mentally map each one to the right `DownloadPhase`:
+
+| Call-site context | Phase |
+|---|---|
+| Track-not-in-database / search-yielded-nothing | MATCHING |
+| yt-dlp non-zero exit / streaming HTTP error / cookie issue | DOWNLOADING |
+| ffmpeg post-processing exit | PROCESSING |
+| SAF unreachable / FileNotFound / ENOSPC | STORAGE |
 
 - [ ] **Step 2: Add the classifier dependency**
 
@@ -736,23 +834,99 @@ git commit -m "feat(blocklist): add FAILED_DOWNLOADS BlockSource value"
 
 ---
 
-### Task 9: Create `SingleTrackDownloadEnqueuer`
+### Task 9: Add single-track input mode to `TrackDownloadWorker`
 
 **Files:**
-- Create: `data/download/src/main/kotlin/com/stash/data/download/single/SingleTrackDownloadEnqueuer.kt`
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/TrackDownloadWorker.kt`
 
-- [ ] **Step 1: Inspect how `TrackDownloadWorker` is normally enqueued**
+The worker currently always reads its work units from `download_queue` based on sync state. For the Failed Downloads retry path we need a parallel mode: when `inputData.getLong(KEY_QUEUE_ID, -1L) != -1L`, the worker processes exactly that one queue row.
 
-```bash
-grep -rn "TrackDownloadWorker" --include="*.kt" core/data/src/main/kotlin/com/stash/core/data/sync/ | head -10
-```
+- [ ] **Step 1: Add the constant**
 
-Find the existing call that constructs a `OneTimeWorkRequest` with a `queueId` input data key.
-
-- [ ] **Step 2: Write the enqueuer**
+In the `companion object` next to `KEY_SYNC_ID, KEY_DOWNLOADED, KEY_FAILED`:
 
 ```kotlin
-package com.stash.data.download.single
+const val KEY_QUEUE_ID = "queue_id"
+```
+
+- [ ] **Step 2: Add an early branch in `doWork()`**
+
+Right after the foreground-info promotion and before the existing chain-mode logic kicks off, add:
+
+```kotlin
+val singleQueueId = inputData.getLong(KEY_QUEUE_ID, -1L)
+if (singleQueueId != -1L) {
+    return runSingleTrackMode(singleQueueId)
+}
+```
+
+- [ ] **Step 3: Implement `runSingleTrackMode`**
+
+```kotlin
+private suspend fun runSingleTrackMode(queueId: Long): Result {
+    val entry = downloadQueueDao.getById(queueId) ?: return Result.success()
+    val track = trackDao.getById(entry.trackId) ?: return Result.failure()
+
+    syncStateManager.onDownloading(downloaded = 0, total = 1)
+    val outcome = trackDownloader.download(track, entry)  // existing method signature
+
+    when (outcome) {
+        is TrackDownloadOutcome.Success -> {
+            downloadQueueDao.updateStatus(
+                id = entry.id,
+                status = DownloadStatus.COMPLETED,
+                errorMessage = null,
+                completedAt = System.currentTimeMillis(),
+                failureType = DownloadFailureType.NONE,
+                rejectedVideoId = null,
+            )
+        }
+        is TrackDownloadOutcome.Failed -> {
+            val type = classifier.classify(FailureContext(
+                phase = DownloadPhase.DOWNLOADING,
+                errorText = outcome.error,
+                httpStatus = null,
+                causeChain = emptyList(),
+            ))
+            downloadQueueDao.markFailed(
+                queueId = entry.id,
+                errorMessage = outcome.error?.take(1000),
+                failureType = type,
+            )
+        }
+    }
+    return Result.success()
+}
+```
+
+If `TrackDownloadOutcome` has different variant names, adjust per the actual sealed class.
+
+- [ ] **Step 4: Compile**
+
+```bash
+./gradlew :core:data:compileDebugKotlin
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add core/data/src/main/kotlin/com/stash/core/data/sync/workers/TrackDownloadWorker.kt
+git commit -m "feat(sync): add single-track input mode to TrackDownloadWorker"
+```
+
+---
+
+### Task 9.5: Create `SingleTrackDownloadEnqueuer`
+
+**Files:**
+- Create: `core/data/src/main/kotlin/com/stash/core/data/sync/SingleTrackDownloadEnqueuer.kt`
+
+(Lives in `core/data/sync/`, not `data/download/`, because `core/data` owns the worker and the cross-module dep direction. Spec text says `data/download/single/` — substitute this path.)
+
+- [ ] **Step 1: Write the enqueuer**
+
+```kotlin
+package com.stash.core.data.sync
 
 import android.content.Context
 import androidx.work.Data
@@ -789,19 +963,17 @@ class SingleTrackDownloadEnqueuer @Inject constructor(
 }
 ```
 
-If `TrackDownloadWorker.KEY_QUEUE_ID` doesn't exist, add it as a const inside the worker's companion object — read the worker to see what key it currently uses for the queueId input (it may already exist under a different name; use that).
-
-- [ ] **Step 3: Compile**
+- [ ] **Step 2: Compile**
 
 ```bash
-./gradlew :data:download:compileDebugKotlin
+./gradlew :core:data:compileDebugKotlin
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add data/download/src/main/kotlin/com/stash/data/download/single/SingleTrackDownloadEnqueuer.kt
-git commit -m "feat(download): add SingleTrackDownloadEnqueuer for one-shot retries"
+git add core/data/src/main/kotlin/com/stash/core/data/sync/SingleTrackDownloadEnqueuer.kt
+git commit -m "feat(sync): add SingleTrackDownloadEnqueuer for one-shot retries"
 ```
 
 ---
@@ -809,12 +981,14 @@ git commit -m "feat(download): add SingleTrackDownloadEnqueuer for one-shot retr
 ### Task 10: Create `AuthSource` + `AuthHealthProbe` interface
 
 **Files:**
-- Create: `data/download/src/main/kotlin/com/stash/data/download/auth/AuthHealthProbe.kt`
+- Create: `core/data/src/main/kotlin/com/stash/core/data/sync/auth/AuthHealthProbe.kt`
+
+(Lives in `core/data/sync/auth/`, not `data/download/auth/`, because `data/download` depends on `core/data` — interface must live in the lower-level module so both the chain-head worker and the API-client-bearing modules can implement/inject it.)
 
 - [ ] **Step 1: Write the file**
 
 ```kotlin
-package com.stash.data.download.auth
+package com.stash.core.data.sync.auth
 
 enum class AuthSource { SPOTIFY, YOUTUBE }
 
@@ -836,9 +1010,9 @@ interface AuthHealthProbe {
 - [ ] **Step 2: Compile + commit**
 
 ```bash
-./gradlew :data:download:compileDebugKotlin
-git add data/download/src/main/kotlin/com/stash/data/download/auth/AuthHealthProbe.kt
-git commit -m "feat(download): add AuthHealthProbe interface + AuthSource enum"
+./gradlew :core:data:compileDebugKotlin
+git add core/data/src/main/kotlin/com/stash/core/data/sync/auth/AuthHealthProbe.kt
+git commit -m "feat(sync): add AuthHealthProbe interface + AuthSource enum"
 ```
 
 ---
@@ -846,13 +1020,13 @@ git commit -m "feat(download): add AuthHealthProbe interface + AuthSource enum"
 ### Task 11: Implement `SpotifyAuthHealthProbe` (TDD)
 
 **Files:**
-- Create: `data/download/src/test/kotlin/com/stash/data/download/auth/SpotifyAuthHealthProbeTest.kt`
-- Create: `data/download/src/main/kotlin/com/stash/data/download/auth/SpotifyAuthHealthProbe.kt`
+- Create: `core/data/src/test/kotlin/com/stash/core/data/sync/auth/SpotifyAuthHealthProbeTest.kt`
+- Create: `core/data/src/main/kotlin/com/stash/core/data/sync/auth/SpotifyAuthHealthProbe.kt`
 
 - [ ] **Step 1: Write failing test**
 
 ```kotlin
-package com.stash.data.download.auth
+package com.stash.core.data.sync.auth
 
 import com.stash.data.spotify.SpotifyApiClient
 import com.stash.data.spotify.model.UserInfo
@@ -890,13 +1064,13 @@ If `UserInfo` has different parameter names, adjust per the actual model.
 - [ ] **Step 2: Run — expect FAIL (class missing)**
 
 ```bash
-./gradlew :data:download:testDebugUnitTest --tests "*SpotifyAuthHealthProbeTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*SpotifyAuthHealthProbeTest*"
 ```
 
 - [ ] **Step 3: Implement**
 
 ```kotlin
-package com.stash.data.download.auth
+package com.stash.core.data.sync.auth
 
 import android.util.Log
 import com.stash.data.spotify.SpotifyApiClient
@@ -921,15 +1095,15 @@ class SpotifyAuthHealthProbe @Inject constructor(
 - [ ] **Step 4: Run — expect PASS**
 
 ```bash
-./gradlew :data:download:testDebugUnitTest --tests "*SpotifyAuthHealthProbeTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*SpotifyAuthHealthProbeTest*"
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add data/download/src/main/kotlin/com/stash/data/download/auth/SpotifyAuthHealthProbe.kt \
-        data/download/src/test/kotlin/com/stash/data/download/auth/SpotifyAuthHealthProbeTest.kt
-git commit -m "feat(download): SpotifyAuthHealthProbe via getCurrentUserProfile"
+git add core/data/src/main/kotlin/com/stash/core/data/sync/auth/SpotifyAuthHealthProbe.kt \
+        core/data/src/test/kotlin/com/stash/core/data/sync/auth/SpotifyAuthHealthProbeTest.kt
+git commit -m "feat(sync): SpotifyAuthHealthProbe via getCurrentUserProfile"
 ```
 
 ---
@@ -937,15 +1111,15 @@ git commit -m "feat(download): SpotifyAuthHealthProbe via getCurrentUserProfile"
 ### Task 12: Implement `YoutubeAuthHealthProbe` (TDD)
 
 **Files:**
-- Create: `data/download/src/test/kotlin/com/stash/data/download/auth/YoutubeAuthHealthProbeTest.kt`
-- Create: `data/download/src/main/kotlin/com/stash/data/download/auth/YoutubeAuthHealthProbe.kt`
+- Create: `core/data/src/test/kotlin/com/stash/core/data/sync/auth/YoutubeAuthHealthProbeTest.kt`
+- Create: `core/data/src/main/kotlin/com/stash/core/data/sync/auth/YoutubeAuthHealthProbe.kt`
 
 The probe uses a single non-paginated `getUserPlaylists()` call. `YTMusicApiClient.getUserPlaylists()` returns `SyncResult.Empty` for an unauthenticated browse (per the existing kdoc on that method) and `SyncResult.Success` when authenticated.
 
 - [ ] **Step 1: Write failing test**
 
 ```kotlin
-package com.stash.data.download.auth
+package com.stash.core.data.sync.auth
 
 import com.stash.core.model.SyncResult
 import com.stash.data.ytmusic.YTMusicApiClient
@@ -986,13 +1160,13 @@ If `PagedPlaylists` or `SyncResult.Empty` ctor differ, adjust per actual model.
 - [ ] **Step 2: Run — expect FAIL**
 
 ```bash
-./gradlew :data:download:testDebugUnitTest --tests "*YoutubeAuthHealthProbeTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*YoutubeAuthHealthProbeTest*"
 ```
 
 - [ ] **Step 3: Implement**
 
 ```kotlin
-package com.stash.data.download.auth
+package com.stash.core.data.sync.auth
 
 import android.util.Log
 import com.stash.core.model.SyncResult
@@ -1024,15 +1198,15 @@ class YoutubeAuthHealthProbe @Inject constructor(
 - [ ] **Step 4: Run — expect PASS**
 
 ```bash
-./gradlew :data:download:testDebugUnitTest --tests "*YoutubeAuthHealthProbeTest*"
+./gradlew :core:data:testDebugUnitTest --tests "*YoutubeAuthHealthProbeTest*"
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add data/download/src/main/kotlin/com/stash/data/download/auth/YoutubeAuthHealthProbe.kt \
-        data/download/src/test/kotlin/com/stash/data/download/auth/YoutubeAuthHealthProbeTest.kt
-git commit -m "feat(download): YoutubeAuthHealthProbe via getUserPlaylists"
+git add core/data/src/main/kotlin/com/stash/core/data/sync/auth/YoutubeAuthHealthProbe.kt \
+        core/data/src/test/kotlin/com/stash/core/data/sync/auth/YoutubeAuthHealthProbeTest.kt
+git commit -m "feat(sync): YoutubeAuthHealthProbe via getUserPlaylists"
 ```
 
 ---
@@ -1087,14 +1261,82 @@ git commit -m "feat(sync): expose authExpiry StateFlow on SyncStateManager"
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/PlaylistFetchWorker.kt`
 - Create: `core/data/src/test/kotlin/com/stash/core/data/sync/workers/PlaylistFetchWorkerAuthProbeTest.kt`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Audit `PlaylistFetchWorker` constructor + existing tests**
 
-The exact test shape depends on whether `PlaylistFetchWorker` is constructor-injected via Hilt's `@AssistedInject` and whether existing tests already mock its dependencies — read the worker and any existing test to see the pattern. The test should verify:
-- Both probes are called in parallel before `onFetchingPlaylists()`.
-- If `spotifyProbe.isExpired() == true`, the worker calls `onAuthExpiryProbed(AuthExpiryState(true, false))` and returns `Result.failure()`.
-- If both return false, the worker proceeds normally.
+```bash
+grep -n "@AssistedInject\|class PlaylistFetchWorker" \
+  core/data/src/main/kotlin/com/stash/core/data/sync/workers/PlaylistFetchWorker.kt
+find core/data/src/test -name "*PlaylistFetch*" 2>/dev/null
+```
 
-Write the test with mocked `SpotifyAuthHealthProbe` and `YoutubeAuthHealthProbe`.
+If no existing test exists for this worker, use the skeleton below. The worker is `@HiltWorker @AssistedInject` — for JVM tests we instantiate it directly with a `TestWorkerBuilder` from `androidx.work:work-testing` (add to `testImplementation` if missing).
+
+- [ ] **Step 2: Write failing test**
+
+```kotlin
+package com.stash.core.data.sync.workers
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.work.ListenableWorker
+import androidx.work.testing.TestListenableWorkerBuilder
+import androidx.work.workDataOf
+import com.stash.core.data.sync.AuthExpiryState
+import com.stash.core.data.sync.SyncStateManager
+import com.stash.core.data.sync.auth.SpotifyAuthHealthProbe
+import com.stash.core.data.sync.auth.YoutubeAuthHealthProbe
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+
+@RunWith(AndroidJUnit4::class)
+@Config(application = android.app.Application::class)
+class PlaylistFetchWorkerAuthProbeTest {
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
+    private val spotifyProbe: SpotifyAuthHealthProbe = mockk(relaxed = true)
+    private val youtubeProbe: YoutubeAuthHealthProbe = mockk(relaxed = true)
+    private val syncStateManager: SyncStateManager = mockk(relaxed = true)
+    // ... other dependencies mocked
+
+    @Test fun `returns failure when spotify probe reports expired`() = runTest {
+        coEvery { spotifyProbe.isExpired() } returns true
+        coEvery { youtubeProbe.isExpired() } returns false
+
+        val worker = TestListenableWorkerBuilder<PlaylistFetchWorker>(context)
+            .build()  // NOTE: with @AssistedInject + WorkerFactory, the project typically
+                     // builds the worker manually — see the existing SyncFinalizeWorker
+                     // test (if any) for the exact pattern. If no worker tests exist,
+                     // construct PlaylistFetchWorker directly with all mocks.
+
+        val result = worker.doWork()
+
+        assertEquals(ListenableWorker.Result.failure(), result)
+        coVerify { syncStateManager.onAuthExpiryProbed(AuthExpiryState(true, false)) }
+    }
+
+    @Test fun `proceeds when both probes report healthy`() = runTest {
+        coEvery { spotifyProbe.isExpired() } returns false
+        coEvery { youtubeProbe.isExpired() } returns false
+
+        // ... build worker, call doWork, assert it proceeds past the probe gate.
+        // Specific success-path assertion depends on what the rest of doWork does;
+        // a sufficient test is to verify onFetchingPlaylists() was called.
+    }
+}
+```
+
+The test should verify three behaviors regardless of the exact builder API:
+1. Both probes run before any fetch IO.
+2. If either probe returns true, the worker calls `syncStateManager.onAuthExpiryProbed(...)` with the correct flags AND returns `Result.failure()`.
+3. If both return false, the worker proceeds to `onFetchingPlaylists()`.
 
 - [ ] **Step 2: Run — expect FAIL**
 
@@ -1104,16 +1346,30 @@ Write the test with mocked `SpotifyAuthHealthProbe` and `YoutubeAuthHealthProbe`
 
 - [ ] **Step 3: Wire probes into `PlaylistFetchWorker`**
 
-Add `SpotifyAuthHealthProbe` and `YoutubeAuthHealthProbe` to the worker's constructor (mirror the existing dependency injection pattern). At the top of `doWork()` (or whatever the existing entrypoint is, before any playlist IO):
+Add to the worker's `@AssistedInject` constructor:
+
+```kotlin
+private val spotifyProbe: SpotifyAuthHealthProbe,
+private val youtubeProbe: YoutubeAuthHealthProbe,
+private val tokenManager: TokenManager,    // probably already injected — confirm via grep
+```
+
+Use the existing `TokenManager.spotifyAuthState` and `TokenManager.youTubeAuthState` flows to determine connection status (these are the same flows `SyncViewModel.observeAuthStates()` already consumes at `feature/sync/.../SyncViewModel.kt:376-392`). Each is a `Flow<AuthState>` where `AuthState.Connected` means connected.
+
+At the top of `doWork()`, before any playlist IO:
 
 ```kotlin
 syncStateManager.onAuthenticating()
 
+val spotifyConnected = tokenManager.spotifyAuthState.first() is AuthState.Connected
+val youtubeConnected = tokenManager.youTubeAuthState.first() is AuthState.Connected
+
 val (spotifyExpired, youtubeExpired) = coroutineScope {
-    val s = async { spotifyProbe.isExpired() }
-    val y = async { youtubeProbe.isExpired() }
+    val s = async { if (spotifyConnected) spotifyProbe.isExpired() else false }
+    val y = async { if (youtubeConnected) youtubeProbe.isExpired() else false }
     s.await() to y.await()
 }
+
 val authState = AuthExpiryState(spotifyExpired, youtubeExpired)
 syncStateManager.onAuthExpiryProbed(authState)
 
@@ -1121,9 +1377,12 @@ if (authState.anyExpired) {
     Log.i(TAG, "Auth expired (spotify=$spotifyExpired, youtube=$youtubeExpired); aborting sync chain")
     return Result.failure()
 }
+
+syncStateManager.onFetchingPlaylists()
+// ... existing fetch logic continues
 ```
 
-Only probe sources the user has actually connected — wrap each probe in a `if (sourceConnected) ... else false` check using the existing TokenManager or connector state. The user shouldn't see a "YouTube expired" banner if they never connected YouTube.
+The `if (sourceConnected)` guard prevents a "YouTube expired" banner for a user who never connected YouTube. Use `kotlinx.coroutines.flow.first` for the `.first()` calls and add `import com.stash.core.auth.AuthState`.
 
 - [ ] **Step 4: Run — expect PASS**
 
@@ -1239,6 +1498,8 @@ git commit -m "feat(ui): add FailureReasonDisplay mapping + ordering"
 **Files:**
 - Create: `feature/sync/src/test/kotlin/com/stash/feature/sync/FailedDownloadsViewModelTest.kt`
 - Create: `feature/sync/src/main/kotlin/com/stash/feature/sync/FailedDownloadsViewModel.kt`
+
+If `feature/sync/src/test/` doesn't yet exist, just create the directory tree — no extra Gradle config needed for JVM unit tests (the module already has `mockk` + `kotlinx-coroutines-test` on `testImplementation` since `FailedMatchesViewModelTest` exists in the same module).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1452,31 +1713,138 @@ git commit -m "feat(ui): FailedDownloadsGroupCard collapsible group composable"
 **Files:**
 - Create: `feature/sync/src/main/kotlin/com/stash/feature/sync/FailedDownloadsScreen.kt`
 
+Modelled after `FailedMatchesScreen.kt` (same package — read it first to match the existing visual rhythm: glass back-button, `statusBarsPadding`, headlineMedium title, LazyColumn with `contentPadding = PaddingValues(bottom = 120.dp)`).
+
 - [ ] **Step 1: Write the screen**
 
-Modelled after `FailedMatchesScreen.kt` (same file in the same package — read it first for matching style):
-
-- Back button (statusBarsPadding + glass background) at top-left.
-- Header column: title `Failed Downloads` (headlineMedium, bold) + subtitle + count line + `Retry all` button.
-- LazyColumn of `FailedDownloadsGroupCard`s, one per group in `FailureReasonDisplayOrder`.
-- Empty state: same "All caught up!" + check-circle icon pattern as the existing screen.
-
-Wire actions:
-- `onRetryRow = viewModel::retry`
-- `onBlockRow = viewModel::block`
-- `onRetryGroup = viewModel::retryGroup`
-- `onRetryAll = viewModel::retryAll`
-
 ```kotlin
+package com.stash.feature.sync
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.ui.theme.StashTheme
+
 @Composable
 fun FailedDownloadsScreen(
     onBack: () -> Unit,
     viewModel: FailedDownloadsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    // ... implementation per the structure above
+    val extendedColors = StashTheme.extendedColors
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        when {
+            state.isLoading -> {
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            }
+            state.groups.isEmpty() -> {
+                BackChip(onBack, extendedColors)
+                Column(
+                    modifier = Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text("All caught up!", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("No failed downloads.", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 120.dp),
+                ) {
+                    item(key = "header") {
+                        Header(
+                            totalCount = state.totalCount,
+                            onBack = onBack,
+                            onRetryAll = viewModel::retryAll,
+                        )
+                    }
+                    items(items = state.groups, key = { it.type.name }) { group ->
+                        FailedDownloadsGroupCard(
+                            group = group,
+                            onRetryRow = viewModel::retry,
+                            onBlockRow = viewModel::block,
+                            onRetryGroup = viewModel::retryGroup,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackChip(onBack: () -> Unit, extendedColors: com.stash.core.ui.theme.ExtendedColors) {
+    IconButton(
+        onClick = onBack,
+        modifier = Modifier
+            .statusBarsPadding()
+            .padding(start = 8.dp, top = 8.dp)
+            .size(48.dp)
+            .background(extendedColors.glassBackground, CircleShape),
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+            contentDescription = "Back",
+            tint = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun Header(totalCount: Int, onBack: () -> Unit, onRetryAll: () -> Unit) {
+    val extendedColors = StashTheme.extendedColors
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().statusBarsPadding().padding(start = 8.dp, top = 8.dp)) {
+            BackChip(onBack, extendedColors)
+        }
+        Spacer(Modifier.height(12.dp))
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            Text("Failed Downloads", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "$totalCount track${if (totalCount != 1) "s" else ""} couldn't download.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onRetryAll, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Refresh, null, Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Retry all")
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
 }
 ```
+
+If `ExtendedColors` lives at a different package path, adjust the `BackChip` parameter type — read `core/ui/.../theme/StashTheme.kt` to confirm.
 
 - [ ] **Step 2: Build and commit**
 
@@ -1577,21 +1945,22 @@ git commit -m "feat(ui): AuthExpiredBanner with single-CTA copy"
 ### Task 20: Wire navigation + add card + mount banner in `SyncScreen`
 
 **Files:**
-- Modify: the project's navigation graph (likely `app/src/main/kotlin/.../navigation/StashNavGraph.kt` — locate by grepping for `FailedMatches` route)
+- Modify: `app/src/main/kotlin/com/stash/app/navigation/StashNavHost.kt` (confirmed location — sibling routes already live here for `FailedMatchesScreen`)
+- Modify: `app/src/main/kotlin/com/stash/app/navigation/TopLevelDestination.kt` if a new top-level route is required (it isn't — Failed Downloads is reached from the Sync tab, not the bottom nav)
 - Modify: `feature/sync/src/main/kotlin/com/stash/feature/sync/SyncScreen.kt`
-- Modify: `feature/sync/src/main/kotlin/com/stash/feature/sync/SyncViewModel.kt` (add failed-count flow + authExpiry flow)
+- Modify: `feature/sync/src/main/kotlin/com/stash/feature/sync/SyncViewModel.kt`
 
-- [ ] **Step 1: Locate the existing FailedMatches navigation entry**
+- [ ] **Step 1: Add `FailedDownloadsRoute` and the composable destination**
 
 ```bash
-grep -rn "FailedMatchesScreen\|onNavigateToFailedMatches" --include="*.kt" .
+grep -n "FailedMatches\|SettingsRoute" app/src/main/kotlin/com/stash/app/navigation/StashNavHost.kt
 ```
 
-Add a sibling `FailedDownloadsScreen` route following the exact same wiring pattern.
+Add a new `@Serializable data object FailedDownloadsRoute` next to the existing `FailedMatchesRoute` (search the navigation source for where that's declared — likely `TopLevelDestination.kt` or a `Routes.kt`). Add a `composable<FailedDownloadsRoute> { FailedDownloadsScreen(onBack = { navController.popBackStack() }) }` block alongside the existing `composable<FailedMatchesRoute>` block in `StashNavHost.kt`.
 
 - [ ] **Step 2: Add failed-count + authExpiry flows to `SyncViewModel`**
 
-In `SyncViewModel.kt`:
+The existing `SyncViewModel` already injects `tokenManager` and observes `spotifyAuthState`/`youTubeAuthState` at lines 376-392. Add the `SyncStateManager.authExpiry` projection and the failed-count flow next to the existing state plumbing:
 
 ```kotlin
 val failedDownloadsCount: StateFlow<Int> =
@@ -1604,36 +1973,42 @@ val authExpiry: StateFlow<AuthExpiryState> =
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AuthExpiryState(false, false))
 ```
 
-(`downloadQueueDao` is already a constructor dependency in the existing VM; if not, add it.)
+If `downloadQueueDao` isn't already in `SyncViewModel`'s constructor, add it.
 
 - [ ] **Step 3: Mount banner + card in `SyncScreen`**
 
-Above `SyncStatusCard`:
+`SyncScreen.kt:71` already has `onNavigateToFailedMatches` and `onNavigateToBlockedSongs` parameters. Add a sibling parameter:
+
+```kotlin
+onNavigateToFailedDownloads: () -> Unit = {},
+```
+
+Add a new `item` above the existing `SyncStatusCard` mount (`SyncScreen.kt:88-96`):
 
 ```kotlin
 item {
+    val authState by viewModel.authExpiry.collectAsStateWithLifecycle()
     AuthExpiredBanner(
-        state = authExpiry,
-        onReauthSpotify = { /* TODO route to Spotify connector */ },
-        onReauthYoutube = { /* TODO route to YouTube connector */ },
-        onReauthBoth = { /* TODO route to Connections settings */ },
+        state = authState,
+        onReauthSpotify = onNavigateToSettings,
+        onReauthYoutube = onNavigateToSettings,
+        onReauthBoth = onNavigateToSettings,
     )
 }
 ```
 
-Sibling card next to "Unmatched Songs" and "Blocked Songs":
+Add a sibling card next to the existing `UnmatchedSongsCard` (private composable at `SyncScreen.kt:364`). The simplest approach: copy `UnmatchedSongsCard` to a new private `FailedDownloadsCard` in the same file, swap the title to `"Failed Downloads"` and the click handler to `onNavigateToFailedDownloads`. Mount it at line ~137 next to the existing `UnmatchedSongsCard` mount:
 
 ```kotlin
 item {
-    LibraryHealthEntryCard(
-        title = "Failed Downloads",
-        count = failedCount,
-        onClick = onNavigateToFailedDownloads,
-    )
+    val count by viewModel.failedDownloadsCount.collectAsStateWithLifecycle()
+    if (count > 0) {
+        FailedDownloadsCard(count = count, onClick = onNavigateToFailedDownloads)
+    }
 }
 ```
 
-Wire the connector deep-links to whatever route the existing settings → reconnect path uses. Read the connector code to confirm — usually it's `nav.navigate("settings/connections")` or similar.
+For the re-auth deep-link target, add an `onNavigateToSettings: () -> Unit = {}` parameter to `SyncScreen` and wire it up at the `StashNavHost.kt` call site to `navController.navigate(SettingsRoute)`. `SettingsRoute` is defined at `app/.../navigation/TopLevelDestination.kt:28` as a top-level `@Serializable data object`. Phase 1 acceptance only requires that the banner CTA opens Settings — the user finds the Connections section there. Per-source deep-link (jump straight to the Spotify or YouTube connector) is Phase 2.
 
 - [ ] **Step 4: Build and commit**
 
@@ -1715,30 +2090,66 @@ A FLAC Picture metadata block has the following byte layout (big-endian):
 
 - [ ] **Step 1: Write failing test**
 
+Use Java's `BufferedImage` + `ImageIO` to generate a 1x1 JPEG at test-time. This avoids checking a binary fixture into the repo and keeps the test fully self-contained.
+
 ```kotlin
 package com.stash.data.download.files
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import javax.imageio.ImageIO
 
 class FlacPictureBlockTest {
 
-    @Test fun `block contains MIME type and dimensions in correct positions`() {
-        // 1x1 red JPEG (precomputed)
-        val redJpeg = byteArrayOf(/* known good 1x1 JPEG bytes */)
-        val block = FlacPictureBlock.build(redJpeg)
-        val decoded = block.decodeBlock()  // helper that splits header into named fields
-        assertArrayEquals(intArrayOf(3, 10), intArrayOf(decoded.pictureType, decoded.mimeLength))
-        assertTrue(decoded.mime == "image/jpeg")
-        assertTrue(decoded.width >= 1 && decoded.height >= 1)
-        assertArrayEquals(redJpeg, decoded.pictureBytes)
+    private fun makeJpeg(width: Int = 4, height: Int = 4): ByteArray {
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        // fill red so the file isn't degenerate
+        for (x in 0 until width) for (y in 0 until height) img.setRGB(x, y, 0xFF0000)
+        val baos = ByteArrayOutputStream()
+        ImageIO.write(img, "jpeg", baos)
+        return baos.toByteArray()
+    }
+
+    @Test fun `block contains MIME type and JPEG payload`() {
+        val jpeg = makeJpeg()
+        val block = FlacPictureBlock.build(jpeg)
+        val input = DataInputStream(ByteArrayInputStream(block))
+
+        val pictureType = input.readInt()
+        val mimeLength = input.readInt()
+        val mime = ByteArray(mimeLength).also { input.readFully(it) }.toString(Charsets.US_ASCII)
+        val descLength = input.readInt()
+        val desc = ByteArray(descLength).also { input.readFully(it) }.toString(Charsets.US_ASCII)
+        val width = input.readInt()
+        val height = input.readInt()
+        val depth = input.readInt()
+        val colors = input.readInt()
+        val payloadLen = input.readInt()
+        val payload = ByteArray(payloadLen).also { input.readFully(it) }
+
+        assertEquals(3, pictureType)
+        assertEquals(10, mimeLength)
+        assertEquals("image/jpeg", mime)
+        assertEquals(0, descLength)
+        assertEquals("", desc)
+        assertEquals(4, width)
+        assertEquals(4, height)
+        assertEquals(24, depth)
+        assertEquals(0, colors)
+        assertEquals(jpeg.size, payloadLen)
+        assertArrayEquals(jpeg, payload)
+        assertTrue(input.available() == 0)
     }
 }
 ```
 
-(The test fixture bytes can come from a real album-art file checked into `data/download/src/test/resources/` — pick the smallest valid JPEG you can find. The `decodeBlock` helper lives in the test file only, not in production.)
+`ImageIO` is part of `java.desktop` which is available on JVM unit tests. (Not on instrumented tests — but this is a JVM test under `src/test/`.)
 
 - [ ] **Step 2: Run — expect FAIL**
 
@@ -1815,8 +2226,7 @@ object FlacPictureBlock {
 
 ```bash
 git add data/download/src/main/kotlin/com/stash/data/download/files/FlacPictureBlock.kt \
-        data/download/src/test/kotlin/com/stash/data/download/files/FlacPictureBlockTest.kt \
-        data/download/src/test/resources/red-1x1.jpg
+        data/download/src/test/kotlin/com/stash/data/download/files/FlacPictureBlockTest.kt
 git commit -m "feat(download): add FlacPictureBlock builder for Vorbis art"
 ```
 
