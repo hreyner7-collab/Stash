@@ -192,6 +192,14 @@ interface DownloadQueueDao {
      * scalar subquery so the viewer can show "from <playlist>" without a
      * separate query per row.
      *
+     * Returns the first sync-enabled playlist a track belongs to, falling
+     * back to the first non-sync-enabled playlist if none are enabled —
+     * `ORDER BY p.sync_enabled DESC, p.id ASC` prefers enabled rows (1 > 0)
+     * and uses the smallest id as a stable tie-breaker. This matches the
+     * spec §3.6 rule "pick the first sync-enabled playlist arbitrarily"
+     * while still surfacing *some* name for orphaned tracks whose only
+     * memberships are sync-disabled.
+     *
      * Excludes `NONE` (the implicit value for non-failed rows that may
      * still carry a `FAILED` status from legacy data) and `NO_MATCH`
      * (which has its own dedicated Failed Matches detail screen — see
@@ -203,7 +211,7 @@ interface DownloadQueueDao {
                (SELECT p.name FROM playlists p
                  INNER JOIN playlist_tracks pt ON pt.playlist_id = p.id
                  WHERE pt.track_id = t.id AND pt.removed_at IS NULL
-                 ORDER BY p.id ASC LIMIT 1) AS playlistName,
+                 ORDER BY p.sync_enabled DESC, p.id ASC LIMIT 1) AS playlistName,
                dq.failure_type AS failureType,
                dq.error_message AS errorMessage,
                dq.retry_count AS retryCount,
