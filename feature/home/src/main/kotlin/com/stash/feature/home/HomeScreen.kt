@@ -219,6 +219,20 @@ fun HomeScreen(
 
                 val socialUriHandler = LocalUriHandler.current
                 androidx.compose.material3.IconButton(
+                    onClick = { socialUriHandler.openUri(STASH_DISCORD_URL) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    androidx.compose.material3.Icon(
+                        painter = androidx.compose.ui.res.painterResource(
+                            id = R.drawable.ic_discord,
+                        ),
+                        contentDescription = "Join the Stash Discord",
+                        tint = androidx.compose.ui.graphics.Color(0xFF5865F2),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+
+                androidx.compose.material3.IconButton(
                     onClick = { socialUriHandler.openUri(STASH_ISSUE_URL) },
                     modifier = Modifier.size(40.dp),
                 ) {
@@ -1665,6 +1679,11 @@ private data class Supporter(
 // wordmark on Home. Tap → GitHub new-issue form so users can file
 // bugs without leaving the project. Edit when the repo URL changes.
 private const val STASH_ISSUE_URL = "https://github.com/rawnaldclark/Stash/issues/new"
+
+// v0.9.38+: Discord invite shown as a chat-bubble icon (blurple-tinted)
+// to the left of the wrench. Tap → opens the invite in the default
+// browser. Edit when the invite rotates.
+private const val STASH_DISCORD_URL = "https://discord.gg/tbBSMd6dR"
 
 private val HOME_SUPPORTERS = listOf(
     Supporter(
