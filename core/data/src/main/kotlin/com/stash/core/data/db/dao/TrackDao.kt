@@ -118,6 +118,19 @@ data class DurationBackfillRow(
 )
 
 /**
+ * Minimal row projection for the v0.9.38 stream-only metadata backfill —
+ * stubs that StashDiscoveryWorker created with bare title+artist, no art
+ * URL and no duration. A single Last.fm `track.getInfo` lookup yields
+ * both fields so this row carries just the identity needed to make the
+ * call.
+ */
+data class StreamableBackfillRow(
+    val id: Long,
+    val artist: String,
+    val title: String,
+)
+
+/**
  * Minimal projection for the startup file-integrity sweep — only needs id
  * and the stored path so we can verify the file actually exists on disk.
  * `file_path` is nullable in the schema; rows with `is_downloaded=1` and
@@ -1483,6 +1496,32 @@ interface TrackDao {
         """
     )
     suspend fun findArtBackfillCandidates(limit: Int): List<ArtBackfillRow>
+
+    /**
+     * Candidate projection for the v0.9.38 stream-only metadata backfill —
+     * tracks that StashDiscoveryWorker filed as `is_streamable = 1,
+     * is_downloaded = 0` stubs with no art and no duration. Returns rows
+     * where at least one of (art, duration) is still missing so a single
+     * Last.fm `track.getInfo` round-trip can fill both in one pass.
+     *
+     * Pre-fix: stream-only mix tracks rendered with empty thumbnails and
+     * "0:00" durations on first paint; metadata only filled in
+     * incidentally when the player resolved a queue window at play time
+     * (conversation 2026-05-28).
+     */
+    @Query(
+        """
+        SELECT id, artist, title
+        FROM tracks
+        WHERE is_streamable = 1
+          AND is_downloaded = 0
+          AND (album_art_url IS NULL OR album_art_url = '' OR duration_ms = 0)
+          AND artist != ''
+          AND title != ''
+        LIMIT :limit
+        """
+    )
+    suspend fun findStreamableMetadataBackfillCandidates(limit: Int): List<StreamableBackfillRow>
 
     /**
      * Atomically reverts a track to an undownloaded state so the download

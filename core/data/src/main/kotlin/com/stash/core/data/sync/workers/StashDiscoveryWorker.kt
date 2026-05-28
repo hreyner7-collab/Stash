@@ -139,19 +139,37 @@ class StashDiscoveryWorker @AssistedInject constructor(
 
         // v0.9.21: pre-filter the PENDING fetch by under-cap recipes so a
         // single recipe's deferred-at-cap backlog doesn't starve other
-        // recipes' fresh candidates out of the BATCH_SIZE window. See
-        // conversation 2026-05-12: First Listen had 100+ deferred-at-cap
-        // PENDING rows clogging the head of the queue so Deep Cuts'
-        // freshly-queued candidates never reached the worker.
+        // recipes' fresh candidates out of the BATCH_SIZE window.
+        //
+        // v0.9.38: combine the cap pre-filter with round-robin batching.
+        // Plain FIFO `getPending` lets one recipe with a deep PENDING
+        // backlog monopolise the BATCH_SIZE window even when it's *under*
+        // cap (conversation 2026-05-28: Daily Discover had 131 PENDING
+        // queued before Deep Cuts/First Listen's batches and consumed 57
+        // of every 60-row drain; Deep Cuts + First Listen never ran). The
+        // cap query was also dead in v0.9.37 — fixed in the DAO by
+        // counting both downloaded AND streamable DONE rows.
         val cappedRecipeIds = discoveryQueueDao.findRecipesAtWeeklyCap(
             sinceMillis = System.currentTimeMillis() - WEEK_MS,
             cap = PER_RECIPE_WEEKLY_CAP,
         )
-        val pending = if (cappedRecipeIds.isEmpty()) {
-            discoveryQueueDao.getPending(BATCH_SIZE)
-        } else {
+        if (cappedRecipeIds.isNotEmpty()) {
             Log.i(TAG, "recipes at cap (excluded from fetch): $cappedRecipeIds")
-            discoveryQueueDao.getPendingExcludingRecipes(cappedRecipeIds, BATCH_SIZE)
+        }
+        // Room rejects empty `IN ()` lists. -1L is safe as a sentinel —
+        // real recipe ids are autogen > 0.
+        val cappedSentinel = cappedRecipeIds.ifEmpty { listOf(-1L) }
+        val activeRecipes = discoveryQueueDao.getRecipesWithPending(cappedSentinel)
+        val pending = if (activeRecipes.isEmpty()) {
+            emptyList()
+        } else {
+            // Fair quota: ceil(BATCH_SIZE / activeRecipes). With the typical
+            // 3 builtin recipes that's 20/each; a single solo recipe still
+            // gets the full 60.
+            val perRecipeQuota = (BATCH_SIZE + activeRecipes.size - 1) / activeRecipes.size
+            activeRecipes.flatMap { rid ->
+                discoveryQueueDao.getPendingForRecipe(rid, perRecipeQuota)
+            }
         }
         if (pending.isEmpty()) {
             Log.d(TAG, "no pending discoveries")

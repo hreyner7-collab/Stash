@@ -322,6 +322,14 @@ class StashMixRefreshWorker @AssistedInject constructor(
                     .onFailure { Log.w(TAG, "discovery queueing failed for '${recipe.name}'", it) }
             }
         }
+
+        // v0.9.38 — hydrate fresh stream-only stubs with art + duration.
+        // StashDiscoveryWorker lands those rows bare; without this chain
+        // they'd render empty in the mix until the player resolves a
+        // queue window at play time (conversation 2026-05-28). Fire-and-
+        // forget — backfill failure must never block a successful refresh.
+        ArtBackfillWorker.enqueueFromMixRefresh(applicationContext)
+
         return Result.success()
     }
 
