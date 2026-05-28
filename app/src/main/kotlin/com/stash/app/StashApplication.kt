@@ -546,6 +546,8 @@ class StashApplication : Application(), Configuration.Provider {
                 targetLength = 50,
                 affinityBias = 0.0f,
                 seedStrategy = "TAG_GRAPH",
+                moodKeysCsv = "",
+                tagSampleDepth = 0,
             )
             if (updated > 0) {
                 Log.i(
@@ -581,6 +583,8 @@ class StashApplication : Application(), Configuration.Provider {
                 targetLength = recipe.targetLength,
                 affinityBias = recipe.affinityBias,
                 seedStrategy = recipe.seedStrategy,
+                moodKeysCsv = recipe.moodKeysCsv,
+                tagSampleDepth = recipe.tagSampleDepth,
             )
             totalUpdated += updated
         }
@@ -768,7 +772,7 @@ class StashApplication : Application(), Configuration.Provider {
          *    (85% discovery, 15% library). Deep Cuts switches seed
          *    strategy from NONE to TRACK_SIMILAR.
          */
-        private const val STASH_MIX_RECIPE_TUNING_VERSION = 1
+        private const val STASH_MIX_RECIPE_TUNING_VERSION = 2
 
         /**
          * Bump when [maybeCleanupDiscoveryLibraryHits] should run again.

@@ -103,7 +103,9 @@ interface StashMixRecipeDao {
             freshness_window_days = :freshnessWindowDays,
             target_length = :targetLength,
             affinity_bias = :affinityBias,
-            seed_strategy = :seedStrategy
+            seed_strategy = :seedStrategy,
+            mood_keys_csv = :moodKeysCsv,
+            tag_sample_depth = :tagSampleDepth
         WHERE is_builtin = 1 AND name = :name
         """
     )
@@ -114,5 +116,7 @@ interface StashMixRecipeDao {
         targetLength: Int,
         affinityBias: Float,
         seedStrategy: String,
+        moodKeysCsv: String,
+        tagSampleDepth: Int,
     ): Int
 }

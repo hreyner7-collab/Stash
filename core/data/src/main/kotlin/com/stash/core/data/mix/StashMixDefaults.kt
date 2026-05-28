@@ -48,7 +48,9 @@ object StashMixDefaults {
             freshnessWindowDays = 90,
             discoveryRatio = 0.85f,
             targetLength = 40,
-            seedStrategy = "TRACK_SIMILAR",
+            seedStrategy = "TAG_GRAPH",
+            includeTagsCsv = "",
+            tagSampleDepth = 15,
             isBuiltin = true,
         ),
         StashMixRecipeEntity(
