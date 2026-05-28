@@ -567,18 +567,47 @@ class MusicRepositoryImpl @Inject constructor(
     }
 
     override suspend fun addTrackToPlaylist(trackId: Long, playlistId: Long) {
-        val position = playlistDao.getNextPosition(playlistId)
-        playlistDao.insertCrossRef(
-            com.stash.core.data.db.entity.PlaylistTrackCrossRef(
-                playlistId = playlistId,
-                trackId = trackId,
-                position = position,
-                // v0.9.23: mark as user-added so REFRESH-mode sync of
-                // imported Spotify / YT Music playlists doesn't wipe it.
-                // See issue #42.
-                locallyAdded = true,
+        // Issue #114: this previously inserted the cross-ref unconditionally
+        // and crashed the app with SQLITE_CONSTRAINT_FOREIGNKEY when either
+        // parent row was missing (track orphaned by cleanup, playlist deleted
+        // by a parallel REFRESH-mode sync, stale UI cache after re-sync, etc.).
+        // Defensive pre-check + try/catch so the crash becomes a logged no-op
+        // and the user can keep using the app.
+        val trackExists = trackDao.getById(trackId) != null
+        val playlistExists = playlistDao.getById(playlistId) != null
+        if (!trackExists || !playlistExists) {
+            android.util.Log.w(
+                "MusicRepository",
+                "addTrackToPlaylist: skipping insert — trackExists=$trackExists " +
+                    "(id=$trackId), playlistExists=$playlistExists (id=$playlistId)",
             )
-        )
+            return
+        }
+        val position = playlistDao.getNextPosition(playlistId)
+        try {
+            playlistDao.insertCrossRef(
+                com.stash.core.data.db.entity.PlaylistTrackCrossRef(
+                    playlistId = playlistId,
+                    trackId = trackId,
+                    position = position,
+                    // v0.9.23: mark as user-added so REFRESH-mode sync of
+                    // imported Spotify / YT Music playlists doesn't wipe it.
+                    // See issue #42.
+                    locallyAdded = true,
+                )
+            )
+        } catch (e: android.database.sqlite.SQLiteConstraintException) {
+            // Pre-check raced with a delete (orphan cleanup, sync REFRESH, blocklist).
+            // The user-visible effect is the same as a missing-parent no-op: the
+            // tap appears to do nothing, but the app stays alive.
+            android.util.Log.w(
+                "MusicRepository",
+                "addTrackToPlaylist: FK constraint failed after pre-check " +
+                    "(trackId=$trackId, playlistId=$playlistId) — likely race with delete",
+                e,
+            )
+            return
+        }
         // v0.9.37 — count downloaded + streamable. Stream-only tracks
         // (e.g. Liked Songs added from the Now Playing heart on a
         // streaming track) are first-class playlist members under the
