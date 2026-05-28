@@ -66,3 +66,6 @@ captures/
 *.log
 node_modules/
 .worktrees/
+
+# Superpowers visual-companion server artifacts (per-session local state)
+.superpowers/
