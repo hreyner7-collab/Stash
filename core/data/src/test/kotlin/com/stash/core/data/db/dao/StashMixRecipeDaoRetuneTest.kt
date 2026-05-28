@@ -14,10 +14,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Tests for [StashMixRecipeDao.retuneBuiltin] — specifically the v0.9.20
- * expansion that adds affinityBias and seedStrategy to the SET clause so
- * the recipe-pivot migration can update all five tunable fields in one
- * UPDATE.
+ * Tests for [StashMixRecipeDao.retuneBuiltin] — the in-place builtin-recipe
+ * retune used by one-shot tuning migrations. Covers the v0.9.20 expansion
+ * (affinityBias + seedStrategy) and the v0.9.40 tag-engine expansion
+ * (moodKeysCsv + tagSampleDepth), i.e. all seven tunable fields in one UPDATE.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])

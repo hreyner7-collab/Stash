@@ -92,9 +92,10 @@ interface StashMixRecipeDao {
      * (e.g. bumping discovery_ratio) and want existing installs to pick
      * it up without wiping the user's accumulated discovery state.
      *
-     * v0.9.20: extended from 4 to 6 fields. The recipe-pivot migration
-     * needs to change affinityBias + seedStrategy alongside the original
-     * three knobs in a single atomic UPDATE.
+     * v0.9.20: extended from 4 to 6 fields (added affinityBias + seedStrategy).
+     * v0.9.40: extended to 8 fields (added moodKeysCsv + tagSampleDepth) for the
+     * tag-seeded engine retune, so a single atomic UPDATE can re-point a builtin
+     * onto TAG_GRAPH with a deep-cut depth.
      */
     @Query(
         """

@@ -562,12 +562,18 @@ class StashApplication : Application(), Configuration.Provider {
     }
 
     /**
-     * v0.9.20 pivot: Daily Discover + Deep Cuts move from library-substrate
-     * to recommendation-substrate (85% discovery, 15% library). Deep Cuts
-     * switches seed strategy from NONE to TRACK_SIMILAR. Gated by
-     * [STASH_MIX_RECIPE_TUNING_VERSION] so the migration runs exactly once
-     * per install. Fresh installs skip this because [StashMixDefaults]
-     * already seeds with the new values.
+     * One-shot builtin-recipe retune, gated by [STASH_MIX_RECIPE_TUNING_VERSION]
+     * so each tuning ships exactly once per install. Fresh installs skip it
+     * because [StashMixDefaults] already seeds the current values.
+     *
+     * - v1 (v0.9.20 pivot): Daily Discover + Deep Cuts moved to recommendation-
+     *   substrate (85% discovery / 15% library); Deep Cuts went NONE → TRACK_SIMILAR.
+     * - v2 (v0.9.40 tag engine): Deep Cuts re-pointed TRACK_SIMILAR → TAG_GRAPH with
+     *   tagSampleDepth=15 (fixes it surfacing only already-downloaded library tracks).
+     *   Since this iterates every builtin, First Listen (already TAG_GRAPH) is also
+     *   re-tuned and — like Deep Cuts — now seeds via the tag engine
+     *   (RecipeTagResolver → TagPoolBuilder), falling back to the user's top genres
+     *   for builtins with no explicit tags. Daily Discover stays ARTIST_SIMILAR.
      */
     private suspend fun maybeRetuneStashMixes() {
         val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
