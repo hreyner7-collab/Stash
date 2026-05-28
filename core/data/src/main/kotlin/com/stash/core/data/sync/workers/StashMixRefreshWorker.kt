@@ -31,7 +31,9 @@ import com.stash.core.data.lastfm.LastFmTopTrack
 import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.MixSeedGenerator
 import com.stash.core.data.mix.MixSeedStrategy
+import com.stash.core.data.mix.RecipeTagResolver
 import com.stash.core.data.mix.StashMixDefaults
+import com.stash.core.data.mix.TagPoolBuilder
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
@@ -84,6 +86,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val sessionPreference: LastFmSessionPreference,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
     private val trackSkipEventDao: TrackSkipEventDao,
+    private val tagPoolBuilder: TagPoolBuilder,
     private val trackMatcher: TrackMatcher,
 ) : CoroutineWorker(appContext, params) {
 
@@ -327,8 +330,11 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // StashDiscoveryWorker lands those rows bare; without this chain
         // they'd render empty in the mix until the player resolves a
         // queue window at play time (conversation 2026-05-28). Fire-and-
-        // forget — backfill failure must never block a successful refresh.
-        ArtBackfillWorker.enqueueFromMixRefresh(applicationContext)
+        // forget — backfill failure must never block a successful refresh,
+        // so the enqueue itself is guarded (e.g. WorkManager not yet
+        // initialised in a unit-test JVM throws IllegalStateException).
+        runCatching { ArtBackfillWorker.enqueueFromMixRefresh(applicationContext) }
+            .onFailure { Log.w(TAG, "art-backfill enqueue failed; refresh still succeeded", it) }
 
         return Result.success()
     }
@@ -545,6 +551,14 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val strategy = MixSeedStrategy.fromStored(recipe.seedStrategy)
         if (strategy == MixSeedStrategy.NONE) return
 
+        // TAG_GRAPH recipes seed from their OWN resolved tags (genres+moods+era),
+        // not the user's global top tags — the custom-mix + retuned-Deep-Cuts path.
+        // Other strategies keep the persona-seeded path below, unchanged.
+        if (strategy == MixSeedStrategy.TAG_GRAPH) {
+            queueTagSeededDiscovery(recipe)
+            return
+        }
+
         val since = System.currentTimeMillis() -
             AFFINITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
 
@@ -646,6 +660,60 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 "(${candidates.size - filtered.size} filtered as library/banned)",
         )
         mixGenerator.queueDiscoveryCandidates(recipe, final)
+    }
+
+    /**
+     * Tag-seeded discovery for TAG_GRAPH recipes (custom mixes + Deep Cuts).
+     * Pool comes from the recipe's resolved tags via [TagPoolBuilder] — NOT from
+     * tracks similar to the user's library — which is what fixes Deep Cuts. Applies
+     * the same library/skip pre-filter as the persona path, plus a relaxation
+     * ladder (drop era -> drop moods) when the filtered pool is below the floor.
+     */
+    private suspend fun queueTagSeededDiscovery(recipe: StashMixRecipeEntity) {
+        val userTopTags = mixGenerator.computeUserTopTags(limit = 10)
+        val userTopArtists = trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT)
+            .map { it.trim().lowercase() }.toHashSet()
+
+        val libraryKeys = trackDao.getLibraryCanonicalKeys().toHashSet()
+        val skipBannedKeys = trackSkipEventDao.getEarlySkipBannedCanonicalKeys(
+            minSkips = DISCOVERY_SKIP_BAN_MIN_COUNT,
+            sinceMs = System.currentTimeMillis() - DISCOVERY_SKIP_BAN_WINDOW_MS,
+            maxPositionMs = DISCOVERY_SKIP_BAN_MAX_POSITION_MS,
+        ).toHashSet()
+
+        fun filterNew(c: List<MixGenerator.DiscoveryCandidate>) = c.filter {
+            val key = canonicalKey(it.artist, it.title)
+            key !in libraryKeys && key !in skipBannedKeys
+        }
+
+        val baseTags = RecipeTagResolver.resolve(recipe, userTopTags)
+        val pool = filterNew(tagPoolBuilder.build(baseTags, recipe.tagSampleDepth, userTopArtists))
+            .toMutableList()
+        val seen = pool.mapTo(HashSet()) { canonicalKey(it.artist, it.title) }
+
+        if (pool.size < MIN_DISCOVERY_POOL_AFTER_FILTER) {
+            val rungs = buildList {
+                if (recipe.eraStartYear != null) add(recipe.copy(eraStartYear = null, eraEndYear = null))
+                if (recipe.moodKeysCsv.isNotEmpty()) {
+                    add(recipe.copy(eraStartYear = null, eraEndYear = null, moodKeysCsv = ""))
+                }
+            }
+            for (rung in rungs) {
+                if (pool.size >= MIN_DISCOVERY_POOL_AFTER_FILTER) break
+                val rungTags = RecipeTagResolver.resolve(rung, userTopTags)
+                val more = filterNew(tagPoolBuilder.build(rungTags, rung.tagSampleDepth, userTopArtists))
+                    .filter { seen.add(canonicalKey(it.artist, it.title)) }
+                pool.addAll(more)
+                Log.i(TAG, "'${recipe.name}': relaxed tag pool to ${pool.size} (dropped era/mood rung)")
+            }
+        }
+
+        if (pool.isEmpty()) {
+            Log.w(TAG, "'${recipe.name}': tag-seeded pool empty after filtering; skipping queue")
+            return
+        }
+        Log.i(TAG, "'${recipe.name}': queueing ${pool.size} tag-seeded candidates")
+        mixGenerator.queueDiscoveryCandidates(recipe, pool)
     }
 
     /**

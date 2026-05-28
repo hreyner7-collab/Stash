@@ -17,6 +17,7 @@ import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.mix.MixGenerator
 import com.stash.core.data.mix.MixSeedGenerator
 import com.stash.core.data.mix.MixSeedStrategy
+import com.stash.core.data.mix.TagPoolBuilder
 import com.stash.core.data.sync.TrackMatcher
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -47,6 +48,7 @@ class StashMixRefreshWorkerSeedFilterTest {
     private val blocklistGuard: BlocklistGuard = mockk(relaxed = true)
     private val trackSkipEventDao: TrackSkipEventDao = mockk(relaxed = true)
     private val trackMatcher: TrackMatcher = mockk()
+    private val tagPoolBuilder = TagPoolBuilder(lastFmApiClient)
 
     private fun newWorker(recipeId: Long): StashMixRefreshWorker {
         val params: WorkerParameters = mockk(relaxed = true) {
@@ -59,7 +61,7 @@ class StashMixRefreshWorkerSeedFilterTest {
             recipeDao, playlistDao, discoveryQueueDao, listeningEventDao,
             trackDao, mixGenerator, seedGenerator, lastFmApiClient,
             lastFmCredentials, sessionPreference, blocklistGuard,
-            trackSkipEventDao, trackMatcher,
+            trackSkipEventDao, tagPoolBuilder, trackMatcher,
         )
     }
 
