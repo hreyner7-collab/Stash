@@ -8,7 +8,9 @@ import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.mix.GenreCatalog
 import com.stash.core.data.mix.MixRecipeForm
 import com.stash.core.data.mix.MoodTagMap
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.repository.MusicRepository
+import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -32,6 +34,7 @@ class MixBuilderViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val recipeDao: StashMixRecipeDao,
     private val musicRepository: MusicRepository,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -68,12 +71,19 @@ class MixBuilderViewModel @Inject constructor(
         viewModelScope.launch {
             val recipe = form.toRecipe(existingId = recipeId)
             val id = if (recipeId != null) { recipeDao.update(recipe); recipeId } else recipeDao.insert(recipe)
-            // Fire-and-forget materialization. Guard the static WorkManager
-            // enqueue the same way StashMixRefreshWorker guards its own
-            // ArtBackfillWorker enqueue: a not-yet-initialized WorkManager
-            // (e.g. the unit-test JVM) throws IllegalStateException, and that
-            // must never sink the save the user already committed.
-            runCatching { StashMixRefreshWorker.enqueueOneTime(context, id) }
+            // Fire-and-forget materialization + discovery. The refresh worker
+            // materializes the playlist and FILLS the discovery queue, but it
+            // does NOT drain it — so we must also kick StashDiscoveryWorker
+            // (exactly what "Refresh this mix" does), otherwise a new mix only
+            // populates whenever discovery next happens to run (the daily
+            // schedule), which is why it "appeared broken" for minutes.
+            // Guarded like StashMixRefreshWorker guards its own ArtBackfill
+            // enqueue: a not-yet-initialized WorkManager (unit-test JVM) throws,
+            // and that must never sink the save the user already committed.
+            runCatching {
+                StashMixRefreshWorker.enqueueOneTime(context, id)
+                StashDiscoveryWorker.enqueueOneTime(context, downloadNetworkPreference.current())
+            }
             _saved.tryEmit(Unit)
         }
     }

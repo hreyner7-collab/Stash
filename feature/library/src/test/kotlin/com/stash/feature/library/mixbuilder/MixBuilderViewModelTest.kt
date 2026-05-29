@@ -103,15 +103,27 @@ class MixBuilderViewModelTest {
     }
 
     @Test
-    fun `save with blank name does not insert`() = runTest {
+    fun `save with no genre or mood does not insert`() = runTest {
         val recipeDao = mock<StashMixRecipeDao>()
         val vm = buildVm(recipeDao = recipeDao, savedStateHandle = SavedStateHandle())
 
-        vm.toggleGenre("jazz")
+        vm.setName("My Mix") // a name but no ingredients → invalid
         vm.save()
         advanceUntilIdle()
 
         verifyBlocking(recipeDao, never()) { insert(any()) }
+    }
+
+    @Test
+    fun `save with a genre and blank name inserts (name is optional)`() = runTest {
+        val recipeDao = mock<StashMixRecipeDao> { onBlocking { insert(any()) } doReturn 5L }
+        val vm = buildVm(recipeDao = recipeDao, savedStateHandle = SavedStateHandle())
+
+        vm.toggleGenre("jazz") // no name, but a genre → valid (auto-named)
+        vm.save()
+        advanceUntilIdle()
+
+        verifyBlocking(recipeDao) { insert(any()) }
     }
 
     // ------------------------------------------------------------------
@@ -121,12 +133,14 @@ class MixBuilderViewModelTest {
     private fun buildVm(
         recipeDao: StashMixRecipeDao = mock(),
         musicRepository: MusicRepository = mock(),
+        downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference = mock(),
         context: Context = mock(),
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): MixBuilderViewModel = MixBuilderViewModel(
         savedStateHandle = savedStateHandle,
         recipeDao = recipeDao,
         musicRepository = musicRepository,
+        downloadNetworkPreference = downloadNetworkPreference,
         context = context,
     )
 }
