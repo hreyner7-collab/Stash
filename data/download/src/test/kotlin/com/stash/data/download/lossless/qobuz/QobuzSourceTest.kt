@@ -134,6 +134,47 @@ class QobuzSourceTest {
         assertEquals(0.95f, result!!.confidence, 0.01f)
     }
 
+    @Test fun `resolve falls back to primary artist when full-credit search misses`() = runTest {
+        stubLimiterReady()
+        val fullTerm = "¥\$, Kanye West, Ty Dolla \$ign STARS"
+        val primaryTerm = "¥\$ STARS"
+        // Full multi-artist credit makes the proxy return the FEATURED
+        // artists' unrelated hits — title mismatch → confidence 0.
+        coEvery { apiClient.search(fullTerm, any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(
+                candidate(id = 99L, title = "All Mine", artist = "Kanye West"),
+            )))
+        // Primary-artist retry surfaces the real track.
+        coEvery { apiClient.search(primaryTerm, any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(
+                candidate(id = 7L, title = "STARS", artist = "¥\$"),
+            )))
+        coEvery { apiClient.getFileUrl(7L, any(), any()) } returns download()
+
+        val result = source().resolve(
+            query(artist = "¥\$, Kanye West, Ty Dolla \$ign", title = "STARS"),
+        )
+
+        assertNotNull(result)
+        assertEquals("7", result!!.sourceTrackId)
+        assertTrue("confidence ${result.confidence}", result.confidence > 0.5f)
+        coVerify { apiClient.search(fullTerm, any(), any()) }
+        coVerify { apiClient.search(primaryTerm, any(), any()) }
+    }
+
+    @Test fun `resolve does NOT issue a primary-artist retry for a single artist`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search("Radiohead Karma Police", any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(1L, any(), any()) } returns download()
+
+        val result = source().resolve(query())
+
+        assertNotNull(result)
+        // No comma in the artist → only one search term, no fallback call.
+        coVerify(exactly = 1) { apiClient.search(any(), any(), any()) }
+    }
+
     // ── resolve failure paths ──────────────────────────────────────────
 
     @Test fun `resolve null when search returns no tracks`() = runTest {

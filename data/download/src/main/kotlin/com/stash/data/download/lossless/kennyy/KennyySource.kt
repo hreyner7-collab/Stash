@@ -8,6 +8,7 @@ import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
+import com.stash.data.download.lossless.searchTerms
 import com.stash.data.download.lossless.qobuz.QobuzApiException
 import com.stash.data.download.lossless.qobuz.QobuzQuality
 import com.stash.data.download.lossless.qobuz.QobuzSource
@@ -93,32 +94,35 @@ class KennyySource @Inject constructor(
         Log.d(TAG, "resolve attempt artist='${query.artist}' title='${query.title}' isrc=${query.isrc ?: "none"}")
         // 1. Search kennyy.com.br for candidates. ISRC is Qobuz's best
         // index key — when we have one, send it as the query directly.
-        val searchTerm = query.isrc ?: "${query.artist} ${query.title}"
-        val searchData = callLimited(bypassRateLimit) { apiClient.search(searchTerm) }
-            ?: return null
+        // Try the full artist credit first (single artists with commas in
+        // their NAME still match), then fall back to the PRIMARY artist
+        // (before the first comma) — rescues multi-artist credits like
+        // "¥$, Kanye West, Ty Dolla $ign" whose full-credit query returns the
+        // featured artists' tracks (all scoring 0). ISRC, when present, is
+        // used alone. See TrackQuery.searchTerms.
+        var found: Pair<QobuzTrack, Float>? = null
+        for (term in query.searchTerms()) {
+            val searchData = callLimited(bypassRateLimit) { apiClient.search(term) } ?: continue
+            val candidates = searchData.tracks?.items.orEmpty()
+            if (candidates.isEmpty()) continue
 
-        val candidates = searchData.tracks?.items.orEmpty()
-        if (candidates.isEmpty()) {
-            Log.d(TAG, "no_match artist='${query.artist}' title='${query.title}' (search returned empty)")
-            return null
-        }
-
-        // 2. Score and pick the best candidate that crosses the
-        // confidence threshold.
-        val scored = candidates.map { it to confidence(query, it) }
-        val best = scored
-            .filter { it.second >= MIN_CONFIDENCE }
-            .maxByOrNull { it.second }
-
-        if (best == null) {
+            val scored = candidates.map { it to confidence(query, it) }
+            val match = scored.filter { it.second >= MIN_CONFIDENCE }.maxByOrNull { it.second }
+            if (match != null) {
+                found = match
+                break
+            }
             val top = scored.sortedByDescending { it.second }.take(3)
             Log.d(
                 TAG,
-                "reason=below_confidence no candidate above threshold ($MIN_CONFIDENCE) for '${query.artist} - ${query.title}': " +
+                "below_confidence (<$MIN_CONFIDENCE) term='$term' for '${query.artist} - ${query.title}': " +
                     top.joinToString(", ") { (c, s) ->
                         "[${"%.2f".format(s)} '${c.title}' by '${c.performer?.name}']"
                     },
             )
+        }
+        val best = found ?: run {
+            Log.d(TAG, "no_match artist='${query.artist}' title='${query.title}'")
             return null
         }
 

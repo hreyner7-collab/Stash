@@ -86,6 +86,30 @@ data class TrackQuery(
 )
 
 /**
+ * The proxy search terms to try for this query, in priority order.
+ *
+ * - When an [TrackQuery.isrc] is present it is the precise index key — used alone.
+ * - Otherwise the FULL artist credit is tried first ("Tyler, The Creator Foo"),
+ *   so single artists whose name contains a comma still match.
+ * - Then, for multi-artist credits joined with commas (e.g.
+ *   "¥$, Kanye West, Ty Dolla $ign"), a fallback using only the PRIMARY artist
+ *   (text before the first comma → "¥$") is appended. Sending the full credit
+ *   verbatim makes the proxy return the featured artists' popular tracks
+ *   instead of the actual song, so every candidate scores 0 and the download
+ *   fails; the primary-artist retry rescues it. (Stream + download share this.)
+ */
+fun TrackQuery.searchTerms(): List<String> {
+    isrc?.takeIf { it.isNotBlank() }?.let { return listOf(it) }
+    val full = "$artist $title".trim()
+    val primary = artist.substringBefore(",").trim()
+    return if (primary.isNotEmpty() && !primary.equals(artist.trim(), ignoreCase = true)) {
+        listOf(full, "$primary $title".trim())
+    } else {
+        listOf(full)
+    }
+}
+
+/**
  * A successful match returned by a [LosslessSource]. The downstream
  * download pipeline consumes [downloadUrl] and [downloadHeaders];
  * [format] and [confidence] drive whether the result is accepted versus
