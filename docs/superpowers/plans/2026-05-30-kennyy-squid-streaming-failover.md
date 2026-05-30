@@ -91,28 +91,30 @@ if (!healthMonitor.isHealthy.value) {
 
 - [ ] **Step 5: Run it — expect PASS.** Same command. Expected: PASS.
 
-- [ ] **Step 6: Write the failing test — slow hang times out as failure.**
+- [ ] **Step 6: Write the failing test — slow hang times out as a recorded failure.** Mock the monitor (relaxed) so we can assert `recordFailure` precisely, and stub `isHealthy` healthy so the Task-1 gate lets the call through. Mock the source relaxed so its `lastResolveFailedNetwork` reads as `false` (its default) without a MockK "no answer" error.
 
 ```kotlin
 @Test
 fun resolve_timesOutAsFailure_whenKennyyHangs() = runTest {
-    val source: KennyySource = mockk {
+    val source: KennyySource = mockk(relaxed = true) {
         coEvery { resolveImmediate(any()) } coAnswers { delay(60_000); null }
     }
-    val monitor = KennyyHealthMonitor() // healthy, so the gate lets it through
-
+    val monitor: KennyyHealthMonitor = mockk(relaxed = true) {
+        every { isHealthy } returns MutableStateFlow(true) // healthy -> gate lets it through
+    }
     val resolver = KennyyStreamResolver(source, monitor)
+
     val result = resolver.resolve(track(1L))
 
     assertNull(result)
-    assertFalse("a hang must trip health, not be ignored", monitor.isHealthy.value || false)
-    // Stronger: the hang recorded a failure. One failure alone won't flip a fresh
-    // window, so assert via the resolver returning null within the test's virtual time.
+    verify(exactly = 1) { monitor.recordFailure() } // the hang was classified as a failure
 }
 ```
-Note for the implementer: `runTest` uses virtual time, so the 60s `delay` inside the mock advances instantly — the `withTimeout(3_000)` will fire deterministically. Keep the assertion to `assertNull(result)` plus a `coVerify` that `monitor.recordFailure()` happened if you make the monitor a mock; using the real monitor, assert behavior (e.g. after this call, a follow-up makes it unhealthy). Prefer mocking the monitor here for a precise `recordFailure` assertion.
+`runTest` uses virtual time, so the mock's 60s `delay` advances instantly and the `withTimeout(3_000)` fires deterministically — no wall-clock wait.
 
-- [ ] **Step 7: Run it — expect FAIL** (no timeout today; the mock's null returns immediately under virtual time, so without `withTimeout` the failure-path still runs but there's no timeout classification). Adjust the test to assert the timeout path specifically (a `TimeoutCancellationException` is caught and `recordFailure` called). Run the command; expected FAIL.
+- [ ] **Step 7: Run it — expect FAIL.** Before the timeout exists, the mock returns `null` (the 60s delay advances instantly) and the resolver's existing failure-classification reads the relaxed source's `lastResolveFailedNetwork == false`, so it calls `recordNoMatch()` (a no-op), **not** `recordFailure()`. The `verify(exactly = 1) { monitor.recordFailure() }` therefore fails.
+Run: `./gradlew :core:media:testDebugUnitTest --tests "com.stash.core.media.streaming.KennyyStreamResolverTest"`
+Expected: FAIL — `recordFailure()` verified 1 but was 0.
 
 - [ ] **Step 8: Implement the timeout backstop.** Wrap the `source.resolveImmediate(query)` call:
 
@@ -225,14 +227,21 @@ class KennyyHealthProbe(
         if (job?.isActive == true) return
         Log.d(TAG, "start")
         job = scope.launch {
-            probeOnce() // immediate ground-truth probe (cold-start fix)
+            // Exactly ONE probe per loop iteration. The first iteration is the
+            // immediate cold-start ground-truth probe (runs even though health
+            // defaults to healthy). We idle ONLY after a probe that SUCCEEDED
+            // while health is up — never on the failure ramp, or the cold-start
+            // case (health still "healthy" after 1-2 failures) would deadlock
+            // waiting for a flip that nothing else can produce.
             while (true) {
-                if (healthMonitor.isHealthy.value) {
-                    // Idle until health flips to unhealthy, then resume polling.
+                val ok = probeOnce()
+                if (ok && healthMonitor.isHealthy.value) {
+                    // Kennyy is up and healthy — real plays keep health fresh;
+                    // stop burning probes. Resume the instant health drops.
                     healthMonitor.isHealthy.first { !it }
+                } else {
+                    delay(PROBE_INTERVAL_MS) // ramping down, or recovering — keep polling
                 }
-                probeOnce()
-                delay(PROBE_INTERVAL_MS)
             }
         }
     }
@@ -243,22 +252,30 @@ class KennyyHealthProbe(
         job = null
     }
 
-    /** One probe iteration. MUST NOT let any Throwable escape (except cancellation). */
-    private suspend fun probeOnce() {
-        try {
+    /**
+     * One probe iteration. Returns true iff Kennyy responded with a match.
+     * MUST NOT let any non-cancellation Throwable escape — it is the sole path
+     * back to healthy, so the loop must survive every iteration.
+     *
+     * Catch ORDER is load-bearing: [TimeoutCancellationException] is a
+     * [CancellationException] subclass, so it must be caught FIRST and recorded
+     * as a failure; the generic CancellationException re-throw must come BEFORE
+     * the Throwable catch so stop() still cancels cleanly.
+     */
+    private suspend fun probeOnce(): Boolean {
+        return try {
             val result = withTimeout(PROBE_TIMEOUT_MS) { source.resolveImmediate(PROBE_QUERY) }
             if (result != null) {
-                healthMonitor.recordSuccess()
-                Log.d(TAG, "probe ok")
+                healthMonitor.recordSuccess(); Log.d(TAG, "probe ok"); true
             } else {
-                healthMonitor.recordFailure()
-                Log.d(TAG, "probe miss/fail")
+                healthMonitor.recordFailure(); Log.d(TAG, "probe miss/fail"); false
             }
+        } catch (e: TimeoutCancellationException) {
+            healthMonitor.recordFailure(); Log.d(TAG, "probe timeout"); false
         } catch (e: CancellationException) {
-            throw e // let stop() cancel cleanly; TimeoutCancellationException handled below first
+            throw e
         } catch (e: Throwable) {
-            healthMonitor.recordFailure()
-            Log.w(TAG, "probe threw — recorded failure", e)
+            healthMonitor.recordFailure(); Log.w(TAG, "probe threw — recorded failure", e); false
         }
     }
 
@@ -277,42 +294,46 @@ class KennyyHealthProbe(
     }
 }
 ```
-**Subtlety to verify during implementation:** `TimeoutCancellationException` extends `CancellationException`. The `catch (CancellationException) { throw e }` above would re-throw a *timeout* too, which we do NOT want (a timeout is a probe failure, not loop cancellation). Fix by catching `TimeoutCancellationException` FIRST and recording a failure, THEN `catch (CancellationException) { throw e }`, THEN `catch (Throwable)`. Order the catches:
-```kotlin
-} catch (e: TimeoutCancellationException) {
-    healthMonitor.recordFailure(); Log.d(TAG, "probe timeout")
-} catch (e: CancellationException) {
-    throw e
-} catch (e: Throwable) {
-    healthMonitor.recordFailure(); Log.w(TAG, "probe threw", e)
-}
-```
-Use this three-catch order in the real implementation.
+(The three-catch order above is load-bearing and already correct in the snippet — `TimeoutCancellationException` first, then the `CancellationException` re-throw, then `Throwable`. Do not reorder.)
 
 - [ ] **Step 4: Run — expect PASS.** Same command. Expected: PASS.
 
-- [ ] **Step 5: Write the failing test — idle while healthy, poll while unhealthy.**
+- [ ] **Step 5: Write the failing tests — poll on interval while unhealthy, and idle after a success while healthy.** Two separate tests (the loop runs exactly one probe per iteration; a failing probe never idles, a succeeding+healthy probe does):
 
 ```kotlin
 @Test
-fun pollsWhileUnhealthy_idlesWhenHealthy() = runTest {
-    val health = MutableStateFlow(false)
+fun pollsOnInterval_whileUnhealthy() = runTest {
     val source: KennyySource = mockk { coEvery { resolveImmediate(any()) } returns null }
-    val monitor: KennyyHealthMonitor = mockk(relaxed = true) { every { isHealthy } returns health }
+    val monitor: KennyyHealthMonitor = mockk(relaxed = true) {
+        every { isHealthy } returns MutableStateFlow(false)
+    }
     val probe = KennyyHealthProbe(source, monitor, this)
-    probe.start(); runCurrent()           // immediate probe (1)
-    advanceTimeBy(45_001L); runCurrent()  // second probe (2)
-    val callsWhileUnhealthy = 2
-    coVerify(exactly = callsWhileUnhealthy) { source.resolveImmediate(any()) }
+    probe.start(); runCurrent()            // probe #1, then delay(45s)
+    coVerify(exactly = 1) { source.resolveImmediate(any()) }
+    advanceTimeBy(45_001L); runCurrent()   // probe #2
+    coVerify(exactly = 2) { source.resolveImmediate(any()) }
+    advanceTimeBy(45_001L); runCurrent()   // probe #3
+    coVerify(exactly = 3) { source.resolveImmediate(any()) }
+    probe.stop()
+}
 
-    health.value = true                    // recover
-    advanceTimeBy(200_000L); runCurrent()  // no further probes while healthy
-    coVerify(exactly = callsWhileUnhealthy) { source.resolveImmediate(any()) }
+@Test
+fun idlesAfterSuccess_whileHealthy() = runTest {
+    // A non-null result = Kennyy responded; a relaxed mock SourceResult avoids
+    // needing the constructor (probeOnce only checks result != null).
+    val source: KennyySource = mockk { coEvery { resolveImmediate(any()) } returns mockk(relaxed = true) }
+    val monitor: KennyyHealthMonitor = mockk(relaxed = true) {
+        every { isHealthy } returns MutableStateFlow(true)   // healthy
+    }
+    val probe = KennyyHealthProbe(source, monitor, this)
+    probe.start(); runCurrent()            // probe #1 succeeds + healthy -> idle (no delay loop)
+    advanceTimeBy(200_000L); runCurrent()  // still idling: no further probes
+    coVerify(exactly = 1) { source.resolveImmediate(any()) }
     probe.stop()
 }
 ```
 
-- [ ] **Step 6: Run — expect PASS** (the implementation already supports this; if it fails, fix the loop's idle/poll logic until green).
+- [ ] **Step 6: Run — expect PASS** (the Step-3 implementation already supports both; if either fails, the loop's idle/poll logic is wrong — fix until green).
 
 - [ ] **Step 7: Write the failing test — RESILIENCE: a throwing probe does not kill the loop.**
 
@@ -347,14 +368,12 @@ fun stop_cancelsTheLoop() = runTest {
         every { isHealthy } returns MutableStateFlow(false)
     }
     val probe = KennyyHealthProbe(source, monitor, this)
-    probe.start(); runCurrent()
-    probe.stop()
-    val before = 1 // at least the immediate probe
-    advanceTimeBy(200_000L); runCurrent()
-    coVerify(atMost = before + 0) { source.resolveImmediate(any()) } // no probes after stop
+    probe.start(); runCurrent()            // probe #1, then suspended in delay(45s)
+    probe.stop()                           // cancels the loop job mid-delay
+    advanceTimeBy(200_000L); runCurrent()  // no probe fires after cancellation
+    coVerify(exactly = 1) { source.resolveImmediate(any()) } // only the pre-stop probe ran
 }
 ```
-(If the immediate probe count makes `atMost` brittle, assert that the call count does not *increase* after `stop()` by capturing it before/after.)
 
 - [ ] **Step 10: Run the whole probe test class — expect PASS.** Run the command. Expected: PASS.
 
