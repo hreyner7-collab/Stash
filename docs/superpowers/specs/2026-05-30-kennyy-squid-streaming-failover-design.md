@@ -70,7 +70,7 @@ Five focused changes:
 | # | Component | Change |
 |---|-----------|--------|
 | 1 | `KennyyStreamResolver.resolve` | When `healthMonitor.isHealthy.value == false`, return `null` immediately without a network call. Mirrors `QobuzStreamResolver` returning null when its cookie is cold. |
-| 2 | **New** `KennyyHealthProbe` | Background loop: on `start()` probe Kennyy once immediately; then, **only while unhealthy**, probe every ~45s with one cheap, short-timeout call; record each outcome into `KennyyHealthMonitor`. Sole caller of Kennyy while unhealthy → its successes flip health back to healthy. |
+| 2 | **New** `KennyyHealthProbe` | Background loop: on `start()` probe Kennyy once immediately; then, **only while unhealthy**, probe every ~45s with one cheap, short-timeout call; record each outcome into `KennyyHealthMonitor`. Sole caller of Kennyy while unhealthy → its successes flip health back to healthy. **The loop MUST survive every iteration** — see "Probe-loop resilience (critical)" below. |
 | 3 | `StashApplication` STARTED lifecycle | Start `KennyyHealthProbe` alongside the existing `squidCookieAutoRefresher.start()`. Its immediate probe establishes ground truth before first play (cold-start fix). `stop()` on STOPPED. |
 | 4 | `SquidCookieAutoRefresher.refresh` | Replace permanent halt-after-2-failures with exponential backoff (60s → cap 5min) that keeps retrying while Kennyy is unhealthy; reset on success. `CaptchaExpiredNotifier` stays as the manual fallback nag. Never permanently halts for the session. |
 | 5 | `KennyyStreamResolver` | Wrap the streaming Kennyy resolve in a ~3s `withTimeout` (a timeout counts as a network failure → feeds the monitor → trips health faster). The download path keeps 30s. Backstop for slow-hang degradation that hasn't tripped the health threshold yet. |
@@ -114,10 +114,42 @@ A lightweight **search** against Kennyy for a hardcoded always-in-catalog track 
 download-URL resolution; we only care whether Kennyy responds), wrapped in the short
 timeout. Success = ≥1 result. The implementation plan must confirm the cheapest existing
 `KennyyApiClient` search method (e.g. the `/get-music` search endpoint) and reuse it — do
-**not** add a new proxy endpoint. The probe records `recordSuccess()`/`recordFailure()` on
-`KennyyHealthMonitor` exactly as the play path does, so "no match" vs "network failure"
-semantics stay consistent (a search returning zero results for the known track is itself a
-proxy anomaly → treat as failure for probe purposes).
+**not** add a new proxy endpoint.
+
+**Outcome → health recording (exact):** the probe must record exactly two outcomes:
+- ≥1 result within the timeout → `recordSuccess()`.
+- Anything else — timeout, thrown exception (DNS/TLS/`IOException`/parse), **or zero results**
+  for the hardcoded always-in-catalog track (itself a proxy anomaly) → `recordFailure()`.
+
+The probe must **not** route its zero-result case through the play path's `recordNoMatch()`
+(a deliberate no-op for genuine per-track catalog misses). Because the probe track is chosen
+to always exist, zero results means the proxy is misbehaving, and that must move the health
+window. The play path's failure classification keys off `KennyySource.lastResolveFailedNetwork`
+after a full `resolveImmediate`; since the probe uses a different (search-only) call, the plan
+must confirm the chosen search method exposes a comparable network-vs-no-match distinction —
+**or** the probe wraps the call in its own try/catch and classifies the outcome itself (the
+default if no such signal exists).
+
+## Probe-loop resilience (critical)
+
+Change #1 makes the play path **skip Kennyy entirely while unhealthy**, so real plays never
+call Kennyy (and never `recordSuccess`) during an outage. That makes `KennyyHealthProbe` the
+**sole** path back to `healthy`. If the probe loop ever dies, health is stuck unhealthy for
+the rest of the foreground session and Kennyy is never retried — re-creating the exact "only
+works sometimes" symptom this spec exists to eliminate.
+
+Therefore the loop is required to survive every iteration:
+- Each probe iteration wraps the entire probe call in a `try/catch` that records **any**
+  `Throwable` as `recordFailure()` and continues to the next interval — no exception may
+  escape the loop body.
+- The catch MUST re-throw `CancellationException` *before* the catch-all, so `stop()`
+  (lifecycle STOPPED) still cancels the loop cleanly. (Project convention — see the
+  cancellation-in-worker-catches rule.)
+- The loop continues polling on its interval for as long as the app is foregrounded and
+  Kennyy is unhealthy; it idles only when health flips to `healthy`.
+
+This is the single most important correctness property in the design: the recovery loop must
+be unbrickable.
 
 ## Testing
 
@@ -130,7 +162,10 @@ All unit-level (mocks + `TestScope`, TDD), following the existing
   a failure, returns null.
 - `KennyyHealthProbe`: `start()` probes once immediately; probes on interval while unhealthy;
   idle while healthy; probe success → `recordSuccess`, probe failure → `recordFailure`;
-  `stop()` cancels the loop.
+  zero-results → `recordFailure` (not `recordNoMatch`); `stop()` cancels the loop.
+- `KennyyHealthProbe` resilience: a probe iteration that **throws** is recorded as a failure
+  and the loop **survives** to probe again on the next interval (it does not die); `stop()`
+  still cancels cleanly (CancellationException is not swallowed).
 - `SquidCookieAutoRefresher`: after a solve failure it retries with backoff and does **not**
   permanently stop; after success it resets backoff and resumes the age-based cadence.
 - Integration (`StreamSourceRegistry`): with Kennyy unhealthy, resolve is served via Squid
