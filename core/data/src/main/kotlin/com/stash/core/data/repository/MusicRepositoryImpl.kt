@@ -254,7 +254,11 @@ class MusicRepositoryImpl @Inject constructor(
     // single place where streaming mode IS meaningful for a Library-ish
     // surface — a synced playlist in streaming mode should show all of
     // its tracks (streamable + downloaded), and tapping a streamable
-    // track streams via Kennyy. In offline mode it stays downloaded-only.
+    // track streams via Kennyy. In offline mode it stays downloaded-only —
+    // EXCEPT Stash Mixes, which are an inherently online discovery surface
+    // and stay fully visible offline (the DAO's STASH_MIX exemption in
+    // TrackDao.getByPlaylist). Tap-time playability is governed by live
+    // connectivity in PlaylistDetailViewModel, not this preference.
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun getTracksByPlaylist(playlistId: Long): Flow<List<Track>> =
         streamingPreference.enabled.flatMapLatest { enabled ->

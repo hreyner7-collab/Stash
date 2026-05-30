@@ -12,6 +12,7 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.streaming.ConnectivityMonitor
+import com.stash.core.media.streaming.queuePlayableTracks
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.Track
@@ -191,16 +192,7 @@ class PlaylistDetailViewModel @Inject constructor(
         viewModelScope.launch {
             _tappedTrackId.value = trackId
             try {
-                // In streaming mode the queue includes synced-but-not-downloaded
-                // tracks (they'll resolve via Kennyy inside setQueue). In offline
-                // mode we still filter to downloaded-only so we don't enqueue
-                // unplayable items.
-                val streamingOn = streamingPreference.current()
-                val playable = if (streamingOn) {
-                    uiState.value.tracks
-                } else {
-                    uiState.value.tracks.filter { it.filePath != null }
-                }
+                val playable = playableTracks()
                 if (playable.isEmpty()) return@launch
                 val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
                 playerRepository.setQueue(playable, index)
@@ -211,18 +203,43 @@ class PlaylistDetailViewModel @Inject constructor(
     }
 
     /**
+     * The subset of [uiState] tracks that can actually be enqueued right now.
+     *
+     * - **Streaming mode on:** every track. Stream-only tracks resolve via
+     *   Kennyy inside [PlayerRepository.setQueue].
+     * - **Offline mode (streaming off):** downloaded-only, so we never enqueue
+     *   unplayable items — EXCEPT for a Stash Mix. A Mix is an inherently
+     *   online discovery surface (its tracks are stream-only by design), so
+     *   when the device has a live connection its streamable tracks stay
+     *   enqueueable and the mix plays end-to-end regardless of the
+     *   Online/Offline preference. With no connection we fall back to
+     *   downloaded-only; the per-tap guard in [playTrack] surfaces the
+     *   "Online only — connect to play this track" Snackbar in that case.
+     *
+     * This keeps the queue consistent with what the list shows: Mix detail
+     * renders all streamable tracks offline (TrackDao.getByPlaylist's
+     * STASH_MIX exemption), so the queue must include them too — otherwise a
+     * tapped stream-only track would be filtered out and the wrong track would
+     * play.
+     */
+    private suspend fun playableTracks(): List<Track> {
+        val isMix = uiState.value.playlist?.type == PlaylistType.STASH_MIX
+        return queuePlayableTracks(
+            tracks = uiState.value.tracks,
+            isMix = isMix,
+            streamingEnabled = streamingPreference.current(),
+            connected = connectivityMonitor.isConnected(),
+        )
+    }
+
+    /**
      * Shuffles the playlist and begins playback. Streaming mode shuffles all
      * tracks (downloaded + synced-streamable); offline mode only shuffles
      * tracks present on disk.
      */
     fun shuffleAll() {
         viewModelScope.launch {
-            val streamingOn = streamingPreference.current()
-            val playable = if (streamingOn) {
-                uiState.value.tracks
-            } else {
-                uiState.value.tracks.filter { it.filePath != null }
-            }
+            val playable = playableTracks()
             if (playable.isEmpty()) return@launch
             val shuffled = playable.shuffled()
             _tappedTrackId.value = shuffled[0].id
@@ -242,12 +259,7 @@ class PlaylistDetailViewModel @Inject constructor(
      */
     fun playAll() {
         viewModelScope.launch {
-            val streamingOn = streamingPreference.current()
-            val playable = if (streamingOn) {
-                uiState.value.tracks
-            } else {
-                uiState.value.tracks.filter { it.filePath != null }
-            }
+            val playable = playableTracks()
             if (playable.isEmpty()) return@launch
             _tappedTrackId.value = playable[0].id
             _bulkPlayInFlight.value = BulkPlayAction.PLAY_ALL
