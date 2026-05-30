@@ -269,6 +269,7 @@ class StashApplication : Application(), Configuration.Provider {
             StashMixDefaults.seedIfNeeded(stashMixRecipeDao)
             maybeRetuneStashDiscover()
             maybeRetuneStashMixes()
+            maybeRemoveRetiredBuiltinMixes()
             maybeCleanupDiscoveryLibraryHits()
             // Fire a one-shot refresh on first launch so mixes populate
             // without waiting for the 24-hour periodic cycle. Subsequent
@@ -604,6 +605,31 @@ class StashApplication : Application(), Configuration.Provider {
     }
 
     /**
+     * v0.9.40: retire the "Deep Cuts" and "First Listen" built-in mixes —
+     * Daily Discover is now the sole built-in; users build the rest via the
+     * Mix Builder. Deletes those recipes (CASCADE removes their discovery_queue
+     * rows) AND their materialized playlists, leaving Daily Discover and all
+     * user-created mixes untouched. Gated by [STASH_MIX_RETIRED_VERSION] so it
+     * runs once per install; fresh installs never seed them (see StashMixDefaults).
+     */
+    private suspend fun maybeRemoveRetiredBuiltinMixes() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        if (prefs.getInt("stash_mix_retired_version", 0) >= STASH_MIX_RETIRED_VERSION) return
+
+        val retired = listOf("Deep Cuts", "First Listen")
+        val recipes = stashMixRecipeDao.getBuiltinsByName(retired)
+        recipes.mapNotNull { it.playlistId }.forEach { playlistDao.deleteById(it) }
+        val removed = stashMixRecipeDao.deleteBuiltinsByName(retired)
+        Log.i(
+            "StashMigration",
+            "Retired $removed builtin mix(es) + ${recipes.count { it.playlistId != null }} playlist(s)",
+        )
+        prefs.edit()
+            .putInt("stash_mix_retired_version", STASH_MIX_RETIRED_VERSION)
+            .apply()
+    }
+
+    /**
      * PR 7 one-time cleanup: delete pre-PR-6 era "library-hit" discovery
      * DONE rows from `discovery_queue`. Pre-PR-6 StashDiscoveryWorker.handle()
      * canonical-deduped Last.fm candidates against the user's library and
@@ -756,6 +782,13 @@ class StashApplication : Application(), Configuration.Provider {
          *    Cuts / First Listen) — see [StashMixDefaults].
          */
         private const val STASH_MIX_RECIPE_VERSION = 2
+
+        /**
+         * Bump to retire built-in mixes on upgrade without wiping the others.
+         *  - v1 = the 0.9.40 removal of "Deep Cuts" + "First Listen"
+         *    (Daily Discover and all custom mixes are preserved).
+         */
+        private const val STASH_MIX_RETIRED_VERSION = 1
 
         /**
          * Bump when the built-in Stash Discover recipe's tunables change

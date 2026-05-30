@@ -39,4 +39,21 @@ class StashMixRecipeDaoDeleteCustomTest {
         dao.deleteCustom(id)
         assertEquals("builtin must survive", "Deep Cuts", dao.getById(id)?.name)
     }
+
+    @Test fun `deleteBuiltinsByName removes named builtins and leaves the rest`() = runTest {
+        val daily = dao.insert(StashMixRecipeEntity(name = "Daily Discover", isBuiltin = true))
+        val deep = dao.insert(StashMixRecipeEntity(name = "Deep Cuts", isBuiltin = true))
+        val first = dao.insert(StashMixRecipeEntity(name = "First Listen", isBuiltin = true))
+        val custom = dao.insert(StashMixRecipeEntity(name = "My Mix", isBuiltin = false))
+
+        val toRemove = dao.getBuiltinsByName(listOf("Deep Cuts", "First Listen"))
+        assertEquals(setOf("Deep Cuts", "First Listen"), toRemove.map { it.name }.toSet())
+
+        val removed = dao.deleteBuiltinsByName(listOf("Deep Cuts", "First Listen"))
+        assertEquals(2, removed)
+        assertNull(dao.getById(deep))
+        assertNull(dao.getById(first))
+        assertNotNull("Daily Discover must survive", dao.getById(daily))
+        assertNotNull("custom mix must survive", dao.getById(custom))
+    }
 }
