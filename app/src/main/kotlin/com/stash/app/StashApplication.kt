@@ -39,6 +39,7 @@ import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
 import com.stash.core.data.sync.workers.constraintsForManualTrigger
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.core.media.streaming.KennyyHealthProbe
 import com.stash.core.media.streaming.SquidCookieAutoRefresher
 import com.stash.data.download.lossless.LosslessRetryScheduler
 import com.stash.data.download.ytdlp.YtDlpUpdateWorker
@@ -137,6 +138,15 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var squidCookieAutoRefresher: SquidCookieAutoRefresher
 
     /**
+     * Cold-start Kennyy health probe. Started by the ProcessLifecycle
+     * observer registered in [onCreate] alongside [squidCookieAutoRefresher]
+     * so it runs an immediate ground-truth check on app STARTED, setting
+     * Kennyy health before the first play.
+     */
+    @Inject
+    lateinit var kennyyHealthProbe: KennyyHealthProbe
+
+    /**
      * Writes uncaught exceptions to `cacheDir/crashes/` so the user can
      * later share the latest report from Settings → Diagnostics. Installed
      * as the first thing after super.onCreate() so it catches errors from
@@ -199,10 +209,12 @@ class StashApplication : Application(), Configuration.Provider {
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
                     squidCookieAutoRefresher.start()
+                    kennyyHealthProbe.start() // immediate probe sets Kennyy health before first play
                 }
 
                 override fun onStop(owner: LifecycleOwner) {
                     squidCookieAutoRefresher.stop()
+                    kennyyHealthProbe.stop()
                 }
             },
         )
