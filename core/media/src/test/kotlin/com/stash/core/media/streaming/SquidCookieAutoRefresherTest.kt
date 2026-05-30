@@ -55,4 +55,27 @@ class SquidCookieAutoRefresherTest {
         coVerify(exactly = 1) { qobuzSource.clearLastKnownBad() }
         refresher.stop()
     }
+
+    @Test
+    fun retriesWithBackoff_doesNotPermanentlyHalt_onRepeatedSolveFailure() = runTest {
+        val solver: NativeSquidCaptchaSolver = mockk {
+            coEvery { solve() } returnsMany listOf(null, null, "good-cookie")
+        }
+        val prefs: LosslessSourcePreferences = mockk(relaxed = true) {
+            coEvery { captchaCookieSetAtMs } returns flowOf(0L)
+        }
+        val monitor = KennyyHealthMonitor()
+        repeat(3) { monitor.recordFailure() } // unhealthy
+        val qobuzSource: QobuzSource = mockk(relaxed = true)
+
+        val refresher = SquidCookieAutoRefresher(solver, monitor, prefs, qobuzSource, this)
+        refresher.start()
+        runCurrent()                          // attempt 1 -> null
+        advanceTimeBy(60_001L); runCurrent()  // backoff 1 elapses -> attempt 2 -> null
+        advanceTimeBy(120_001L); runCurrent() // backoff 2 elapses -> attempt 3 -> success
+
+        coVerify(exactly = 3) { solver.solve() }
+        coVerify(exactly = 1) { prefs.setCaptchaCookieValue("good-cookie") }
+        refresher.stop()
+    }
 }
