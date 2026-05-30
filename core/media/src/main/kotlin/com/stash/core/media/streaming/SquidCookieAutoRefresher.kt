@@ -114,8 +114,15 @@ class SquidCookieAutoRefresher(
                 return
             }
             consecutive += 1
-            val backoff = minOf(BASE_RETRY_MS shl (consecutive - 1), MAX_RETRY_MS)
-            Log.w(TAG, "refresh failure ($consecutive) — retrying in ${backoff}ms")
+            // Short-circuit past the cap point so the shift can never overflow.
+            // BASE_RETRY_MS doubling hits/exceeds MAX_RETRY_MS at consecutive=4
+            // (480s -> capped 300s), so from consecutive>=5 use the cap directly.
+            val backoff = if (consecutive >= 5) {
+                MAX_RETRY_MS
+            } else {
+                minOf(BASE_RETRY_MS shl (consecutive - 1), MAX_RETRY_MS)
+            }
+            Log.w(TAG, "refresh failure ($consecutive) - retrying in ${backoff}ms")
             delay(backoff)
         }
     }
