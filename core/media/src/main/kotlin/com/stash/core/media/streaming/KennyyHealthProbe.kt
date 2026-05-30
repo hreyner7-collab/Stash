@@ -52,7 +52,10 @@ class KennyyHealthProbe(
                 if (ok && healthMonitor.isHealthy.value) {
                     healthMonitor.isHealthy.first { !it } // idle until health drops
                 } else {
-                    delay(PROBE_INTERVAL_MS) // ramping down, or recovering — keep polling
+                    // Ramp DOWN fast (probe failing but health still says healthy → converge to
+                    // the truth before the user's first play); once unhealthy, poll for recovery
+                    // on the slower cadence so we don't hammer a dead proxy.
+                    delay(if (healthMonitor.isHealthy.value) RAMP_INTERVAL_MS else PROBE_INTERVAL_MS)
                 }
             }
         }
@@ -87,6 +90,7 @@ class KennyyHealthProbe(
     private companion object {
         const val TAG = "KennyyHealthProbe"
         const val PROBE_INTERVAL_MS = 45_000L
+        const val RAMP_INTERVAL_MS = 2_000L
         const val PROBE_TIMEOUT_MS = 3_000L
         // Hardcoded always-in-catalog track — any null result is a proxy anomaly.
         val PROBE_QUERY = TrackQuery(

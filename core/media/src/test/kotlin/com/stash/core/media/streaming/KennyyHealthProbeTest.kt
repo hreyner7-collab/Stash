@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -72,6 +74,33 @@ class KennyyHealthProbeTest {
         advanceTimeBy(45_001L); runCurrent()  // iteration 2 runs (proves loop survived)
         coVerify(atLeast = 2) { source.resolveImmediate(any()) }
         verify(atLeast = 1) { monitor.recordFailure() }
+        probe.stop()
+    }
+
+    @Test
+    fun coldStartWithDeadKennyy_convergesToUnhealthyQuickly() = runTest {
+        val source: KennyySource = mockk { coEvery { resolveImmediate(any()) } returns null }
+        val monitor = KennyyHealthMonitor() // real, starts healthy
+        val probe = KennyyHealthProbe(source, monitor, this)
+        probe.start(); runCurrent()          // probe #1 -> [F], still healthy, delay 2s
+        assertTrue(monitor.isHealthy.value)  // not flipped yet after 1 failure
+        advanceTimeBy(2_001L); runCurrent()  // probe #2 -> [F,F], still healthy, delay 2s
+        advanceTimeBy(2_001L); runCurrent()  // probe #3 -> [F,F,F] -> UNHEALTHY
+        assertFalse(monitor.isHealthy.value) // converged within ~4s (not 90s)
+        probe.stop()
+    }
+
+    @Test
+    fun wakesFromIdle_whenHealthDropsAgain() = runTest {
+        val health = MutableStateFlow(true)
+        val source: KennyySource = mockk { coEvery { resolveImmediate(any()) } returns mockk(relaxed = true) }
+        val monitor: KennyyHealthMonitor = mockk(relaxed = true) { every { isHealthy } returns health }
+        val probe = KennyyHealthProbe(source, monitor, this)
+        probe.start(); runCurrent()           // probe #1 succeeds + healthy -> idle on first { !it }
+        coVerify(exactly = 1) { source.resolveImmediate(any()) }
+        health.value = false                  // Kennyy dies mid-session -> idle must wake
+        runCurrent()
+        coVerify(atLeast = 2) { source.resolveImmediate(any()) } // probed again after waking
         probe.stop()
     }
 
