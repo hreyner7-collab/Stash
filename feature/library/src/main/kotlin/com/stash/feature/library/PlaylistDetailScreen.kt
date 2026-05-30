@@ -64,6 +64,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.stash.core.data.mix.MixBuildState
 import com.stash.core.media.BulkPlayAction
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.Track
@@ -92,6 +93,7 @@ fun PlaylistDetailScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
+    val buildState by viewModel.buildState.collectAsStateWithLifecycle()
     val bulkPlayInFlight by viewModel.bulkPlayInFlight.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
@@ -178,6 +180,61 @@ fun PlaylistDetailScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                    }
+                }
+
+                // ── Custom-mix building / empty state ───────────────────
+                // A freshly created mix populates asynchronously; show a
+                // "Building…" state instead of a blank body, and a clear
+                // "found nothing" state if discovery comes up empty.
+                if (state.tracks.isEmpty() && state.searchQuery.isEmpty()) {
+                    when (buildState) {
+                        MixBuildState.BUILDING -> item(key = "mix-building") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 56.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    text = "Building your mix…",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "Finding fresh tracks from your genres — this can take a moment.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp),
+                                )
+                            }
+                        }
+                        MixBuildState.EMPTY -> item(key = "mix-empty") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 56.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = "Couldn't find tracks",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "Try editing this mix with different genres or moods.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp),
+                                )
+                            }
+                        }
+                        MixBuildState.READY -> Unit
                     }
                 }
 

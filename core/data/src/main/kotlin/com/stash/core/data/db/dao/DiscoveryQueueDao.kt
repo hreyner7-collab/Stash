@@ -171,6 +171,26 @@ interface DiscoveryQueueDao {
     data class StatusCount(val status: String, val n: Int)
 
     /**
+     * Per-recipe count of discovery rows that are NOT terminally failed —
+     * i.e. PENDING/SEARCHED/DOWNLOADING (still in flight) or DONE (resolved,
+     * pending link into the mix on the next materialize). Used to tell a
+     * still-building custom mix (count > 0) from one whose discovery finished
+     * with nothing (count == 0). Reactive so the "Building…" indicator clears
+     * itself as rows drain or tracks land.
+     */
+    @Query(
+        """
+        SELECT recipe_id AS recipeId, COUNT(*) AS count
+        FROM discovery_queue
+        WHERE status != 'FAILED'
+        GROUP BY recipe_id
+        """
+    )
+    fun observeNonFailedCountsByRecipe(): Flow<List<RecipeDiscoveryCount>>
+
+    data class RecipeDiscoveryCount(val recipeId: Long, val count: Int)
+
+    /**
      * Track ids for every DONE discovery row whose track still exists
      * in the tracks table. Used by [StashMixRefreshWorker.materializeMix]
      * to re-link surviving discovery tracks after the refresh clears the

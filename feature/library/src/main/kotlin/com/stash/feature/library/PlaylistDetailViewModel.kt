@@ -4,6 +4,10 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.net.Uri
+import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.db.dao.StashMixRecipeDao
+import com.stash.core.data.mix.MixBuildState
+import com.stash.core.data.mix.mixBuildState
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.BulkPlayAction
 import com.stash.core.media.PlayerRepository
@@ -60,6 +64,8 @@ class PlaylistDetailViewModel @Inject constructor(
     private val playlistImageHelper: PlaylistImageHelper,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val connectivityMonitor: ConnectivityMonitor,
+    private val recipeDao: StashMixRecipeDao,
+    private val discoveryQueueDao: DiscoveryQueueDao,
 ) : ViewModel() {
 
     /** The playlist ID extracted from the navigation route arguments. */
@@ -114,6 +120,26 @@ class PlaylistDetailViewModel @Inject constructor(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = PlaylistDetailUiState(),
+    )
+
+    /**
+     * Build state for THIS playlist if it's a custom Stash Mix — drives the
+     * "Building your mix…" / "Couldn't find tracks" states while a freshly
+     * created mix populates. READY for non-mix playlists and built-ins.
+     */
+    val buildState: StateFlow<MixBuildState> = combine(
+        recipeDao.observeAll(),
+        discoveryQueueDao.observeNonFailedCountsByRecipe(),
+        musicRepository.getTracksByPlaylist(playlistId),
+    ) { recipes, counts, tracks ->
+        val recipe = recipes.firstOrNull { it.playlistId == playlistId }
+            ?: return@combine MixBuildState.READY
+        val count = counts.firstOrNull { it.recipeId == recipe.id }?.count ?: 0
+        mixBuildState(recipe, trackCount = tracks.size, nonFailedDiscoveryCount = count)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = MixBuildState.READY,
     )
 
     init {

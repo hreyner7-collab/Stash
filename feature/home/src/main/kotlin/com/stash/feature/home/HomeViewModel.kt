@@ -4,9 +4,12 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
+import com.stash.core.data.mix.MixBuildState
+import com.stash.core.data.mix.mixBuildState
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
@@ -91,6 +94,7 @@ class HomeViewModel @Inject constructor(
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
     private val recipeDao: StashMixRecipeDao,
+    private val discoveryQueueDao: DiscoveryQueueDao,
     private val downloadQueueDao: DownloadQueueDao,
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
@@ -202,15 +206,35 @@ class HomeViewModel @Inject constructor(
         musicRepository.getRecentlyAdded(20),
         // Folded in here (rather than as a 6th positional arg to the top-
         // level `uiState` combine, which is already at the 5-arg typed-
-        // overload max) so the recipe-derived custom-mix playlist ids ride
-        // the existing holder flow alongside `playlists`.
+        // overload max) so the recipe-derived custom-mix sets ride the
+        // existing holder flow alongside `playlists`.
         recipeDao.observeAll(),
-    ) { playlists, recentlyAdded, recipes ->
-        val customMixPlaylistIds = recipes
-            .filter { !it.isBuiltin && it.playlistId != null }
-            .mapNotNull { it.playlistId }
-            .toSet()
-        MusicData(playlists, recentlyAdded, customMixPlaylistIds)
+        discoveryQueueDao.observeNonFailedCountsByRecipe(),
+    ) { playlists, recentlyAdded, recipes, discoveryCounts ->
+        val customRecipes = recipes.filter { !it.isBuiltin && it.playlistId != null }
+        val customMixPlaylistIds = customRecipes.mapNotNull { it.playlistId }.toSet()
+
+        // Per-custom-mix build state, so the Home card can show "Building…"
+        // while a freshly-created mix populates, and "No tracks" if it found
+        // nothing — instead of looking broken at "0 tracks".
+        val trackCounts = playlists.associate { it.id to it.trackCount }
+        val discoveryByRecipe = discoveryCounts.associate { it.recipeId to it.count }
+        val buildingMixIds = mutableSetOf<Long>()
+        val emptyMixIds = mutableSetOf<Long>()
+        for (recipe in customRecipes) {
+            val playlistId = recipe.playlistId ?: continue
+            val state = mixBuildState(
+                recipe = recipe,
+                trackCount = trackCounts[playlistId] ?: 0,
+                nonFailedDiscoveryCount = discoveryByRecipe[recipe.id] ?: 0,
+            )
+            when (state) {
+                MixBuildState.BUILDING -> buildingMixIds.add(playlistId)
+                MixBuildState.EMPTY -> emptyMixIds.add(playlistId)
+                MixBuildState.READY -> Unit
+            }
+        }
+        MusicData(playlists, recentlyAdded, customMixPlaylistIds, buildingMixIds, emptyMixIds)
     }
 
     /**
@@ -414,6 +438,8 @@ class HomeViewModel @Inject constructor(
             youtubeLikedCount = youtubeLikedCount,
             playlists = otherPlaylists,
             customMixPlaylistIds = musicData.customMixPlaylistIds,
+            buildingMixIds = musicData.buildingMixIds,
+            emptyMixIds = musicData.emptyMixIds,
             playlistSortOrder = playlistSortOrder,
             isLoading = false,
             lastFmPrompt = prompts.lastFmPrompt,
@@ -965,6 +991,10 @@ private data class MusicData(
     val recentlyAdded: List<Track>,
     /** Playlist ids backing user-defined (non-builtin) Stash Mix recipes. */
     val customMixPlaylistIds: Set<Long>,
+    /** Custom-mix playlist ids still populating (show a "Building…" affordance). */
+    val buildingMixIds: Set<Long>,
+    /** Custom-mix playlist ids whose discovery finished with no tracks. */
+    val emptyMixIds: Set<Long>,
 )
 
 /**

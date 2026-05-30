@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -99,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.data.mix.MixBuildState
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
@@ -452,8 +454,14 @@ fun HomeScreen(
                     CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
                 }
                 items(uiState.stashMixes, key = { it.id }) { playlist ->
+                    val buildState = when {
+                        uiState.buildingMixIds.contains(playlist.id) -> MixBuildState.BUILDING
+                        uiState.emptyMixIds.contains(playlist.id) -> MixBuildState.EMPTY
+                        else -> MixBuildState.READY
+                    }
                     DailyMixCard(
                         playlist = playlist,
+                        buildState = buildState,
                         onClick = {
                             // Opening a stale custom mix transparently
                             // refreshes it (fire-and-forget; no-ops for
@@ -828,6 +836,7 @@ private fun DailyMixCard(
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
+    buildState: MixBuildState = MixBuildState.READY,
 ) {
     val extendedColors = StashTheme.extendedColors
     val gradientColors = if (playlist.source == MusicSource.SPOTIFY) {
@@ -895,11 +904,33 @@ private fun DailyMixCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = "${playlist.trackCount} tracks",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.75f),
-                    )
+                    when (buildState) {
+                        MixBuildState.BUILDING -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(11.dp),
+                                color = Color.White.copy(alpha = 0.85f),
+                                strokeWidth = 1.5.dp,
+                            )
+                            Text(
+                                text = "Building…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                            )
+                        }
+                        MixBuildState.EMPTY -> Text(
+                            text = "No tracks found",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                        MixBuildState.READY -> Text(
+                            text = "${playlist.trackCount} tracks",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         }

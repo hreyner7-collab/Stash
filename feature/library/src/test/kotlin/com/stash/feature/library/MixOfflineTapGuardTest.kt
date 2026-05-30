@@ -3,6 +3,8 @@ package com.stash.feature.library
 import androidx.lifecycle.SavedStateHandle
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.prefs.StreamingPreference
+import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.streaming.ConnectivityMonitor
@@ -204,6 +206,13 @@ class MixOfflineTapGuardTest {
             playlistImageHelper = mock(),
             streamingPreference = streamingPreference,
             connectivityMonitor = connectivityMonitor,
+            // buildState flow reads these at construction — stub to empty flows.
+            recipeDao = mock {
+                on { observeAll() } doReturn flowOf(emptyList())
+            },
+            discoveryQueueDao = mock {
+                on { observeNonFailedCountsByRecipe() } doReturn flowOf(emptyList())
+            },
         )
     }
 }

@@ -59,6 +59,12 @@ data class HomeUiState(
      */
     val customMixPlaylistIds: Set<Long> = emptySet(),
 
+    /** Custom-mix playlist ids still populating — card shows a "Building…" state. */
+    val buildingMixIds: Set<Long> = emptySet(),
+
+    /** Custom-mix playlist ids whose discovery finished with no tracks. */
+    val emptyMixIds: Set<Long> = emptySet(),
+
     /** Active sort for the Home Playlists grid. Mirrors Library's chips. */
     val playlistSortOrder: PlaylistSortOrder = PlaylistSortOrder.RECENT,
 
