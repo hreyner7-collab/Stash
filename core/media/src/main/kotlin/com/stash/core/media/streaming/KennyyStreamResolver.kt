@@ -6,6 +6,8 @@ import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.kennyy.KennyySource
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 
 /**
  * Result of a successful stream-URL lookup. [url] is the signed CDN URL
@@ -85,6 +87,10 @@ class KennyyStreamResolver @Inject constructor(
     private val healthMonitor: KennyyHealthMonitor,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
+        if (!healthMonitor.isHealthy.value) {
+            Log.d(TAG, "skip id=${track.id} (kennyy unhealthy)")
+            return null
+        }
         Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
         val query = TrackQuery(
             artist = track.artist,
@@ -97,7 +103,13 @@ class KennyyStreamResolver @Inject constructor(
         // is user-initiated and must not queue behind background
         // AvailabilityCheckWorker batches that hold the limiter at 1
         // req/s. See KennyySource.resolveImmediate KDoc for rationale.
-        val result = source.resolveImmediate(query)
+        val result = try {
+            withTimeout(STREAM_RESOLVE_TIMEOUT_MS) { source.resolveImmediate(query) }
+        } catch (e: TimeoutCancellationException) {
+            healthMonitor.recordFailure()
+            Log.w(TAG, "timeout id=${track.id} after ${STREAM_RESOLVE_TIMEOUT_MS}ms")
+            return null
+        }
         if (result == null) {
             if (source.lastResolveFailedNetwork) {
                 healthMonitor.recordFailure()
@@ -141,6 +153,7 @@ class KennyyStreamResolver @Inject constructor(
     private companion object {
         const val TAG = "KennyyStreamResolver"
         const val ORIGIN = "kennyy"
+        const val STREAM_RESOLVE_TIMEOUT_MS = 3_000L
         val ETSP_REGEX = Regex("""[?&]etsp=(\d+)""")
     }
 }
