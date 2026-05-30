@@ -76,6 +76,14 @@ class MatchScorer @Inject constructor(
          * title is labelled.
          */
         const val EXPLICIT_MISMATCH_PENALTY = 0.15f
+
+        /**
+         * Multi-artist credit separators used by [artistParts]. Covers ASCII
+         * (`,;&/|`), CJK full-width slash/middot (`／・`), and the spelled-out
+         * " feat. / ft. / and " joiners.
+         */
+        private val ARTIST_PART_SEPARATOR =
+            Regex("""[,;&/／・|]|\s+(?:feat\.?|ft\.?|and)\s+""", RegexOption.IGNORE_CASE)
     }
 
     /**
@@ -112,7 +120,14 @@ class MatchScorer @Inject constructor(
 
         return results.map { result ->
             val titleScore = computeTitleScore(targetTitle, result.title)
-            val artistScore = computeArtistScore(targetArtist, result.uploader)
+            // Credit the artist when the uploader name doesn't match but the
+            // artist is named in the title — official J/K-pop uploads
+            // ("美波「カワキヲアメク」MV" on romanised channel "Minami") otherwise
+            // score artist=0 and miss the 0.60 composite gate.
+            val artistScore = maxOf(
+                computeArtistScore(targetArtist, result.uploader),
+                if (artistAppearsInTitle(targetArtist, result.title)) artistInTitleScore else 0f,
+            )
             val durationScore = computeDurationScore(targetDurationMs, result.duration.toLong())
             val popularityScore = computePopularityScore(result.viewCount, maxViewCount)
             val penalty = computePenalty(targetTitle, result.title)
@@ -186,6 +201,123 @@ class MatchScorer @Inject constructor(
     fun titleSimilarity(targetTitle: String, resultTitle: String): Float {
         return computeTitleScore(targetTitle, resultTitle)
     }
+
+    /**
+     * Containment escape for the hard title gate. Returns true when the
+     * (canonicalised) target title appears as a contiguous run of word tokens
+     * inside the candidate's video title.
+     *
+     * The Jaro-Winkler title gate compares the clean target against the
+     * candidate's *full decorated* title — artist prefix ("SunKissed Lola -
+     * …"), "(Official Lyric Video)" suffix, 【…】 annotations, "OST - 172"
+     * numbering, or a CJK + romanised dual title — and so rejects correct
+     * matches whose extra tokens drown out the overlap (field-observed at
+     * 0.43–0.58 for confirmed-correct official uploads). Substring containment
+     * recovers them while the duration gate, artist gate, and short-title word
+     * gate still guard against wrong-song acceptance.
+     *
+     * Asymmetric normalisation by design:
+     *  - **Target** runs through [TrackMatcher.canonicalTitle] first so a
+     *    "(feat. …)" / "(remix)" decoration on the target doesn't prevent a
+     *    bare candidate from satisfying it.
+     *  - **Candidate** keeps bracket/paren *contents* (only punctuation is
+     *    neutralised to token breaks) — canonicalTitle would delete the
+     *    "(Readymade)" that a "Readymade" target needs to match.
+     *
+     * CJK scripts carry no whitespace, so a kana/hanzi title collapses to a
+     * single token and matches by whole-token equality.
+     */
+    fun titleContainsTarget(targetTitle: String, candidateTitle: String): Boolean {
+        val target = looseTokens(trackMatcher.canonicalTitle(targetTitle))
+        return containsRun(haystack = looseTokens(candidateTitle), needle = target)
+    }
+
+    /**
+     * Per-part escape for the artist gate. Returns true when any significant
+     * part of the target artist matches any part of the candidate uploader
+     * after splitting on multi-artist separators and stripping spaces and
+     * punctuation.
+     *
+     * Rescues bilingual / slash-joined official channels such as
+     * "かいりきベア／Kairiki bear" whose romanised half equals a target part
+     * ("Kairikibear") but whose whole-string Jaro-Winkler is dragged below the
+     * 0.65 gate by the CJK half plus the user's comma-joined multi-artist
+     * credit. The leading " - Topic" suffix is stripped first (Topic channels
+     * are the authoritative audio source).
+     */
+    fun artistPartMatches(targetArtist: String, candidateUploader: String): Boolean {
+        val targetParts = artistParts(targetArtist)
+        val candidateParts = artistParts(candidateUploader.replace(" - Topic", ""))
+        if (targetParts.isEmpty() || candidateParts.isEmpty()) return false
+        return targetParts.any { t ->
+            candidateParts.any { c ->
+                t == c || (t.length >= 4 && c.length >= 4 && (c.contains(t) || t.contains(c)))
+            }
+        }
+    }
+
+    /**
+     * True when the target artist appears inside the candidate's video title.
+     *
+     * Official J-pop/K-pop uploads format titles as "Artist「Song」MV" or
+     * "【Artist】Song", so the artist is present in the *title* even when the
+     * uploader is a romanised channel name ("Minami" for 美波) that scores 0
+     * against the CJK artist on [artistSimilarity]. This is the dominant cause
+     * of CJK-artist tracks failing the 0.60 composite auto-accept gate. Used
+     * both as a scoring credit (lifts the composite) and as an escape on the
+     * verify-stage artist gate.
+     *
+     * A part matches when it equals a candidate title token or is contained in
+     * one (CJK titles glue artist + song with no separator). Parts shorter than
+     * 2 chars are ignored to avoid trivial collisions.
+     */
+    fun artistAppearsInTitle(targetArtist: String, candidateTitle: String): Boolean {
+        val candidate = looseTokens(candidateTitle)
+        if (candidate.isEmpty()) return false
+        // Each distinct artist in a multi-artist credit, matched as its own
+        // contiguous word run ("Will Stetson" → ["will","stetson"]).
+        return targetArtist.split(ARTIST_PART_SEPARATOR)
+            .map { looseTokens(it) }
+            .filter { tokens -> tokens.sumOf { it.length } >= 2 }
+            .any { artistTokens -> containsRun(haystack = candidate, needle = artistTokens) }
+    }
+
+    /** Artist score credited when [artistAppearsInTitle] holds but the uploader
+     *  name itself doesn't match (e.g. CJK artist, romanised channel). */
+    private val artistInTitleScore = 0.85f
+
+    /**
+     * Split a string into lowercased word tokens, treating every non
+     * letter-or-digit character (punctuation, brackets, whitespace, CJK
+     * full-width punctuation) as a token break. CJK ideographs, kana and
+     * hangul are letters, so a whitespace-free native title stays one token.
+     */
+    private fun looseTokens(s: String): List<String> =
+        s.lowercase()
+            .map { if (it.isLetterOrDigit()) it else ' ' }
+            .joinToString("")
+            .split(' ')
+            .filter { it.isNotBlank() }
+
+    /** True when [needle] appears as a contiguous run of tokens in [haystack]. */
+    private fun containsRun(haystack: List<String>, needle: List<String>): Boolean {
+        if (needle.isEmpty() || needle.size > haystack.size) return false
+        for (start in 0..(haystack.size - needle.size)) {
+            if (haystack.subList(start, start + needle.size) == needle) return true
+        }
+        return false
+    }
+
+    /**
+     * Split an artist credit into normalised comparison parts: break on
+     * multi-artist separators (`,;&/／・|` and " feat./ft./and "), then strip
+     * each part down to its letter/digit characters (so "Kairiki bear" and
+     * "Kairikibear" coincide). Parts shorter than 2 chars are dropped.
+     */
+    private fun artistParts(artist: String): List<String> =
+        artist.split(ARTIST_PART_SEPARATOR)
+            .map { part -> part.lowercase().filter { it.isLetterOrDigit() } }
+            .filter { it.length >= 2 }
 
     // -- Private scoring helpers --------------------------------------------------
 

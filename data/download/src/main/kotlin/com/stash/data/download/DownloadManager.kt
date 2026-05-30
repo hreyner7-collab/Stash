@@ -584,10 +584,12 @@ class DownloadManager @Inject constructor(
      * Runs all verification gates on a match candidate.
      *
      * Four-level verification:
-     * 1. **Title similarity** >= 0.6 (prevents wrong song by same artist)
+     * 1. **Title similarity** >= 0.6, OR the candidate contains the target title
+     *    as a contiguous token run (rescues decorated / CJK / dual-script titles)
      * 2. **Short title containment** — for titles <= 5 chars, candidate must
      *    contain the target as a word (Jaro-Winkler inflates scores for short strings)
-     * 3. **Artist similarity** >= 0.65 + word overlap (prevents wrong artist)
+     * 3. **Artist similarity** >= 0.65 + word overlap, OR a per-part match
+     *    (rescues bilingual slash-joined uploaders); prevents wrong artist
      * 4. **Video ID verification** — InnerTube player endpoint confirms the actual
      *    video title matches (catches InnerTube metadata/ID mismatches)
      *
@@ -620,9 +622,14 @@ class DownloadManager @Inject constructor(
             return null
         }
 
-        // Gate 1: Title similarity
+        // Gate 1: Title similarity — with a containment escape for decorated
+        // candidate titles (artist prefix, "(Official Lyric Video)", 【…】,
+        // "OST - 172", CJK + romanised dual titles) whose Jaro-Winkler is
+        // dragged below 0.6 even though the candidate clearly contains the
+        // target title. Duration (Gate 0), short-title word (Gate 2) and
+        // artist (Gate 3) gates still guard against wrong-song acceptance.
         val titleSim = matchScorer.titleSimilarity(track.title, best.title)
-        if (titleSim < 0.6f) {
+        if (titleSim < 0.6f && !matchScorer.titleContainsTarget(track.title, best.title)) {
             Log.w(TAG, "resolveUrl: rejecting '${best.title}' — title sim ${String.format("%.2f", titleSim)} too low for '${track.title}'")
             return null
         }
@@ -640,13 +647,25 @@ class DownloadManager @Inject constructor(
             }
         }
 
-        // Gate 3: Artist similarity + word overlap
+        // Gate 3: Artist similarity + word overlap, with three escapes for the
+        // CJK / official-upload cases the whitespace-token metric can't see:
+        //  - per-part match for bilingual slash-joined uploaders
+        //    ("かいりきベア／Kairiki bear" whose romanised half == a target part),
+        //  - artist named in the title ("美波「…」MV" / "OMORI OST - …" on a
+        //    romanised or studio channel), and
+        //  - " - Topic" channels (YouTube's auto-generated official audio,
+        //    already trusted by the scorer's topic bonus).
+        // Any escape short-circuits BOTH the fuzzy-sim and word-overlap sub-gates.
         val artistSim = matchScorer.artistSimilarity(track.artist, best.uploader)
-        if (artistSim < 0.65f) {
+        val isTopicChannel = best.uploader.trim().endsWith(" - Topic")
+        val artistMatchOk = isTopicChannel ||
+            matchScorer.artistPartMatches(track.artist, best.uploader) ||
+            matchScorer.artistAppearsInTitle(track.artist, best.title)
+        if (artistSim < 0.65f && !artistMatchOk) {
             Log.w(TAG, "resolveUrl: rejecting '${best.title}' by '${best.uploader}' — fuzzy artist sim ${String.format("%.2f", artistSim)} too low for '${track.artist}'")
             return null
         }
-        if (!artistWordsMatch(track.artist, best.uploader)) {
+        if (!artistMatchOk && !artistWordsMatch(track.artist, best.uploader)) {
             Log.w(TAG, "resolveUrl: rejecting '${best.title}' by '${best.uploader}' — artist words don't match '${track.artist}'")
             return null
         }
@@ -659,7 +678,7 @@ class DownloadManager @Inject constructor(
         val verification = searchExecutor.verifyVideo(best.videoId)
         if (verification != null) {
             val actualTitleSim = matchScorer.titleSimilarity(track.title, verification.title)
-            if (actualTitleSim < 0.6f) {
+            if (actualTitleSim < 0.6f && !matchScorer.titleContainsTarget(track.title, verification.title)) {
                 Log.w(TAG, "resolveUrl: VIDEO ID MISMATCH for '${track.title}' — " +
                     "search said '${best.title}' but player says '${verification.title}' (sim=${String.format("%.2f", actualTitleSim)})")
                 return null
