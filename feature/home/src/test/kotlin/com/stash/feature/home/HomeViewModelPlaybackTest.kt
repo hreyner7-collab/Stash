@@ -4,7 +4,6 @@ import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.tipjar.TipJarRepository
 import com.stash.core.media.PlayerRepository
-import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
@@ -29,15 +28,13 @@ import org.mockito.kotlin.times
 import org.mockito.kotlin.verifyBlocking
 
 /**
- * Task 4 of the "Offline Stash Mix Visibility + Playback" plan: the
- * Home-screen single-mix play paths must honour the same Mix+connectivity
- * exemption that [com.stash.core.media.streaming.queuePlayableTracks]
- * encodes (already wired into PlaylistDetailViewModel).
+ * The Home-screen play paths must honour the Online/Offline toggle via
+ * [com.stash.core.media.streaming.queuePlayableTracks] (already wired into
+ * PlaylistDetailViewModel).
  *
- * In Offline mode (streaming preference OFF) a STASH_MIX with a live
- * connection should still enqueue its stream-only members; with no
- * connection it falls back to downloaded-only; and a non-mix playlist
- * (CUSTOM) always falls back to downloaded-only regardless of connection.
+ * Offline mode (streaming preference OFF) enqueues downloaded-only — the
+ * player's offline master-gate would silently skip stream-only tracks, so
+ * connectivity is irrelevant. Streaming ON enqueues every track.
  *
  * Mirrors the harness in :feature:library's MixOfflineTapGuardTest —
  * mockito-kotlin, StandardTestDispatcher, mock collaborators.
@@ -61,14 +58,33 @@ class HomeViewModelPlaybackTest {
     )
 
     @Test
-    fun `playPlaylist offline + connected + mix enqueues downloaded and stream-only`() = runTest {
+    fun `playPlaylist offline mode + mix enqueues only downloaded`() = runTest {
         val playlist = playlist(id = 7L, type = PlaylistType.STASH_MIX)
         val playerRepo = mock<PlayerRepository>()
         val vm = buildVm(
             playlist = playlist,
             tracks = listOf(downloaded, streamOnly),
             playerRepository = playerRepo,
-            connected = true,
+            streamingEnabled = false,
+        )
+
+        vm.playPlaylist(playlist)
+        runCurrent()
+
+        val queueCaptor = argumentCaptor<List<Track>>()
+        verifyBlocking(playerRepo) { setQueue(queueCaptor.capture(), any()) }
+        assertThat(queueCaptor.firstValue.map { it.id }).containsExactly(1L)
+    }
+
+    @Test
+    fun `playPlaylist streaming on + mix enqueues downloaded and stream-only`() = runTest {
+        val playlist = playlist(id = 7L, type = PlaylistType.STASH_MIX)
+        val playerRepo = mock<PlayerRepository>()
+        val vm = buildVm(
+            playlist = playlist,
+            tracks = listOf(downloaded, streamOnly),
+            playerRepository = playerRepo,
+            streamingEnabled = true,
         )
 
         vm.playPlaylist(playlist)
@@ -80,53 +96,33 @@ class HomeViewModelPlaybackTest {
     }
 
     @Test
-    fun `playPlaylist offline + disconnected + mix enqueues only downloaded`() = runTest {
+    fun `addPlaylistToQueue offline mode + mix adds only downloaded`() = runTest {
         val playlist = playlist(id = 7L, type = PlaylistType.STASH_MIX)
         val playerRepo = mock<PlayerRepository>()
         val vm = buildVm(
             playlist = playlist,
             tracks = listOf(downloaded, streamOnly),
             playerRepository = playerRepo,
-            connected = false,
+            streamingEnabled = false,
         )
 
-        vm.playPlaylist(playlist)
+        vm.addPlaylistToQueue(playlist)
         runCurrent()
 
-        val queueCaptor = argumentCaptor<List<Track>>()
-        verifyBlocking(playerRepo) { setQueue(queueCaptor.capture(), any()) }
-        assertThat(queueCaptor.firstValue.map { it.id }).containsExactly(1L)
+        val trackCaptor = argumentCaptor<Track>()
+        verifyBlocking(playerRepo, times(1)) { addToQueue(trackCaptor.capture()) }
+        assertThat(trackCaptor.allValues.map { it.id }).containsExactly(1L)
     }
 
     @Test
-    fun `playPlaylist offline + connected + custom playlist enqueues only downloaded`() = runTest {
-        // Control: a non-mix playlist gets NO connectivity exemption.
-        val playlist = playlist(id = 7L, type = PlaylistType.CUSTOM)
-        val playerRepo = mock<PlayerRepository>()
-        val vm = buildVm(
-            playlist = playlist,
-            tracks = listOf(downloaded, streamOnly),
-            playerRepository = playerRepo,
-            connected = true,
-        )
-
-        vm.playPlaylist(playlist)
-        runCurrent()
-
-        val queueCaptor = argumentCaptor<List<Track>>()
-        verifyBlocking(playerRepo) { setQueue(queueCaptor.capture(), any()) }
-        assertThat(queueCaptor.firstValue.map { it.id }).containsExactly(1L)
-    }
-
-    @Test
-    fun `addPlaylistToQueue offline + connected + mix adds downloaded and stream-only`() = runTest {
+    fun `addPlaylistToQueue streaming on + mix adds downloaded and stream-only`() = runTest {
         val playlist = playlist(id = 7L, type = PlaylistType.STASH_MIX)
         val playerRepo = mock<PlayerRepository>()
         val vm = buildVm(
             playlist = playlist,
             tracks = listOf(downloaded, streamOnly),
             playerRepository = playerRepo,
-            connected = true,
+            streamingEnabled = true,
         )
 
         vm.addPlaylistToQueue(playlist)
@@ -152,16 +148,13 @@ class HomeViewModelPlaybackTest {
         playlist: Playlist,
         tracks: List<Track>,
         playerRepository: PlayerRepository,
-        connected: Boolean,
+        streamingEnabled: Boolean,
     ): HomeViewModel {
         val musicRepo = mock<MusicRepository> {
             on { getTracksByPlaylist(playlist.id) } doReturn flowOf(tracks)
         }
         val streamingPreference = mock<StreamingPreference> {
-            onBlocking { current() } doReturn false
-        }
-        val connectivity = mock<ConnectivityMonitor> {
-            on { isConnected() } doReturn connected
+            onBlocking { current() } doReturn streamingEnabled
         }
         // init {} block reads isStale() (suspend, primitive Boolean) — stub it
         // so the cold-start warm-up coroutine doesn't NPE on an unboxed null.
@@ -184,7 +177,6 @@ class HomeViewModelPlaybackTest {
             aggregatorRateLimiter = mock(),
             downloadNetworkPreference = mock(),
             streamingPreference = streamingPreference,
-            connectivityMonitor = connectivity,
             metadataBackfillState = mock(),
             lyricsBackfillState = mock(),
             context = mock(),

@@ -101,7 +101,6 @@ class HomeViewModel @Inject constructor(
     private val aggregatorRateLimiter: AggregatorRateLimiter,
     private val downloadNetworkPreference: DownloadNetworkPreference,
     private val streamingPreference: StreamingPreference,
-    private val connectivityMonitor: com.stash.core.media.streaming.ConnectivityMonitor,
     private val metadataBackfillState: MetadataBackfillState,
     private val lyricsBackfillState: LyricsBackfillState,
     @ApplicationContext private val context: Context,
@@ -634,12 +633,7 @@ class HomeViewModel @Inject constructor(
     fun playPlaylist(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val playable = queuePlayableTracks(
-                tracks = tracks,
-                isMix = playlist.type == PlaylistType.STASH_MIX,
-                streamingEnabled = streamingPreference.current(),
-                connected = connectivityMonitor.isConnected(),
-            )
+            val playable = queuePlayableTracks(tracks, streamingPreference.current())
             if (playable.isNotEmpty()) {
                 playerRepository.setQueue(playable, startIndex = 0)
             }
@@ -686,12 +680,7 @@ class HomeViewModel @Inject constructor(
     fun addPlaylistToQueue(playlist: Playlist) {
         viewModelScope.launch {
             val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val playable = queuePlayableTracks(
-                tracks = tracks,
-                isMix = playlist.type == PlaylistType.STASH_MIX,
-                streamingEnabled = streamingPreference.current(),
-                connected = connectivityMonitor.isConnected(),
-            )
+            val playable = queuePlayableTracks(tracks, streamingPreference.current())
             playable.forEach { playerRepository.addToQueue(it) }
         }
     }

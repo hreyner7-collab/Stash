@@ -174,12 +174,11 @@ class MixOfflineTapGuardTest {
     }
 
     @Test
-    fun `playTrack Offline-mode + connected + mix enqueues stream-only track at correct index`() = runTest {
-        // The user is in Offline mode (streaming preference OFF) but the
-        // device DOES have a live connection. Tapping a stream-only Mix track
-        // must enqueue the FULL mix (downloaded + streamable) and start at the
-        // tapped track — not silently fall back to the downloaded subset and
-        // play the wrong track.
+    fun `playTrack Offline-mode + stream-only mix track is not enqueued and prompts to switch online`() = runTest {
+        // The player's offline master-gate silently skips stream-only tracks,
+        // so Offline mode must NOT enqueue them. Instead the VM prompts the
+        // user to switch to Online mode. (Connection state is irrelevant — the
+        // Online/Offline toggle decides, not connectivity.)
         val downloaded = Track(
             id = 1L, title = "Local", artist = "A",
             isStreamable = true, isDownloaded = true,
@@ -204,23 +203,24 @@ class MixOfflineTapGuardTest {
             streamingPreference = offlinePref,
         )
 
+        val messages = mutableListOf<String>()
+        val msgJob = backgroundScope.launch { vm.userMessages.collect { messages.add(it) } }
         val uiJob = backgroundScope.launch { vm.uiState.collect {} }
         runCurrent()
 
         vm.playTrack(trackId = 42L)
         runCurrent()
 
-        val queueCaptor = argumentCaptor<List<Track>>()
-        val indexCaptor = argumentCaptor<Int>()
-        verifyBlocking(playerRepo) { setQueue(queueCaptor.capture(), indexCaptor.capture()) }
-        assertThat(queueCaptor.firstValue.map { it.id }).containsExactly(1L, 42L)
-        assertThat(queueCaptor.firstValue[indexCaptor.firstValue].id).isEqualTo(42L)
+        verifyBlocking(playerRepo, never()) { setQueue(any(), any()) }
+        assertThat(messages).contains("Switch to Online mode to play this track")
 
+        msgJob.cancel()
         uiJob.cancel()
     }
 
     @Test
-    fun `playAll Offline-mode + connected + mix enqueues all streamable tracks`() = runTest {
+    fun `playAll Offline-mode + mix enqueues only downloaded tracks`() = runTest {
+        // Offline mode: the queue is downloaded-only regardless of connection.
         val downloaded = Track(
             id = 1L, title = "Local", artist = "A",
             isStreamable = true, isDownloaded = true,
@@ -235,47 +235,6 @@ class MixOfflineTapGuardTest {
             on { playerState } doReturn MutableStateFlow(PlayerState())
         }
         val connectivity = mock<ConnectivityMonitor> { on { isConnected() } doReturn true }
-        val offlinePref = mock<StreamingPreference> { onBlocking { current() } doReturn false }
-        val vm = buildVm(
-            playlistId = playlist.id,
-            tracks = listOf(downloaded, streamOnly),
-            playlist = playlist,
-            playerRepository = playerRepo,
-            connectivityMonitor = connectivity,
-            streamingPreference = offlinePref,
-        )
-
-        val uiJob = backgroundScope.launch { vm.uiState.collect {} }
-        runCurrent()
-
-        vm.playAll()
-        runCurrent()
-
-        val queueCaptor = argumentCaptor<List<Track>>()
-        verifyBlocking(playerRepo) { setQueue(queueCaptor.capture(), any()) }
-        assertThat(queueCaptor.firstValue.map { it.id }).containsExactly(1L, 42L)
-
-        uiJob.cancel()
-    }
-
-    @Test
-    fun `playAll Offline-mode + disconnected + mix enqueues only downloaded tracks`() = runTest {
-        // Genuinely offline (no connection): stream-only tracks can't play, so
-        // the queue falls back to the downloaded subset.
-        val downloaded = Track(
-            id = 1L, title = "Local", artist = "A",
-            isStreamable = true, isDownloaded = true,
-            filePath = "/storage/emulated/0/Music/local.opus",
-        )
-        val streamOnly = Track(
-            id = 42L, title = "Cloud", artist = "A",
-            isStreamable = true, isDownloaded = false, filePath = null,
-        )
-        val playlist = playlist(id = 7L)
-        val playerRepo = mock<PlayerRepository> {
-            on { playerState } doReturn MutableStateFlow(PlayerState())
-        }
-        val connectivity = mock<ConnectivityMonitor> { on { isConnected() } doReturn false }
         val offlinePref = mock<StreamingPreference> { onBlocking { current() } doReturn false }
         val vm = buildVm(
             playlistId = playlist.id,

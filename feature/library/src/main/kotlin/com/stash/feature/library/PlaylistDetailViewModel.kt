@@ -173,23 +173,29 @@ class PlaylistDetailViewModel @Inject constructor(
      * filtered out.
      */
     fun playTrack(trackId: Long) {
-        // ── Stream-only offline guard (Task 5: Mixes Stream-Only) ──
-        // Stream-only Mix tracks (isStreamable + !isDownloaded) have no
-        // local audio and require network. When the device has no validated
-        // internet path, tapping them would either fail or burn time inside
-        // ExoPlayer's read. Bail out early with a Snackbar so the user knows
-        // *why* nothing happened. Downloaded tracks always play (local file
-        // works offline). Stream-only tracks online go through normal play.
-        val tapped = uiState.value.tracks.firstOrNull { it.id == trackId }
-        if (tapped != null &&
-            tapped.isStreamable && !tapped.isDownloaded &&
-            !connectivityMonitor.isConnected()
-        ) {
-            _userMessages.tryEmit("Online only — connect to play this track")
-            return
-        }
-
+        // ── Stream-only tap guard ──
+        // Stream-only tracks (isStreamable + !isDownloaded) have no local audio
+        // and require both Online mode AND a live connection. The player's
+        // offline master-gate silently skips them in Offline mode, so bail out
+        // early with a Snackbar so the user knows *why* nothing happened.
+        // Downloaded tracks always play (local file works offline). Stream-only
+        // tracks online (streaming on + connected) go through normal play.
         viewModelScope.launch {
+            val tapped = uiState.value.tracks.firstOrNull { it.id == trackId }
+            if (tapped != null && tapped.isStreamable && !tapped.isDownloaded) {
+                if (!streamingPreference.current()) {
+                    // Offline mode: the player's offline master-gate would
+                    // silently skip a stream-only track. Tell the user how to
+                    // play it instead of enqueuing something that can't play.
+                    _userMessages.tryEmit("Switch to Online mode to play this track")
+                    return@launch
+                }
+                if (!connectivityMonitor.isConnected()) {
+                    _userMessages.tryEmit("Online only — connect to play this track")
+                    return@launch
+                }
+            }
+
             _tappedTrackId.value = trackId
             try {
                 val playable = playableTracks()
@@ -208,29 +214,16 @@ class PlaylistDetailViewModel @Inject constructor(
      * - **Streaming mode on:** every track. Stream-only tracks resolve via
      *   Kennyy inside [PlayerRepository.setQueue].
      * - **Offline mode (streaming off):** downloaded-only, so we never enqueue
-     *   unplayable items — EXCEPT for a Stash Mix. A Mix is an inherently
-     *   online discovery surface (its tracks are stream-only by design), so
-     *   when the device has a live connection its streamable tracks stay
-     *   enqueueable and the mix plays end-to-end regardless of the
-     *   Online/Offline preference. With no connection we fall back to
-     *   downloaded-only; the per-tap guard in [playTrack] surfaces the
-     *   "Online only — connect to play this track" Snackbar in that case.
+     *   items the player's offline master-gate would silently skip.
      *
-     * This keeps the queue consistent with what the list shows: Mix detail
-     * renders all streamable tracks offline (TrackDao.getByPlaylist's
-     * STASH_MIX exemption), so the queue must include them too — otherwise a
-     * tapped stream-only track would be filtered out and the wrong track would
-     * play.
+     * A Stash Mix still renders its full track list offline (TrackDao's
+     * STASH_MIX visibility exemption), but tapping a stream-only mix track in
+     * Offline mode is handled by the per-tap guard in [playTrack], which
+     * surfaces "Switch to Online mode to play this track" rather than enqueuing
+     * something the player can't play.
      */
-    private suspend fun playableTracks(): List<Track> {
-        val isMix = uiState.value.playlist?.type == PlaylistType.STASH_MIX
-        return queuePlayableTracks(
-            tracks = uiState.value.tracks,
-            isMix = isMix,
-            streamingEnabled = streamingPreference.current(),
-            connected = connectivityMonitor.isConnected(),
-        )
-    }
+    private suspend fun playableTracks(): List<Track> =
+        queuePlayableTracks(uiState.value.tracks, streamingPreference.current())
 
     /**
      * Shuffles the playlist and begins playback. Streaming mode shuffles all
