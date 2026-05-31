@@ -44,6 +44,9 @@ class LastFmApiClient @Inject constructor(
     private val rateLimitGate: LastFmRateLimitGate,
     private val cacheDao: com.stash.core.data.db.dao.LastFmCacheDao,
 ) {
+    /** Round-robin cursor for spreading reads across [LastFmCredentials.readApiKeys]. */
+    private val readKeyCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** Step 1 of web-auth: request a token. User then authorises in browser. */
     suspend fun getAuthToken(): Result<String> = runCatching {
         val params = sortedMapOf(
@@ -407,14 +410,18 @@ class LastFmApiClient @Inject constructor(
                 }
             }
 
-            // Circuit breaker: if the shared key is currently throttled, fail
-            // fast without touching the network. Continuing to fire requests
-            // at a rate-limited key only prolongs the block (Last.fm error 29).
-            if (rateLimitGate.isOpen(System.currentTimeMillis())) {
-                error("Last.fm rate-limited; skipping request (circuit open)")
-            }
+            // Pick a read key from the pool, round-robin, skipping any key
+            // whose breaker is open. null = every key throttled → fail fast
+            // without touching the network (continuing only prolongs the block).
+            val now = System.currentTimeMillis()
+            val readKey = selectReadKey(
+                keys = credentials.readApiKeys,
+                startIndex = readKeyCounter.getAndIncrement(),
+                isOpen = { rateLimitGate.isOpen(it, now) },
+            ) ?: error("Last.fm rate-limited; skipping request (all keys throttled)")
 
-            val paramsWithFormat = params + ("format" to "json")
+            // Swap the primary key baked into `params` for the rotated read key.
+            val paramsWithFormat = params + ("api_key" to readKey) + ("format" to "json")
             val url = API_URL.toHttpUrl().newBuilder().apply {
                 paramsWithFormat.forEach { (k, v) -> addQueryParameter(k, v) }
             }.build()
@@ -423,9 +430,9 @@ class LastFmApiClient @Inject constructor(
                 it.code to it.body?.string()
             }
 
-            // HTTP 429 — hard rate limit. Trip the breaker, then fail.
+            // HTTP 429 — hard rate limit. Trip this key's breaker, then fail.
             if (code == 429) {
-                rateLimitGate.recordRateLimited(System.currentTimeMillis())
+                rateLimitGate.recordRateLimited(readKey, System.currentTimeMillis())
                 error("Last.fm GET failed: HTTP 429 (rate limited)")
             }
             check(code in 200..299) { "Last.fm GET failed: HTTP $code" }
@@ -437,14 +444,14 @@ class LastFmApiClient @Inject constructor(
             // Surface those so callers don't treat garbage as success.
             root["error"]?.jsonPrimitive?.content?.let { err ->
                 val msg = root["message"]?.jsonPrimitive?.content ?: "unknown"
-                // error 29 == "Rate Limit Exceeded" → trip the breaker so the
-                // next calls short-circuit instead of piling on.
-                if (err == "29") rateLimitGate.recordRateLimited(System.currentTimeMillis())
+                // error 29 == "Rate Limit Exceeded" → trip this key's breaker
+                // so the next calls rotate past it instead of piling on.
+                if (err == "29") rateLimitGate.recordRateLimited(readKey, System.currentTimeMillis())
                 error("Last.fm API error $err: $msg")
             }
 
-            // A clean response means the key isn't throttled — close the breaker.
-            rateLimitGate.recordSuccess()
+            // A clean response means this key isn't throttled — close its breaker.
+            rateLimitGate.recordSuccess(readKey)
 
             // Cache only successful (non-error) bodies, keyed independently of
             // api_key so the entry is shared across key rotation/pooling.
@@ -584,6 +591,22 @@ data class LastFmTopArtist(val name: String, val playcount: Int)
 data class LastFmCredentials(
     val apiKey: String,
     val apiSecret: String,
+    /**
+     * Optional extra API keys used ONLY for unsigned read endpoints
+     * (tag/similar/etc.). They need no secret. Auth + scrobbling always use
+     * [apiKey] because Last.fm session keys are bound to the key that created
+     * them — rotating those would break scrobbling.
+     */
+    val extraReadApiKeys: List<String> = emptyList(),
 ) {
     val isConfigured: Boolean get() = apiKey.isNotBlank() && apiSecret.isNotBlank()
+
+    /**
+     * Keys eligible for unsigned READ requests: the primary plus any extras,
+     * blanks dropped and de-duplicated, primary first.
+     */
+    val readApiKeys: List<String>
+        get() = (listOf(apiKey) + extraReadApiKeys)
+            .filter { it.isNotBlank() }
+            .distinct()
 }

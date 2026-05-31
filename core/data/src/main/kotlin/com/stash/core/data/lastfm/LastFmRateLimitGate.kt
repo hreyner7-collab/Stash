@@ -1,16 +1,18 @@
 package com.stash.core.data.lastfm
 
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.pow
 
 /**
- * Process-wide circuit breaker for Last.fm rate-limit responses (error 29 /
- * HTTP 429). The Last.fm API key is shared across every install, so when it
- * gets throttled, continuing to fire requests only prolongs the block. This
- * gate makes the client fail fast — skipping the network entirely — for an
- * exponentially-growing cooldown after each rate-limit hit, then reopens
- * automatically once the cooldown elapses. A successful response resets it.
+ * Per-key circuit breaker for Last.fm rate-limit responses (error 29 / HTTP
+ * 429). The app spreads read traffic across a pool of API keys; when one key
+ * gets throttled, continuing to fire requests at it only prolongs the block,
+ * so this breaker fails that key fast — skipping the network — for an
+ * exponentially-growing cooldown, while the rest of the pool keeps serving.
+ * Each key reopens automatically once its cooldown elapses; a successful
+ * response on a key resets its backoff.
  *
  * Time is passed in (`nowMs`) rather than read from the clock so the logic is
  * deterministic and unit-testable.
@@ -18,38 +20,43 @@ import kotlin.math.pow
 @Singleton
 class LastFmRateLimitGate @Inject constructor() {
 
-    @Volatile
-    private var openUntilMs: Long = 0L
-
-    @Volatile
-    private var consecutiveHits: Int = 0
-
-    /** True while the breaker is open — callers should skip the network. */
-    fun isOpen(nowMs: Long): Boolean = nowMs < openUntilMs
-
-    /**
-     * Record a rate-limit response. Opens the breaker for a cooldown that
-     * doubles with each consecutive hit (base, 2×, 4×, …), capped at
-     * [MAX_COOLDOWN_MS].
-     */
-    @Synchronized
-    fun recordRateLimited(nowMs: Long) {
-        consecutiveHits++
-        val cooldown = (BASE_COOLDOWN_MS.toDouble() * 2.0.pow(consecutiveHits - 1))
-            .toLong()
-            .coerceIn(BASE_COOLDOWN_MS, MAX_COOLDOWN_MS)
-        openUntilMs = nowMs + cooldown
+    private class KeyState {
+        @Volatile var openUntilMs: Long = 0L
+        @Volatile var consecutiveHits: Int = 0
     }
 
-    /** Record a successful response: closes the breaker and resets backoff. */
+    private val states = ConcurrentHashMap<String, KeyState>()
+
+    /** True while [key] is throttled — callers should skip it. */
+    fun isOpen(key: String, nowMs: Long): Boolean =
+        (states[key]?.openUntilMs ?: 0L) > nowMs
+
+    /**
+     * Record a rate-limit response for [key]. Opens that key for a cooldown
+     * that doubles with each consecutive hit (base, 2×, 4×, …), capped at
+     * [MAX_COOLDOWN_MS]. Other keys are unaffected.
+     */
     @Synchronized
-    fun recordSuccess() {
-        consecutiveHits = 0
-        openUntilMs = 0L
+    fun recordRateLimited(key: String, nowMs: Long) {
+        val state = states.getOrPut(key) { KeyState() }
+        state.consecutiveHits++
+        val cooldown = (BASE_COOLDOWN_MS.toDouble() * 2.0.pow(state.consecutiveHits - 1))
+            .toLong()
+            .coerceIn(BASE_COOLDOWN_MS, MAX_COOLDOWN_MS)
+        state.openUntilMs = nowMs + cooldown
+    }
+
+    /** Record a successful response for [key]: closes it and resets backoff. */
+    @Synchronized
+    fun recordSuccess(key: String) {
+        states[key]?.let {
+            it.consecutiveHits = 0
+            it.openUntilMs = 0L
+        }
     }
 
     companion object {
-        /** Cooldown after the first rate-limit hit. */
+        /** Cooldown after the first rate-limit hit on a key. */
         const val BASE_COOLDOWN_MS = 60_000L
 
         /** Upper bound on the exponential backoff. */

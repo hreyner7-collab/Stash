@@ -64,6 +64,12 @@ val lastFmApiKey: String =
     localProperties.getProperty("lastfm.apiKey") ?: System.getenv("LASTFM_API_KEY").orEmpty()
 val lastFmApiSecret: String =
     localProperties.getProperty("lastfm.apiSecret") ?: System.getenv("LASTFM_API_SECRET").orEmpty()
+// Optional comma-separated pool of EXTRA api keys used only for unsigned read
+// endpoints (tag/similar/etc.) to spread load and raise the shared-key rate
+// ceiling. No secret needed — reads are unsigned. Auth/scrobble always use the
+// primary key above. Empty by default.
+val lastFmExtraApiKeys: String =
+    localProperties.getProperty("lastfm.extraApiKeys") ?: System.getenv("LASTFM_EXTRA_API_KEYS").orEmpty()
 
 android {
     namespace = "com.stash.app"
@@ -81,6 +87,7 @@ android {
         // valid — the Settings UI just disables the connect button.
         buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmApiKey\"")
         buildConfigField("String", "LASTFM_API_SECRET", "\"$lastFmApiSecret\"")
+        buildConfigField("String", "LASTFM_EXTRA_API_KEYS", "\"$lastFmExtraApiKeys\"")
         // v0.9.13: TipJarRepository fetches the public supporters JSON from
         // this URL on Home foreground (cache-aware, ~15 min refresh). Edit
         // the JSON and push to update the supporter list without an APK
