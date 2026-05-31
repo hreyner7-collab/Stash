@@ -41,6 +41,7 @@ import javax.inject.Singleton
 class LastFmApiClient @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val credentials: LastFmCredentials,
+    private val rateLimitGate: LastFmRateLimitGate,
 ) {
     /** Step 1 of web-auth: request a token. User then authorises in browser. */
     suspend fun getAuthToken(): Result<String> = runCatching {
@@ -386,23 +387,44 @@ class LastFmApiClient @Inject constructor(
      */
     private suspend fun unsignedGet(params: Map<String, String>): JsonObject =
         withContext(Dispatchers.IO) {
+            // Circuit breaker: if the shared key is currently throttled, fail
+            // fast without touching the network. Continuing to fire requests
+            // at a rate-limited key only prolongs the block (Last.fm error 29).
+            if (rateLimitGate.isOpen(System.currentTimeMillis())) {
+                error("Last.fm rate-limited; skipping request (circuit open)")
+            }
+
             val paramsWithFormat = params + ("format" to "json")
             val url = API_URL.toHttpUrl().newBuilder().apply {
                 paramsWithFormat.forEach { (k, v) -> addQueryParameter(k, v) }
             }.build()
             val request = Request.Builder().url(url).get().build()
-            val body = okHttpClient.newCall(request).execute().use {
-                check(it.isSuccessful) { "Last.fm GET failed: HTTP ${it.code}" }
-                it.body?.string() ?: error("Empty Last.fm response")
+            val (code, body) = okHttpClient.newCall(request).execute().use {
+                it.code to it.body?.string()
             }
-            val root = json.parseToJsonElement(body).jsonObject
+
+            // HTTP 429 — hard rate limit. Trip the breaker, then fail.
+            if (code == 429) {
+                rateLimitGate.recordRateLimited(System.currentTimeMillis())
+                error("Last.fm GET failed: HTTP 429 (rate limited)")
+            }
+            check(code in 200..299) { "Last.fm GET failed: HTTP $code" }
+            val bodyStr = body ?: error("Empty Last.fm response")
+
+            val root = json.parseToJsonElement(bodyStr).jsonObject
             // Last.fm returns HTTP 200 with { error, message } on some
             // kinds of failures (invalid artist, rate-limited, etc).
             // Surface those so callers don't treat garbage as success.
             root["error"]?.jsonPrimitive?.content?.let { err ->
                 val msg = root["message"]?.jsonPrimitive?.content ?: "unknown"
+                // error 29 == "Rate Limit Exceeded" → trip the breaker so the
+                // next calls short-circuit instead of piling on.
+                if (err == "29") rateLimitGate.recordRateLimited(System.currentTimeMillis())
                 error("Last.fm API error $err: $msg")
             }
+
+            // A clean response means the key isn't throttled — close the breaker.
+            rateLimitGate.recordSuccess()
             root
         }
 
