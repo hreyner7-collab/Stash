@@ -9,6 +9,7 @@ import com.stash.core.data.db.converter.Converters
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
+import com.stash.core.data.db.dao.LastFmCacheDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.LyricsDao
 import com.stash.core.data.db.dao.PlaylistDao
@@ -23,6 +24,7 @@ import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.ArtistProfileCacheEntity
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
+import com.stash.core.data.db.entity.LastFmCacheEntity
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.LyricsEntity
 import com.stash.core.data.db.entity.PlaylistEntity
@@ -72,8 +74,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackBlocklistEntity::class,
         TrackSkipEventEntity::class,
         LyricsEntity::class,
+        LastFmCacheEntity::class,
     ],
-    version = 30,
+    version = 31,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -106,6 +109,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun trackSkipEventDao(): TrackSkipEventDao
 
     abstract fun lyricsDao(): LyricsDao
+
+    abstract fun lastFmCacheDao(): LastFmCacheDao
 
 
     companion object {
@@ -804,6 +809,21 @@ abstract class StashDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN mood_keys_csv TEXT NOT NULL DEFAULT ''")
                 db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN tag_sample_depth INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v30 → v31: add lastfm_response_cache for generic Last.fm lookups. */
+        val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS lastfm_response_cache (
+                        cache_key TEXT NOT NULL PRIMARY KEY,
+                        json TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
             }
         }
     }

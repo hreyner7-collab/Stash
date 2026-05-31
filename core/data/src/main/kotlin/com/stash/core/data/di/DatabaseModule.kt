@@ -61,6 +61,7 @@ object DatabaseModule {
                 StashDatabase.MIGRATION_27_28,
                 StashDatabase.MIGRATION_28_29,
                 StashDatabase.MIGRATION_29_30,
+                StashDatabase.MIGRATION_30_31,
             )
             // No fallbackToDestructiveMigration() — if a migration is missing,
             // the app will crash on startup instead of silently wiping the
@@ -118,4 +119,8 @@ object DatabaseModule {
     @Provides
     fun provideLyricsDao(db: StashDatabase): com.stash.core.data.db.dao.LyricsDao =
         db.lyricsDao()
+
+    @Provides
+    fun provideLastFmCacheDao(db: StashDatabase): com.stash.core.data.db.dao.LastFmCacheDao =
+        db.lastFmCacheDao()
 }
