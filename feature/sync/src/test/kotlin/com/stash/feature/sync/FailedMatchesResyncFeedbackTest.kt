@@ -62,8 +62,10 @@ class FailedMatchesResyncFeedbackTest {
         searchQuery = "Artist - Title",
     )
 
-    private fun makeVm(): FailedMatchesViewModel {
-        every { musicRepository.getUnmatchedTracks() } returns flowOf(listOf(unmatched()))
+    private fun makeVm(
+        tracks: List<UnmatchedTrackView> = listOf(unmatched()),
+    ): FailedMatchesViewModel {
+        every { musicRepository.getUnmatchedTracks() } returns flowOf(tracks)
         every { musicRepository.getFlaggedTracks() } returns flowOf(emptyList())
         return FailedMatchesViewModel(
             musicRepository, previewPlayer, previewUrlExtractor, searchExecutor,
@@ -122,6 +124,31 @@ class FailedMatchesResyncFeedbackTest {
             "expected the full-YouTube result to become the candidate",
             "ytOnly",
             vm.uiState.value.resyncCandidates[1L]?.videoId,
+        )
+    }
+
+    @Test fun `resync derives query from artist and title when the stored search query is blank`() = runTest {
+        // Real bug: auto-requeued tracks (TrackDownloadWorker) get an empty
+        // download_queue.search_query. Resync trusted that blank string and
+        // searched for "" -> InnerTube empty -> yt-dlp throws "must not be
+        // blank" -> "can't find a match", even though artist+title are known.
+        val blankQueryTrack = UnmatchedTrackView(
+            id = 1L, trackId = 1L, title = "In the Aeroplane Over the Sea",
+            artist = "Neutral Milk Hotel", albumArtUrl = null, createdAt = 0L,
+            rejectedVideoId = null, searchQuery = "",
+        )
+        val queries = mutableListOf<String>()
+        coEvery { searchExecutor.search(capture(queries), any()) } returns
+            listOf(YtDlpSearchResult(id = "vid1", title = "x"))
+        val vm = makeVm(listOf(blankQueryTrack))
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.resync()
+        advanceUntilIdle()
+
+        assertTrue(
+            "resync must search by artist+title, not the blank stored query; queries=$queries",
+            queries.any { it == "Neutral Milk Hotel - In the Aeroplane Over the Sea" },
         )
     }
 }

@@ -235,7 +235,12 @@ class FailedMatchesViewModel @Inject constructor(
             // Each row becomes a (trackId, searchQuery, rejectedVideoId?)
             // triple so the same semaphored search loop handles both kinds.
             val unmatched = uiState.value.tracks.map {
-                Triple(it.trackId, it.searchQuery, it.rejectedVideoId)
+                // Auto-requeued tracks (TrackDownloadWorker) get a blank
+                // download_queue.search_query. Fall back to "artist - title"
+                // — which we already have on the row — so resync can actually
+                // search instead of firing a blank query that finds nothing.
+                val query = it.searchQuery.ifBlank { "${it.artist} - ${it.title}" }
+                Triple(it.trackId, query, it.rejectedVideoId)
             }
             val flagged = uiState.value.flaggedTracks.map {
                 Triple(it.trackId, it.searchQuery, it.currentYoutubeId)
