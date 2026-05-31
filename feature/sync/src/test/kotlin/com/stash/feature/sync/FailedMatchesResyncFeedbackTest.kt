@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -101,6 +102,26 @@ class FailedMatchesResyncFeedbackTest {
         assertTrue(
             "expected a 'found N' completion message, got $messages",
             messages.any { it.contains("1") && it.contains("replacement", ignoreCase = true) },
+        )
+    }
+
+    @Test fun `resync falls through to full-YouTube search when YT Music has no usable match`() = runTest {
+        // #19/#143: some tracks exist on YouTube but not YouTube Music. When the
+        // InnerTube (YT Music) pass yields nothing usable, resync must broaden to
+        // a yt-dlp full-YouTube search instead of giving up.
+        coEvery { searchExecutor.search(any(), any()) } returns emptyList()
+        coEvery { searchExecutor.searchYtDlpDirect(any(), any()) } returns
+            listOf(YtDlpSearchResult(id = "ytOnly", title = "Title"))
+        val vm = makeVm()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.resync()
+        advanceUntilIdle()
+
+        assertEquals(
+            "expected the full-YouTube result to become the candidate",
+            "ytOnly",
+            vm.uiState.value.resyncCandidates[1L]?.videoId,
         )
     }
 }

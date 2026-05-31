@@ -254,8 +254,26 @@ class FailedMatchesViewModel @Inject constructor(
                         // For flagged tracks, skip the currently-associated
                         // (wrong) video — surfacing it as the candidate would
                         // just swap the track with itself.
-                        val best = results.firstOrNull { excludeVideoId == null || it.id != excludeVideoId }
-                            ?: results.firstOrNull()
+                        var best = results.firstOrNull { excludeVideoId == null || it.id != excludeVideoId }
+
+                        // #19/#143: search() is InnerTube-first and only falls
+                        // back to yt-dlp when YT Music returns *zero* results.
+                        // When YT Music returns results but none are usable —
+                        // it's empty, or only the rejected/wrong video came back
+                        // — broaden to a full-YouTube yt-dlp search, which
+                        // surfaces tracks that exist on YouTube but not YouTube
+                        // Music (and genuine alternatives to a wrong match).
+                        if (best == null) {
+                            val direct = searchExecutor.searchYtDlpDirect(query, maxResults = 5)
+                            best = direct.firstOrNull { excludeVideoId == null || it.id != excludeVideoId }
+                        }
+
+                        // Last resort: surface the top result even if it's the
+                        // excluded one, so an unmatched track still gets *a*
+                        // candidate to preview rather than nothing.
+                        if (best == null) {
+                            best = results.firstOrNull()
+                        }
                         if (best != null) {
                             _resyncCandidates.update { current ->
                                 current + (trackId to ResyncCandidate(
