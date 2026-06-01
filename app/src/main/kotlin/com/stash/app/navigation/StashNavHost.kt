@@ -84,6 +84,7 @@ fun StashNavHost(
                 onNavigateToAlbum = { albumName, artistName ->
                     navController.navigate(AlbumDetailRoute(albumName, artistName))
                 },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
         composable<SearchRoute> {
