@@ -476,8 +476,20 @@ class PlayerRepositoryImpl @Inject constructor(
     private suspend fun prefetchNextTrack(currentIndex: Int) {
         val controller = controllerDeferred ?: return
         val tracks = currentQueueTracks
-        val nextIndex = currentIndex + 1
-        if (nextIndex < 0 || nextIndex >= tracks.size) return
+        // Determine the logical next-up from the CURRENTLY-PLAYING track's
+        // identity, NOT from [currentIndex]. `currentIndex` is a *timeline*
+        // index (controller.currentMediaItemIndex); `currentQueueTracks` is the
+        // *logical* queue. setQueue seeds the timeline with only the tapped
+        // track at timeline index 0 even when it is currentQueueTracks[K>0], so
+        // the two index spaces align only when playback started from track 0.
+        // Matching the current item's EXTRA_TRACK_ID into currentQueueTracks
+        // keeps "next" correct no matter where in the playlist the user started
+        // (and fixes the same latent aliasing in the URI-swap path below).
+        val currentId = controller.currentMediaItem
+            ?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID) ?: return
+        val currentPos = tracks.indexOfFirst { it.id == currentId }
+        val nextIndex = currentPos + 1
+        if (currentPos < 0 || nextIndex >= tracks.size) return
 
         val next = tracks[nextIndex]
         if (next.filePath != null) return
@@ -508,36 +520,65 @@ class PlayerRepositoryImpl @Inject constructor(
         streamUrlCache.put(next.id, resolved)
         Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=url expiresAt=${resolved.expiresAtMs}")
 
-        // Refresh the controller's MediaItem at the matching index so the
-        // player picks up the fresh URI when its pre-buffer fires. Locate
-        // the slot by matching EXTRA_TRACK_ID; the controller's timeline
-        // may have fewer items than currentQueueTracks because background
-        // fill (allowYouTube=false) skips unresolvable tracks. If the next
-        // track isn't in the controller's queue, skip — inserting it would
-        // change the user's queue order, which is out of scope here.
-        refreshControllerMediaItem(controller, next, resolved)
+        // If the next track is already a slot in the controller's timeline,
+        // refresh its URI in place. If it ISN'T — because the
+        // allowYouTube=false background fill skipped it (the YT-fallback case,
+        // where Squid/Kennyy are down) — the timeline has no next item, so
+        // ExoPlayer can't auto-advance and the Next button is a no-op. Insert
+        // the next track right after the current item so playback flows. We
+        // build a real MediaItem from the now-cached URL (cache hit — no extra
+        // yt-dlp slot) with proper EXTRA_TRACK_ID metadata: the proven eager
+        // path, NOT the reverted stash-lazy:// placeholder/synthetic-id scheme.
+        val swapped = refreshControllerMediaItem(controller, next, resolved)
+        if (!swapped) {
+            val item = (buildMediaItemForTrack(entity, allowYouTube = true) as? StreamRoutingResult.Item)?.mediaItem
+            if (item != null) insertNextMediaItem(controller, next.id, item)
+        }
     }
 
+    /**
+     * Swap the URI of the timeline slot matching [next] in place, preserving its
+     * mediaId / metadata / extras so listeners observe a pure URI swap. Returns
+     * `true` if the slot was found and refreshed, `false` if [next] isn't in the
+     * controller's timeline (the caller then inserts it — see [insertNextMediaItem]).
+     */
     private fun refreshControllerMediaItem(
         controller: MediaController,
         next: Track,
         resolved: StreamUrl,
-    ) {
+    ): Boolean {
         val count = controller.mediaItemCount
         for (i in 0 until count) {
             val item = controller.getMediaItemAt(i)
             val itemTrackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: continue
             if (itemTrackId == next.id) {
-                // Rebuild the MediaItem with the new URI but preserve the
-                // existing mediaId / metadata / extras so listeners observe a
-                // pure URI swap.
                 val refreshed = item.buildUpon()
                     .setUri(resolved.url)
                     .build()
                 controller.replaceMediaItem(i, refreshed)
-                return
+                return true
             }
         }
+        return false
+    }
+
+    /**
+     * Insert the freshly-resolved next track right after the current item so
+     * ExoPlayer has a next MediaItem to auto-advance to (and Next works). Used
+     * only when the track was dropped from the timeline by the
+     * allowYouTube=false background fill (YT-fallback). Re-scans first so a
+     * racing prefetch can't double-insert; the scan + insert run synchronously
+     * on the controller thread, so they are atomic. Bounded to one track ahead
+     * by the prefetch watcher, so it never floods the yt-dlp extraction slots.
+     */
+    private fun insertNextMediaItem(controller: MediaController, trackId: Long, item: MediaItem) {
+        val count = controller.mediaItemCount
+        for (i in 0 until count) {
+            val id = controller.getMediaItemAt(i).mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: continue
+            if (id == trackId) return // already placed (e.g. by a concurrent prefetch)
+        }
+        val insertAt = (controller.currentMediaItemIndex + 1).coerceIn(0, count)
+        controller.addMediaItem(insertAt, item)
     }
 
     /**
