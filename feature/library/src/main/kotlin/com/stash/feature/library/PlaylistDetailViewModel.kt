@@ -344,6 +344,63 @@ class PlaylistDetailViewModel @Inject constructor(
         }
     }
 
+    // ── Batch (multi-select) actions ─────────────────────────────────────
+    // Each wraps the existing single-track path for the multi-select toolbar.
+    // Queue uses the batch addToQueue(List) overload (single call); Play Next
+    // loops addNext; download/remove/save/delete loop the per-id repo calls.
+
+    /** Insert each of [tracks] after the currently-playing track, in order. */
+    fun playSelectedNext(tracks: List<Track>) {
+        viewModelScope.launch {
+            tracks.forEach { playerRepository.addNext(it) }
+        }
+    }
+
+    /** Append [tracks] to the queue via the batch overload (single call). */
+    fun addSelectedToQueue(tracks: List<Track>) {
+        viewModelScope.launch {
+            playerRepository.addToQueue(tracks)
+        }
+    }
+
+    /** Queue each of [trackIds] for download. */
+    fun downloadSelected(trackIds: List<Long>) {
+        viewModelScope.launch {
+            trackIds.forEach { musicRepository.queueDownload(it) }
+        }
+    }
+
+    /** Remove the on-disk file for each of [trackIds], keeping streamable rows. */
+    fun removeDownloadsForSelected(trackIds: List<Long>) {
+        viewModelScope.launch {
+            trackIds.forEach { musicRepository.removeDownload(it) }
+        }
+    }
+
+    /** Add each of [trackIds] to the playlist identified by [playlistId]. */
+    fun saveSelectedToPlaylist(trackIds: List<Long>, playlistId: Long) {
+        viewModelScope.launch {
+            trackIds.forEach { musicRepository.addTrackToPlaylist(it, playlistId) }
+        }
+    }
+
+    /**
+     * Delete each of [tracks] from this playlist via the protected-playlist
+     * cascade. If [alsoBlacklist] is set, destroyed tracks are marked
+     * never-download-again.
+     */
+    fun deleteSelected(tracks: List<Track>, alsoBlacklist: Boolean) {
+        viewModelScope.launch {
+            tracks.forEach {
+                musicRepository.removeTrackFromPlaylistAndMaybeDelete(
+                    trackId = it.id,
+                    fromPlaylistId = playlistId,
+                    alsoBlacklist = alsoBlacklist,
+                )
+            }
+        }
+    }
+
     private val _userMessages = kotlinx.coroutines.flow.MutableSharedFlow<String>(
         extraBufferCapacity = 1,
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
