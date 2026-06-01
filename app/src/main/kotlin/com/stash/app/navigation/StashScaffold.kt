@@ -46,9 +46,10 @@ fun StashScaffold(
     val currentRoute = navBackStackEntry?.destination?.route
 
     // Whether a detail screen is currently in multi-select mode. Detail screens
-    // signal this via `onSelectionModeChanged`; we hide the mini-player while it
-    // is true so the screen's bottom selection action bar doesn't stack on top
-    // of it.
+    // signal this via `onSelectionModeChanged`; while it is true we hide the
+    // whole bottom chrome (mini-player AND nav bar) so the screen's own bottom
+    // selection action bar owns the bottom edge instead of stacking on / being
+    // crowded by it (premium multi-select pattern, avoids mis-taps).
     var selectionActive by remember { mutableStateOf(false) }
 
     // Safeguard: a selection-capable screen normally clears its selection on
@@ -98,10 +99,12 @@ fun StashScaffold(
         // 15+ where edge-to-edge is enforced. Reported via Twitter
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
-            Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                // Hide the mini-player while a screen is selecting so its bottom
-                // selection action bar takes this slot instead of stacking.
-                if (!selectionActive) {
+            // While a screen is selecting, render no bottom chrome at all — the
+            // screen's own selection action bar (which handles its own nav insets)
+            // takes the bottom edge. This drops innerPadding.bottom to 0 so the
+            // content extends full-height behind that action bar.
+            if (!selectionActive) {
+                Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
                     MiniPlayer(
                         onExpand = {
                             navController.navigate(NowPlayingRoute) {
@@ -109,19 +112,19 @@ fun StashScaffold(
                             }
                         },
                     )
-                }
 
-                StashBottomBar(
-                    currentRoute = currentRoute,
-                    onNavigate = { dest ->
-                        navController.navigate(dest.route) {
-                            popUpTo(navController.graph.findStartDestination().id) {
-                                inclusive = false
+                    StashBottomBar(
+                        currentRoute = currentRoute,
+                        onNavigate = { dest ->
+                            navController.navigate(dest.route) {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    inclusive = false
+                                }
+                                launchSingleTop = true
                             }
-                            launchSingleTop = true
-                        }
-                    },
-                )
+                        },
+                    )
+                }
             }
         },
     ) { innerPadding ->
