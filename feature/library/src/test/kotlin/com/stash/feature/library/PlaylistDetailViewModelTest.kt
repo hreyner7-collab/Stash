@@ -13,12 +13,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.any
@@ -26,6 +28,7 @@ import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
 
 /**
  * Pins the batch-action contract added in Task 5 of the multi-select redesign:
@@ -76,10 +79,12 @@ class PlaylistDetailViewModelTest {
         val vm = buildVm(musicRepository = musicRepo)
         val ids = listOf(1L, 2L, 3L)
 
+        val messages = collectMessages(vm)
         vm.downloadSelected(ids)
         runCurrent()
 
         ids.forEach { id -> verify(musicRepo).queueDownload(id) }
+        assertEquals(listOf("Queued 3 songs for download."), messages)
     }
 
     @Test
@@ -88,10 +93,12 @@ class PlaylistDetailViewModelTest {
         val vm = buildVm(musicRepository = musicRepo)
         val ids = listOf(1L, 2L)
 
+        val messages = collectMessages(vm)
         vm.removeDownloadsForSelected(ids)
         runCurrent()
 
         ids.forEach { id -> verify(musicRepo).removeDownload(id) }
+        assertEquals(listOf("Removed downloads for 2 songs."), messages)
     }
 
     @Test
@@ -108,11 +115,12 @@ class PlaylistDetailViewModelTest {
     }
 
     @Test
-    fun deleteSelected_removes_each_from_playlist() = runTest {
+    fun deleteSelected_removes_each_from_playlist_and_emits_rollup() = runTest {
         val musicRepo = musicRepoMock()
         val vm = buildVm(musicRepository = musicRepo)
         val tracks = listOf(track(1L), track(2L), track(3L))
 
+        val messages = collectMessages(vm)
         vm.deleteSelected(tracks, alsoBlacklist = false)
         runCurrent()
 
@@ -123,6 +131,56 @@ class PlaylistDetailViewModelTest {
                 alsoBlacklist = eq(false),
             )
         }
+        assertEquals(listOf("Removed 3 songs."), messages)
+    }
+
+    @Test
+    fun deleteSelected_with_blacklist_emits_blocked_rollup() = runTest {
+        val musicRepo = musicRepoMock()
+        // Every cascade reports a blacklisted destroy.
+        whenever(
+            musicRepo.removeTrackFromPlaylistAndMaybeDelete(any(), any(), eq(true)),
+        ).thenReturn(
+            MusicRepository.CascadeRemovalSummary(
+                deleted = 1, keptProtected = 0, keptElsewhere = 0, blacklisted = 1,
+            ),
+        )
+        val vm = buildVm(musicRepository = musicRepo)
+        val tracks = listOf(track(1L), track(2L))
+
+        val messages = collectMessages(vm)
+        vm.deleteSelected(tracks, alsoBlacklist = true)
+        runCurrent()
+
+        tracks.forEach { t ->
+            verify(musicRepo).removeTrackFromPlaylistAndMaybeDelete(
+                trackId = eq(t.id),
+                fromPlaylistId = any(),
+                alsoBlacklist = eq(true),
+            )
+        }
+        assertEquals(listOf("Removed 2 songs. Blocked from future syncs."), messages)
+    }
+
+    @Test
+    fun downloadSelected_isolates_per_item_failure() = runTest {
+        val musicRepo = musicRepoMock()
+        // Second item throws; first and third must still be attempted.
+        whenever(musicRepo.queueDownload(eq(2L)))
+            .thenThrow(RuntimeException("boom"))
+        val vm = buildVm(musicRepository = musicRepo)
+        val ids = listOf(1L, 2L, 3L)
+
+        val messages = collectMessages(vm)
+        vm.downloadSelected(ids)
+        runCurrent()
+
+        // All three repo calls happened despite the middle one throwing.
+        verify(musicRepo).queueDownload(1L)
+        verify(musicRepo).queueDownload(2L)
+        verify(musicRepo).queueDownload(3L)
+        // Roll-up reflects only the two that succeeded.
+        assertEquals(listOf("Queued 2 songs for download."), messages)
     }
 
     // ------------------------------------------------------------------
@@ -131,6 +189,20 @@ class PlaylistDetailViewModelTest {
 
     private fun track(id: Long) = Track(id = id, title = "Track $id", artist = "Artist")
 
+    /**
+     * Collects [PlaylistDetailViewModel.userMessages] into a list for the life
+     * of the test. Mirrors the flow-collection harness in
+     * [LikedSongsDetailViewModelTest] / [MixOfflineTapGuardTest].
+     */
+    private fun kotlinx.coroutines.test.TestScope.collectMessages(
+        vm: PlaylistDetailViewModel,
+    ): List<String> {
+        val messages = mutableListOf<String>()
+        backgroundScope.launch { vm.userMessages.collect { messages.add(it) } }
+        runCurrent()
+        return messages
+    }
+
     private fun playerRepoMock(): PlayerRepository = mock {
         on { playerState } doReturn MutableStateFlow(PlayerState())
     }
@@ -138,6 +210,7 @@ class PlaylistDetailViewModelTest {
     private fun musicRepoMock(): MusicRepository = mock {
         on { getTracksByPlaylist(any()) } doReturn flowOf(emptyList())
         on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
+        onBlocking { queueDownload(any()) } doReturn true
         onBlocking {
             removeTrackFromPlaylistAndMaybeDelete(any(), any(), any())
         } doReturn MusicRepository.CascadeRemovalSummary(
