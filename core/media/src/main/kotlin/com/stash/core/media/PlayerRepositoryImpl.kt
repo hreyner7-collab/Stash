@@ -584,6 +584,13 @@ class PlayerRepositoryImpl @Inject constructor(
      * racing prefetch can't double-insert; the scan + insert run synchronously
      * on the controller thread, so they are atomic. Bounded to one track ahead
      * by the prefetch watcher, so it never floods the yt-dlp extraction slots.
+     *
+     * Caveat: inserts the LINEAR next track at the current position + 1. With
+     * shuffle ON and a sparse (YT-fallback) timeline, ExoPlayer advances in its
+     * own shuffle order, which won't match this linear-next — but this branch
+     * only runs in the genuine all-streaming-down case where the alternative is
+     * a dead single-item timeline, so it's still strictly better than stopping.
+     * It never runs on a healthy (full-timeline) lossless queue.
      */
     private fun insertNextMediaItem(controller: MediaController, trackId: Long, item: MediaItem) {
         val count = controller.mediaItemCount
