@@ -388,6 +388,16 @@ class PlayerRepositoryImpl @Inject constructor(
                 fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = false)
                 fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = false)
                 Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks); AUTODIAG timeline=${controller.mediaItemCount} hasNext=${controller.hasNextMediaItem()} queueTracks=${currentQueueTracks.size}")
+                // Kick the next-up prefetch for the FIRST track explicitly. The
+                // reactive watcher (playerState.currentIndex.distinctUntilChanged)
+                // suppresses the initial idx=0 emission for a freshly-started
+                // queue (the state already sits at 0), so without this the first
+                // track never gets its next resolved+inserted and the first
+                // auto-advance fails on all-streaming (YouTube-fallback) queues —
+                // where the background fill (allowYouTube=false) leaves a single-
+                // item timeline. Idempotent: a no-op when the next is already
+                // present (lossless queues) or not streamable.
+                prefetchNextTrack(controller.currentMediaItemIndex)
             } catch (e: CancellationException) {
                 // Expected when the user starts a new queue. Don't log as failure.
                 throw e
