@@ -22,6 +22,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.io.File
 
 /**
  * Tests for [PlayerRepositoryImpl.buildMediaItemForTrack] and
@@ -69,6 +70,48 @@ class PlayerRepositoryStreamingTest {
         // Tests that don't care about disk existence get a "file is there"
         // default; the not-downloaded tests can override per-test.
         repo.filePathExistsOnDisk = { true }
+    }
+
+    @Test
+    fun `filePathExistsOnDisk rejects too-small junk downloads, accepts real audio`() {
+        // Proven on-device root cause: failed YouTube downloads left ~274-byte
+        // .webm error bodies marked isDownloaded=true. exists()/length() are
+        // both truthy, so the old check played them as local sources -> ExoPlayer
+        // read a few hundred bytes of non-audio -> ERROR_CODE_PARSING_CONTAINER_MALFORMED
+        // -> skip-storm. Requiring MIN_PLAYABLE_LOCAL_BYTES makes those rows fall
+        // through to streaming instead.
+        //
+        // Use a fresh repo so we exercise the REAL default lambda (setUp above
+        // overrides it to { true }).
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val fresh = PlayerRepositoryImpl(
+            context = context,
+            playbackStateStore = playbackStateStore,
+            musicRepository = musicRepository,
+            streamingPreference = streamingPreference,
+            streamResolver = streamResolver,
+            streamUrlCache = streamUrlCache,
+            connectivity = connectivity,
+            trackDao = trackDao,
+        )
+
+        val empty = File.createTempFile("stash-empty", ".flac").apply { deleteOnExit() }
+        val junk = File.createTempFile("stash-junk", ".webm").apply {
+            writeBytes(ByteArray(274)) // the exact failure shape from the device
+            deleteOnExit()
+        }
+        val real = File.createTempFile("stash-real", ".flac").apply {
+            writeBytes(ByteArray((PlayerRepositoryImpl.MIN_PLAYABLE_LOCAL_BYTES + 1).toInt()))
+            deleteOnExit()
+        }
+        val missing = File(empty.parentFile, "stash-missing-${empty.name}")
+
+        // Plain paths (java.io.File handles them on any OS; a file:// URI over a
+        // Windows drive-letter path is an env artifact, not a real-app case).
+        assertThat(fresh.filePathExistsOnDisk(empty.absolutePath)).isFalse()
+        assertThat(fresh.filePathExistsOnDisk(junk.absolutePath)).isFalse()
+        assertThat(fresh.filePathExistsOnDisk(real.absolutePath)).isTrue()
+        assertThat(fresh.filePathExistsOnDisk(missing.absolutePath)).isFalse()
     }
 
     @Test

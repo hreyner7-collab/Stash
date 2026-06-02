@@ -88,26 +88,39 @@ class PlayerRepositoryImpl @Inject constructor(
 
     /**
      * Visible-for-testing indirection so unit tests can stub out the
-     * on-disk existence check without touching the real filesystem.
-     * Handles both plain filesystem paths (via [File.exists]) and
-     * SAF-backed external storage URIs (via [DocumentFile.exists]).
+     * on-disk check without touching the real filesystem. Handles both plain
+     * filesystem paths (via [File]) and SAF-backed external storage URIs
+     * (via [DocumentFile]).
+     *
+     * **Treats a too-small file as NOT a usable download.** A failed download
+     * can leave a tiny garbage file behind while the row is still marked
+     * `isDownloaded` — e.g. yt-dlp writing a ~274-byte error body into a
+     * `.webm` and the pipeline recording it as complete. `exists()` and
+     * `length()` are both truthy for it, so the old check played it as a local
+     * source; ExoPlayer then reads a few hundred bytes of non-audio and throws
+     * ERROR_CODE_PARSING_CONTAINER_MALFORMED, which skip-storms the queue.
+     * Requiring at least [MIN_PLAYABLE_LOCAL_BYTES] makes those rows fall
+     * through to streaming instead (the registry re-resolves by YouTube id /
+     * metadata, independent of the stale `isStreamable` flag). No real music
+     * track is anywhere near this small, so there are no false negatives.
      */
     internal var filePathExistsOnDisk: (String) -> Boolean = { path ->
-        if (path.startsWith("content://")) {
-            try {
-                DocumentFile.fromSingleUri(context, path.toUri())?.exists() == true
-            } catch (e: Exception) {
-                false
-            }
-        } else {
-            // Handle both plain paths and file:// URIs
-            val plainPath = if (path.startsWith("file://")) {
-                path.toUri().path ?: path.removePrefix("file://")
+        val bytes = try {
+            if (path.startsWith("content://")) {
+                DocumentFile.fromSingleUri(context, path.toUri())?.length() ?: 0L
             } else {
-                path
+                // Handle both plain paths and file:// URIs.
+                val plainPath = if (path.startsWith("file://")) {
+                    path.toUri().path ?: path.removePrefix("file://")
+                } else {
+                    path
+                }
+                File(plainPath).length()
             }
-            File(plainPath).exists()
+        } catch (e: Exception) {
+            0L
         }
+        bytes >= MIN_PLAYABLE_LOCAL_BYTES
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -1179,41 +1192,57 @@ class PlayerRepositoryImpl @Inject constructor(
          */
         override fun onPlayerError(error: PlaybackException) {
             val controller = controllerDeferred
-            val failingTitle = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
-            val isIoError = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+            val current = controller?.currentMediaItem
+            val failingTitle = current?.mediaMetadata?.title?.toString()
+            val scheme = current?.localConfiguration?.uri?.scheme
+            val streamOrigin = current?.mediaMetadata?.extras?.getString(EXTRA_STREAM_ORIGIN)
 
-            if (!isIoError) {
-                // Non-IO errors (decoder, unsupported codec, etc.) are per-track and
-                // shouldn't count against the cascade window. Recover unconditionally.
-                Log.w(
-                    TAG,
-                    "onPlayerError: '$failingTitle' code=${error.errorCode} " +
-                        "(${error.errorCodeName}) — skip-next (non-IO)",
-                    error,
-                )
-                controller?.recoverOrStop()
-                return
-            }
-
-            val verdict = cascadeGuard.onError()
-            Log.w(
-                TAG,
-                "onPlayerError: '$failingTitle' code=${error.errorCode} " +
-                    "(${error.errorCodeName}) — verdict=$verdict",
-                error,
-            )
-
-            when (val v = verdict) {
-                StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
-                is StreamErrorCascadeGuard.Verdict.Halt -> {
-                    controller?.pause()
-                    _streamingHaltedEvents.tryEmit(
-                        StreamingHaltedEvent(
-                            failingTitle = failingTitle,
-                            consecutiveErrorCount = v.consecutiveErrors,
-                        ),
+            // The error code alone is NOT enough to decide recovery. A streamed
+            // track that gets a 200 serving empty/garbage bytes fails with
+            // ERROR_CODE_PARSING_CONTAINER_MALFORMED — a "non-IO" code. The old
+            // handler skipped every non-IO error unconditionally, bypassing the
+            // cascade guard, so a degraded source machine-gunned the whole queue
+            // (hundreds of skip-nexts in seconds). Decide on the item's URI
+            // scheme instead: only genuinely-local files are per-track skips.
+            when (classifyPlaybackError(scheme)) {
+                PlaybackErrorPolicy.LOCAL_SKIP -> {
+                    // A downloaded/local file failed to decode (corrupt file or
+                    // codec edge case). Per-track: skip it. Not a backend outage,
+                    // so it must not arm the streaming cascade.
+                    Log.w(
+                        TAG,
+                        "onPlayerError: '$failingTitle' code=${error.errorCode} " +
+                            "(${error.errorCodeName}) — skip-next (local)",
+                        error,
                     )
+                    controller?.recoverOrStop()
+                }
+                PlaybackErrorPolicy.STREAMING_CASCADE -> {
+                    // A streamed item failed — 403/network OR a 200 that served
+                    // empty/malformed bytes. Both are stream-source failures, so
+                    // they go through the cascade guard: recover (skip) until the
+                    // threshold, then HALT (pause + notify) instead of skip-storming
+                    // the queue. `origin` is logged so a diagnostics capture reveals
+                    // which source (kennyy/squid/youtube) served the bad URL.
+                    val verdict = cascadeGuard.onError()
+                    Log.w(
+                        TAG,
+                        "onPlayerError: '$failingTitle' code=${error.errorCode} " +
+                            "(${error.errorCodeName}) streaming origin=$streamOrigin — verdict=$verdict",
+                        error,
+                    )
+                    when (val v = verdict) {
+                        StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
+                        is StreamErrorCascadeGuard.Verdict.Halt -> {
+                            controller?.pause()
+                            _streamingHaltedEvents.tryEmit(
+                                StreamingHaltedEvent(
+                                    failingTitle = failingTitle,
+                                    consecutiveErrorCount = v.consecutiveErrors,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1328,6 +1357,17 @@ class PlayerRepositoryImpl @Inject constructor(
     companion object {
         private const val TAG = "StashPlayer"
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
+
+        /**
+         * Minimum size for a local file to be treated as a real, playable
+         * download. Failed downloads can leave tiny garbage behind (observed:
+         * ~274-byte yt-dlp error bodies written to `.webm` and marked
+         * complete); anything below this floor is not audio and is routed to
+         * streaming instead of played as a malformed local source. 16 KiB is
+         * orders of magnitude below the smallest real music file, so it never
+         * rejects a legitimate download.
+         */
+        internal const val MIN_PLAYABLE_LOCAL_BYTES = 16L * 1024L
 
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5
