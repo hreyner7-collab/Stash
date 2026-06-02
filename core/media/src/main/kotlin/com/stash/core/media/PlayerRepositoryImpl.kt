@@ -1179,41 +1179,57 @@ class PlayerRepositoryImpl @Inject constructor(
          */
         override fun onPlayerError(error: PlaybackException) {
             val controller = controllerDeferred
-            val failingTitle = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
-            val isIoError = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+            val current = controller?.currentMediaItem
+            val failingTitle = current?.mediaMetadata?.title?.toString()
+            val scheme = current?.localConfiguration?.uri?.scheme
+            val streamOrigin = current?.mediaMetadata?.extras?.getString(EXTRA_STREAM_ORIGIN)
 
-            if (!isIoError) {
-                // Non-IO errors (decoder, unsupported codec, etc.) are per-track and
-                // shouldn't count against the cascade window. Recover unconditionally.
-                Log.w(
-                    TAG,
-                    "onPlayerError: '$failingTitle' code=${error.errorCode} " +
-                        "(${error.errorCodeName}) — skip-next (non-IO)",
-                    error,
-                )
-                controller?.recoverOrStop()
-                return
-            }
-
-            val verdict = cascadeGuard.onError()
-            Log.w(
-                TAG,
-                "onPlayerError: '$failingTitle' code=${error.errorCode} " +
-                    "(${error.errorCodeName}) — verdict=$verdict",
-                error,
-            )
-
-            when (val v = verdict) {
-                StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
-                is StreamErrorCascadeGuard.Verdict.Halt -> {
-                    controller?.pause()
-                    _streamingHaltedEvents.tryEmit(
-                        StreamingHaltedEvent(
-                            failingTitle = failingTitle,
-                            consecutiveErrorCount = v.consecutiveErrors,
-                        ),
+            // The error code alone is NOT enough to decide recovery. A streamed
+            // track that gets a 200 serving empty/garbage bytes fails with
+            // ERROR_CODE_PARSING_CONTAINER_MALFORMED — a "non-IO" code. The old
+            // handler skipped every non-IO error unconditionally, bypassing the
+            // cascade guard, so a degraded source machine-gunned the whole queue
+            // (hundreds of skip-nexts in seconds). Decide on the item's URI
+            // scheme instead: only genuinely-local files are per-track skips.
+            when (classifyPlaybackError(scheme)) {
+                PlaybackErrorPolicy.LOCAL_SKIP -> {
+                    // A downloaded/local file failed to decode (corrupt file or
+                    // codec edge case). Per-track: skip it. Not a backend outage,
+                    // so it must not arm the streaming cascade.
+                    Log.w(
+                        TAG,
+                        "onPlayerError: '$failingTitle' code=${error.errorCode} " +
+                            "(${error.errorCodeName}) — skip-next (local)",
+                        error,
                     )
+                    controller?.recoverOrStop()
+                }
+                PlaybackErrorPolicy.STREAMING_CASCADE -> {
+                    // A streamed item failed — 403/network OR a 200 that served
+                    // empty/malformed bytes. Both are stream-source failures, so
+                    // they go through the cascade guard: recover (skip) until the
+                    // threshold, then HALT (pause + notify) instead of skip-storming
+                    // the queue. `origin` is logged so a diagnostics capture reveals
+                    // which source (kennyy/squid/youtube) served the bad URL.
+                    val verdict = cascadeGuard.onError()
+                    Log.w(
+                        TAG,
+                        "onPlayerError: '$failingTitle' code=${error.errorCode} " +
+                            "(${error.errorCodeName}) streaming origin=$streamOrigin — verdict=$verdict",
+                        error,
+                    )
+                    when (val v = verdict) {
+                        StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
+                        is StreamErrorCascadeGuard.Verdict.Halt -> {
+                            controller?.pause()
+                            _streamingHaltedEvents.tryEmit(
+                                StreamingHaltedEvent(
+                                    failingTitle = failingTitle,
+                                    consecutiveErrorCount = v.consecutiveErrors,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }
