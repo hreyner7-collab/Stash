@@ -69,7 +69,11 @@ class DownloadExecutor @Inject constructor(
         qualityArgs: List<String>,
         onProgress: (Float) -> Unit = {},
     ): DownloadResult = withContext(Dispatchers.IO) {
-        ytDlpManager.initialize()
+        // Gate on a freshened (latest-nightly) yt-dlp + warmed EJS solver
+        // before the first download in a session. YouTube's signature /
+        // n-challenge changes land in nightly well before stable, so running
+        // the lib-bundled snapshot is what makes downloads fail en masse.
+        ytDlpManager.ensureFreshened()
 
         // SECURITY: Cookie file contains sensitive YouTube session cookies (SAPISID,
         // LOGIN_INFO, etc.). It is written only for the duration of the yt-dlp call and

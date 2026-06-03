@@ -1372,7 +1372,10 @@ interface TrackDao {
     @Query(
         """
         UPDATE tracks
-        SET album = CASE WHEN album IS NULL OR album = '' THEN :album ELSE album END,
+        SET album = CASE
+                WHEN (album IS NULL OR album = '') AND :album IS NOT NULL THEN :album
+                ELSE album
+            END,
             album_art_url = CASE
                 WHEN album_art_url IS NULL OR album_art_url = '' THEN :albumArtUrl
                 ELSE album_art_url
