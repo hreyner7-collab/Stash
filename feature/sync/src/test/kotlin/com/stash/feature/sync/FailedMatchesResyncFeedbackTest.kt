@@ -71,6 +71,7 @@ class FailedMatchesResyncFeedbackTest {
             musicRepository, previewPlayer, previewUrlExtractor, searchExecutor,
             downloadExecutor, fileOrganizer, qualityPrefs, trackDao,
             downloadQueueDao, swapCoordinator, blocklistGuard,
+            mockk(relaxed = true) { every { acceptDownloadOrDelete(any()) } returns true },
         )
     }
 

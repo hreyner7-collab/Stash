@@ -20,6 +20,7 @@ import com.stash.data.download.lyrics.LyricsFetchTrigger
 import com.stash.data.download.shared.TrackFinalizer
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
@@ -72,6 +73,7 @@ class SearchDownloadCoordinatorDeferTest {
         context = context,
         losslessPrefs = losslessPrefs,
         downloadQueueDao = downloadQueueDao,
+        localFileOps = mockk(relaxed = true) { every { acceptDownloadOrDelete(any()) } returns true },
         loudnessMeasurer = loudnessMeasurer,
         lyricsFetchTrigger = lyricsFetchTrigger,
     )

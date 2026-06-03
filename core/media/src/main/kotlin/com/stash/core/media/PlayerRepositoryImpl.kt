@@ -12,6 +12,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import com.stash.core.common.constants.StashConstants
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
@@ -99,7 +100,7 @@ class PlayerRepositoryImpl @Inject constructor(
      * `length()` are both truthy for it, so the old check played it as a local
      * source; ExoPlayer then reads a few hundred bytes of non-audio and throws
      * ERROR_CODE_PARSING_CONTAINER_MALFORMED, which skip-storms the queue.
-     * Requiring at least [MIN_PLAYABLE_LOCAL_BYTES] makes those rows fall
+     * Requiring at least [StashConstants.MIN_PLAYABLE_LOCAL_BYTES] makes those rows fall
      * through to streaming instead (the registry re-resolves by YouTube id /
      * metadata, independent of the stale `isStreamable` flag). No real music
      * track is anywhere near this small, so there are no false negatives.
@@ -120,7 +121,7 @@ class PlayerRepositoryImpl @Inject constructor(
         } catch (e: Exception) {
             0L
         }
-        bytes >= MIN_PLAYABLE_LOCAL_BYTES
+        bytes >= StashConstants.MIN_PLAYABLE_LOCAL_BYTES
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -1357,17 +1358,6 @@ class PlayerRepositoryImpl @Inject constructor(
     companion object {
         private const val TAG = "StashPlayer"
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
-
-        /**
-         * Minimum size for a local file to be treated as a real, playable
-         * download. Failed downloads can leave tiny garbage behind (observed:
-         * ~274-byte yt-dlp error bodies written to `.webm` and marked
-         * complete); anything below this floor is not audio and is routed to
-         * streaming instead of played as a malformed local source. 16 KiB is
-         * orders of magnitude below the smallest real music file, so it never
-         * rejects a legitimate download.
-         */
-        internal const val MIN_PLAYABLE_LOCAL_BYTES = 16L * 1024L
 
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5

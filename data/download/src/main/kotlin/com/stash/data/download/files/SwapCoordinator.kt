@@ -58,6 +58,7 @@ class SwapCoordinator @Inject constructor(
     private val qualityPrefs: QualityPreferencesManager,
     private val trackDao: TrackDao,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
 ) {
     companion object {
         private const val TAG = "SwapCoordinator"
@@ -135,28 +136,38 @@ class SwapCoordinator @Inject constructor(
                     title = title,
                     format = result.file.extension,
                 )
-                trackDao.updateYoutubeId(trackId, newVideoId)
-                trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
+                // Validate before committing the swap: a "successful" yt-dlp run
+                // can still produce a tiny error body. If so, discard it and
+                // treat the swap as failed — crucially WITHOUT touching the old
+                // file or marking the row downloaded, so the user keeps what
+                // they had. acceptDownloadOrDelete already deleted the junk.
+                if (!localFileOps.acceptDownloadOrDelete(committed.filePath)) {
+                    Log.w(TAG, "swap: discarded too-small download for trackId=$trackId: ${committed.filePath}")
+                    reFlagAfterFailure(trackId)
+                } else {
+                    trackDao.updateYoutubeId(trackId, newVideoId)
+                    trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
 
-                // Only now is it safe to remove the old file — and only if it
-                // isn't the very path we just wrote (same artist/title can
-                // resolve to the same canonical file). A stray leftover is
-                // fine; the orphan cleanup pass eventually catches it.
-                oldFilePath?.let { oldPath ->
-                    if (oldPath != committed.filePath) {
-                        try {
-                            val deleted = File(oldPath).delete()
-                            Log.d(TAG, "swap: old file delete path=$oldPath deleted=$deleted")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "swap: old file delete threw", e)
+                    // Only now is it safe to remove the old file — and only if it
+                    // isn't the very path we just wrote (same artist/title can
+                    // resolve to the same canonical file). A stray leftover is
+                    // fine; the orphan cleanup pass eventually catches it.
+                    oldFilePath?.let { oldPath ->
+                        if (oldPath != committed.filePath) {
+                            try {
+                                val deleted = File(oldPath).delete()
+                                Log.d(TAG, "swap: old file delete path=$oldPath deleted=$deleted")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "swap: old file delete threw", e)
+                            }
                         }
                     }
-                }
 
-                Log.i(
-                    TAG,
-                    "swap: completed trackId=$trackId → videoId=$newVideoId path=${committed.filePath}",
-                )
+                    Log.i(
+                        TAG,
+                        "swap: completed trackId=$trackId → videoId=$newVideoId path=${committed.filePath}",
+                    )
+                }
             } else {
                 // Download failed: the optimistic flag-clear in the VM made the
                 // row disappear. Re-flag so it reappears in Failed Matches and

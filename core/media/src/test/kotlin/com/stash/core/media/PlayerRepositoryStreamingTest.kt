@@ -3,6 +3,7 @@ package com.stash.core.media
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
+import com.stash.core.common.constants.StashConstants
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
@@ -101,7 +102,7 @@ class PlayerRepositoryStreamingTest {
             deleteOnExit()
         }
         val real = File.createTempFile("stash-real", ".flac").apply {
-            writeBytes(ByteArray((PlayerRepositoryImpl.MIN_PLAYABLE_LOCAL_BYTES + 1).toInt()))
+            writeBytes(ByteArray((StashConstants.MIN_PLAYABLE_LOCAL_BYTES + 1).toInt()))
             deleteOnExit()
         }
         val missing = File(empty.parentFile, "stash-missing-${empty.name}")

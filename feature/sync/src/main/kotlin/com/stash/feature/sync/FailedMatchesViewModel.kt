@@ -125,6 +125,7 @@ class FailedMatchesViewModel @Inject constructor(
     private val downloadQueueDao: DownloadQueueDao,
     private val swapCoordinator: SwapCoordinator,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
 ) : ViewModel() {
 
     companion object {
@@ -426,7 +427,14 @@ class FailedMatchesViewModel @Inject constructor(
                             title = title,
                             format = result.file.extension,
                         )
-                        trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
+                        // Reject a too-small "successful" download (failed
+                        // yt-dlp run leaving a tiny error body): delete it +
+                        // leave the track not-downloaded (streamable).
+                        if (localFileOps.acceptDownloadOrDelete(committed.filePath)) {
+                            trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
+                        } else {
+                            Log.w(TAG, "resync: discarded too-small download for ${candidate.title}: ${committed.filePath}")
+                        }
                     } else {
                         Log.w(TAG, "Background download failed for ${candidate.title}: $result")
                     }

@@ -47,6 +47,7 @@ class SwapCoordinatorTest {
             qualityPrefs = qualityPrefs,
             trackDao = trackDao,
             blocklistGuard = blocklistGuard,
+            localFileOps = mockk(relaxed = true) { every { acceptDownloadOrDelete(any()) } returns true },
         )
     }
 
