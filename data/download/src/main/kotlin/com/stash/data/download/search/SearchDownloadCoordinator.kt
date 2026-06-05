@@ -158,6 +158,19 @@ class SearchDownloadCoordinator @Inject constructor(
     // -------------------------------------------------------------------------
 
     private suspend fun performDownload(track: TrackItem): DownloadJobResult {
+        // Master lossless switch OFF → skip the registry (and the strict-FLAC
+        // defer) entirely and go straight to yt-dlp, mirroring
+        // DownloadManager.executeDownload. Without this, "lossless off" still
+        // resolved the registry, missed (sources down / no captcha cookie),
+        // and — with fallback also off — deferred to WAITING_FOR_LOSSLESS, so
+        // artist-page / search downloads hung on "waiting for lossless" forever.
+        if (!losslessPrefs.enabledNow()) {
+            return DownloadJobResult.Resolved(
+                source = SearchDownloadStatus.Source.YOUTUBE,
+                outcome = finalizeFromYtDlp(track),
+            )
+        }
+
         val match = runCatching { registry.resolve(track.toQuery()) }
             .onFailure { e ->
                 Log.w(TAG, "registry.resolve threw for ${track.videoId}: ${e.message}")
