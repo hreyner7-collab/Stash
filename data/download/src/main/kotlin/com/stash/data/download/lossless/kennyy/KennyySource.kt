@@ -4,7 +4,9 @@ import android.util.Log
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.AudioFormat
 import com.stash.data.download.lossless.LosslessSource
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.LosslessUrlInspector
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
@@ -41,6 +43,8 @@ class KennyySource @Inject constructor(
     private val apiClient: KennyyApiClient,
     private val rateLimiter: AggregatorRateLimiter,
     private val losslessPrefs: LosslessSourcePreferences,
+    private val urlInspector: LosslessUrlInspector,
+    private val healthGate: LosslessSourceHealthGate,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
@@ -138,6 +142,19 @@ class KennyySource @Inject constructor(
 
         if (download.url.isNullOrEmpty()) {
             Log.d(TAG, "download-music returned empty url for ${best.first.id}")
+            return null
+        }
+        if (urlInspector.isDegraded(download.url, requestedQuality)) {
+            // Proxy returned a preview sample or a lossy downgrade instead of
+            // the requested lossless track. Treat as a miss so the registry
+            // fails over, and cool the source down so we stop wasting a
+            // round-trip per track until it recovers.
+            Log.w(
+                TAG,
+                "degraded url for ${best.first.id} (sample/downgrade) — failing over; " +
+                    "url=${download.url.take(80)}",
+            )
+            healthGate.recordDegraded(id)
             return null
         }
 

@@ -24,6 +24,7 @@ import javax.inject.Singleton
 class LosslessSourceRegistry @Inject constructor(
     private val sources: Set<@JvmSuppressWildcards LosslessSource>,
     private val prefs: LosslessSourcePreferences,
+    private val healthGate: LosslessSourceHealthGate,
 ) {
 
     /**
@@ -38,6 +39,10 @@ class LosslessSourceRegistry @Inject constructor(
         val minQuality = prefs.minQualityNow()
 
         for (source in ordered) {
+            if (healthGate.isDegraded(source.id)) {
+                Log.d(TAG, "skipping ${source.id}: degraded (content-health cooldown)")
+                continue
+            }
             if (!source.isEnabled()) continue
             val result = runCatching { source.resolve(query) }
                 .onFailure { e ->

@@ -13,6 +13,8 @@ import com.stash.data.download.files.FileOrganizer
 import com.stash.data.download.files.MetadataEmbedder
 import com.stash.data.download.lyrics.LyricsFetchTrigger
 import com.stash.data.download.shared.TrackFinalizer
+import com.stash.core.data.audio.AudioDurationExtractor
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.LosslessSourceRegistry
 import com.stash.data.download.lossless.LosslessUrlDownloader
@@ -58,6 +60,25 @@ sealed class TrackDownloadResult {
     data object Deferred : TrackDownloadResult()
 }
 
+/** Absolute ceiling (ms) under which a finished file is "sample-length". */
+internal const val LOSSLESS_SAMPLE_MAX_MS = 35_000L
+
+/** A degraded file must also be below this fraction of the expected duration. */
+internal const val LOSSLESS_SAMPLE_FRACTION = 0.5
+
+/**
+ * True when a finished lossless download is a preview stub: a readable
+ * duration that is both absolutely short (≤ [LOSSLESS_SAMPLE_MAX_MS]) AND far
+ * below the track's known duration (< [LOSSLESS_SAMPLE_FRACTION] of expected).
+ * Requires a known expected duration (> 0) and a readable probe; otherwise
+ * returns false — never reject on missing data (that's the yt-dlp path's job).
+ */
+internal fun isLosslessDurationDegraded(probedMs: Long?, expectedMs: Long): Boolean {
+    if (probedMs == null || probedMs <= 0L) return false
+    if (expectedMs <= 0L) return false
+    return probedMs <= LOSSLESS_SAMPLE_MAX_MS && probedMs < expectedMs * LOSSLESS_SAMPLE_FRACTION
+}
+
 /**
  * Orchestrates the full download pipeline for a single track:
  *
@@ -98,6 +119,13 @@ class DownloadManager @Inject constructor(
      * `:data:download` stays free of a cyclic `:data:lyrics` dependency.
      */
     private val lyricsFetchTrigger: LyricsFetchTrigger,
+    /**
+     * Degradation-detection (2026-06-05): probes a finished lossless file's
+     * duration to catch a preview-stub whose URL lacked the `range=` marker,
+     * and the per-source cooldown gate the duration backstop records into.
+     */
+    private val audioDurationExtractor: AudioDurationExtractor,
+    private val losslessHealthGate: LosslessSourceHealthGate,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -110,6 +138,14 @@ class DownloadManager @Inject constructor(
 
     companion object {
         private const val TAG = "DownloadManager"
+
+        /**
+         * Max lossless resolve→download→probe attempts per track. Each
+         * duration-backstop rejection cools a source down and re-resolves;
+         * the cap bounds that retry to the small set of lossless sources
+         * (kennyy, squid, + headroom) so it can't spin.
+         */
+        internal const val MAX_LOSSLESS_FAILOVER_ATTEMPTS = 3
     }
 
     /**
@@ -344,6 +380,11 @@ class DownloadManager @Inject constructor(
             durationMs = track.durationMs.takeIf { it > 0 },
         )
 
+        // Bounded failover loop: the duration backstop can reject a degraded
+        // source's preview-stub and record it degraded, after which the
+        // registry skips it — so we re-resolve to reach the next lossless
+        // source. Capped so a pathologically-degrading set can't spin.
+        repeat(MAX_LOSSLESS_FAILOVER_ATTEMPTS) {
         val match: SourceResult = runCatching { losslessRegistry.resolve(query) }
             .onFailure { e ->
                 Log.w(TAG, "lossless registry threw for '${track.artist} - ${track.title}'", e)
@@ -377,6 +418,25 @@ class DownloadManager @Inject constructor(
             Log.w(TAG, "lossless fetch failed for '${track.artist} - ${track.title}': ${e.message}")
             runCatching { tempFile.delete() }
             return null
+        }
+
+        // Duration backstop (degradation detection): a degraded source can
+        // serve a 30s preview whose URL lacked the `range=` marker the
+        // inspector keys on. Probe the fetched file; if it's a sample-length
+        // stub far short of the known duration, reject it, cool the source
+        // down, and re-resolve so the registry fails over to the next source.
+        val probedMs = runCatching { audioDurationExtractor.extractMs(fetched.absolutePath) }
+            .getOrNull()
+        if (isLosslessDurationDegraded(probedMs, track.durationMs)) {
+            Log.w(
+                TAG,
+                "duration backstop: ${match.sourceId} returned ${probedMs}ms vs expected " +
+                    "${track.durationMs}ms for '${track.artist} - ${track.title}' — " +
+                    "rejecting + failing over",
+            )
+            losslessHealthGate.recordDegraded(match.sourceId)
+            runCatching { fetched.delete() }
+            return@repeat
         }
 
         emitProgress(track.id, 0.85f, DownloadStatus.PROCESSING)
@@ -457,6 +517,14 @@ class DownloadManager @Inject constructor(
                 return null  // fall through to yt-dlp — same semantics as before
             }
         }
+        }
+        // Every failover attempt this call rejected its source on the
+        // duration backstop → yt-dlp fallthrough (same null semantics).
+        Log.w(
+            TAG,
+            "lossless: exhausted failover attempts for '${track.artist} - ${track.title}'",
+        )
+        return null
     }
 
     /**

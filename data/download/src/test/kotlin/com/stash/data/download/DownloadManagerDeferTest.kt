@@ -61,6 +61,10 @@ class DownloadManagerDeferTest {
     private val metadataEmbedder: MetadataEmbedder = mockk(relaxed = true)
     private val albumArtCache: AlbumArtCache = mockk(relaxed = true)
     private val lyricsFetchTrigger: LyricsFetchTrigger = mockk(relaxed = true)
+    private val audioDurationExtractor: com.stash.core.data.audio.AudioDurationExtractor =
+        mockk(relaxed = true)
+    private val losslessHealthGate: com.stash.data.download.lossless.LosslessSourceHealthGate =
+        mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -83,6 +87,8 @@ class DownloadManagerDeferTest {
         metadataEmbedder = metadataEmbedder,
         albumArtCache = albumArtCache,
         lyricsFetchTrigger = lyricsFetchTrigger,
+        audioDurationExtractor = audioDurationExtractor,
+        losslessHealthGate = losslessHealthGate,
     )
 
     private fun stubTrack(): Track = Track(

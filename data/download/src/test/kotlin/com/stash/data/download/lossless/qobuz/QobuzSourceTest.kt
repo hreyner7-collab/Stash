@@ -3,7 +3,9 @@ package com.stash.data.download.lossless.qobuz
 import com.google.common.truth.Truth.assertThat
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.LosslessUrlInspector
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.squid.CaptchaExpiredNotifier
@@ -38,8 +40,11 @@ class QobuzSourceTest {
     private val rateLimiter: AggregatorRateLimiter = mockk(relaxUnitFun = true)
     private val captchaExpiredNotifier: CaptchaExpiredNotifier = mockk(relaxUnitFun = true)
     private val losslessPrefs: LosslessSourcePreferences = mockk()
+    private val urlInspector = LosslessUrlInspector() // real pure classifier
+    private val healthGate: LosslessSourceHealthGate = mockk(relaxUnitFun = true)
 
-    private fun source() = QobuzSource(apiClient, rateLimiter, captchaExpiredNotifier, losslessPrefs)
+    private fun source() =
+        QobuzSource(apiClient, rateLimiter, captchaExpiredNotifier, losslessPrefs, urlInspector, healthGate)
 
     private fun stubLimiterReady() {
         coEvery { rateLimiter.acquire(QobuzSource.SOURCE_ID) } returns true
@@ -208,6 +213,28 @@ class QobuzSourceTest {
             QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
         coEvery { apiClient.getFileUrl(any(), any(), any()) } returns download(url = null)
         assertNull(source().resolve(query()))
+    }
+
+    @Test fun `resolve null + records degraded when getFileUrl returns a preview-sample url`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } returns
+            download(url = "https://cdn.qobuz/file?fmt=27&range=20-30&etsp=9999999999")
+
+        assertNull(source().resolve(query()))
+        coVerify { healthGate.recordDegraded(QobuzSource.SOURCE_ID) }
+    }
+
+    @Test fun `resolve returns result + does NOT record degraded for healthy full url`() = runTest {
+        stubLimiterReady()
+        coEvery { apiClient.search(any(), any(), any()) } returns
+            QobuzSearchData(tracks = QobuzTrackList(items = listOf(candidate())))
+        coEvery { apiClient.getFileUrl(any(), any(), any()) } returns
+            download(url = "https://cdn.qobuz/file?fmt=27&etsp=9999999999")
+
+        assertNotNull(source().resolve(query()))
+        coVerify(exactly = 0) { healthGate.recordDegraded(any()) }
     }
 
     @Test fun `resolve null when getFileUrl 403s (region lock)`() = runTest {

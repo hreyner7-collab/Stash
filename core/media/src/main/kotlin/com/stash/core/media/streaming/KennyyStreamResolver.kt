@@ -2,6 +2,7 @@ package com.stash.core.media.streaming
 
 import android.util.Log
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.data.download.lossless.LosslessSourceHealthGate
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.kennyy.KennyySource
 import javax.inject.Inject
@@ -85,8 +86,15 @@ data class StreamUrl(
 class KennyyStreamResolver @Inject constructor(
     private val source: KennyySource,
     private val healthMonitor: KennyyHealthMonitor,
+    private val healthGate: LosslessSourceHealthGate,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
+        if (healthGate.isDegraded(KennyySource.SOURCE_ID)) {
+            // Content-degraded (preview-sample / lossy downgrade) within the
+            // cooldown — skip so the streaming registry fails over.
+            Log.d(TAG, "skip id=${track.id} (kennyy content-degraded)")
+            return null
+        }
         if (!healthMonitor.isHealthy.value) {
             Log.d(TAG, "skip id=${track.id} (kennyy unhealthy)")
             return null
