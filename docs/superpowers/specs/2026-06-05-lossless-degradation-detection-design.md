@@ -131,6 +131,22 @@ miss, and the gate makes it a fast skip.
 - Registry/integration: kennyy degraded → squid served → (squid degraded too →
   youtube). Streaming + download both fail over.
 
+## Implementation notes (from spec review)
+
+- The inspector + `LosslessSourceHealthGate` become new constructor deps of
+  `KennyySource`/`QobuzSource`. `tier`/`requestedQuality` are already computed
+  just above the `getFileUrl` call in `resolveInternal` — feed those to the
+  inspector; the existing `download.url.isNullOrEmpty()` guard is where the
+  degraded-URL early-return slots in.
+- Gate insertion points (pick explicitly so it isn't double-checked or missed):
+  **streaming** — the resolver / `StreamSourceRegistry` (because
+  `resolveImmediate` deliberately bypasses the rate-limiter/breaker);
+  **download** — the existing `isEnabled()` skip loop in `LosslessSourceRegistry`.
+- Residual risk (accepted): a **streaming** sample whose URL lacks a `range=`
+  marker is the only uncaught case — the duration backstop is download-only.
+  Acceptable: the marker was present in the observed outage, and streaming
+  deliberately avoids a fetch-and-probe to prevent "play-30s-then-switch."
+
 ## Rollout
 
 Foundation for the separate "add more independent Qobuz proxies" work — once a
