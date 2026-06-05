@@ -477,6 +477,35 @@ private fun SettingsContent(
                             onCheckedChange = onStreamOnCellularToggle,
                         )
                     }
+
+                    // Streaming-source override. Relocated here from Diagnostics
+                    // so users can self-rescue when the lossless sources (Qobuz
+                    // via Squid/Kennyy) are down — routes ALL streaming through
+                    // YouTube. Backed by StreamingPreference.forceYouTubeFallback.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Stream via YouTube",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Skip the lossless sources (Qobuz) and stream everything via YouTube. Turn this on if lossless playback is down or only playing short clips.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = forceYouTubeFallback,
+                            onCheckedChange = onToggleForceYouTubeFallback,
+                        )
+                    }
                 }
             }
         }
@@ -1494,34 +1523,6 @@ private fun SettingsContent(
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                 ) {
                     Text("Share diagnostics")
-                }
-
-                // Test tool: force the YouTube streaming-fallback path so the
-                // lossless-down scenario can be reproduced on demand without
-                // waiting for Squid/Kennyy to actually go down.
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Force YouTube fallback",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        Text(
-                            text = "Skip Squid/Kennyy and stream everything via YouTube — for reproducing fallback issues. Leave off for normal use.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Switch(
-                        checked = forceYouTubeFallback,
-                        onCheckedChange = onToggleForceYouTubeFallback,
-                    )
                 }
             }
         }
