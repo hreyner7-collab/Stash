@@ -268,6 +268,72 @@ class PreviewUrlExtractorTest {
     }
 
     @Test
+    fun fastOnly_does_not_invoke_ytdlp_arm() = runTest {
+        val extractor = PreviewUrlExtractor(
+            context = mockk(relaxed = true),
+            ytDlpManager = mockk(relaxed = true),
+            tokenManager = mockk(relaxed = true),
+            innerTubeClient = mockk(relaxed = true),
+        )
+        val ytdlpCalled = AtomicBoolean(false)
+        val hooks = object : PreviewUrlExtractor.TestHooks {
+            override suspend fun innerTubeExtract(id: String): String? = null
+            override suspend fun ytDlpExtract(id: String): String {
+                ytdlpCalled.set(true)
+                return "https://ytdlp/$id"
+            }
+        }
+
+        val err = runCatching {
+            extractor.extractStreamUrlForTest(hooks, "X", allowYtDlp = false)
+        }.exceptionOrNull()
+
+        assertThat(err).isInstanceOf(NoFastStreamException::class.java)
+        assertThat(ytdlpCalled.get()).isFalse()
+    }
+
+    @Test
+    fun fastOnly_returns_innertube_url_when_present() = runTest {
+        val extractor = PreviewUrlExtractor(
+            context = mockk(relaxed = true),
+            ytDlpManager = mockk(relaxed = true),
+            tokenManager = mockk(relaxed = true),
+            innerTubeClient = mockk(relaxed = true),
+        )
+        val ytdlpCalled = AtomicBoolean(false)
+        val hooks = object : PreviewUrlExtractor.TestHooks {
+            override suspend fun innerTubeExtract(id: String): String? = "it-url"
+            override suspend fun ytDlpExtract(id: String): String {
+                ytdlpCalled.set(true)
+                return "https://ytdlp/$id"
+            }
+        }
+
+        val url = extractor.extractStreamUrlForTest(hooks, "X", allowYtDlp = false)
+
+        assertThat(url).isEqualTo("it-url")
+        assertThat(ytdlpCalled.get()).isFalse()
+    }
+
+    @Test
+    fun fullRace_still_falls_back_to_ytdlp() = runTest {
+        val extractor = PreviewUrlExtractor(
+            context = mockk(relaxed = true),
+            ytDlpManager = mockk(relaxed = true),
+            tokenManager = mockk(relaxed = true),
+            innerTubeClient = mockk(relaxed = true),
+        )
+        val hooks = object : PreviewUrlExtractor.TestHooks {
+            override suspend fun innerTubeExtract(id: String): String? = null
+            override suspend fun ytDlpExtract(id: String): String = "yt-url"
+        }
+
+        val url = extractor.extractStreamUrlForTest(hooks, "X", allowYtDlp = true)
+
+        assertThat(url).isEqualTo("yt-url")
+    }
+
+    @Test
     fun extractStreamUrl_map_entry_clears_on_failure() = runTest {
         val extractor = PreviewUrlExtractor(
             context = mockk(relaxed = true),

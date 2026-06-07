@@ -18,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
@@ -28,6 +29,17 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Thrown by [PreviewUrlExtractor.extractStreamUrl] when called in fast-only
+ * mode (`allowYtDlp = false`) and the InnerTube fast path yields no URL.
+ *
+ * Callers (e.g. background queue fill) map this to a null/unavailable result
+ * rather than blocking on the serialized yt-dlp slow lane; the track is
+ * recovered later by the 1-ahead prefetch which uses `allowYtDlp = true`.
+ */
+class NoFastStreamException(videoId: String) :
+    Exception("no fast (InnerTube) stream for $videoId")
 
 /**
  * Extracts a direct audio stream URL from YouTube for preview playback.
@@ -216,9 +228,17 @@ class PreviewUrlExtractor @Inject constructor(
      *
      * Concurrent calls for the same [videoId] are coalesced via [coalesce]
      * so only one extract runs at a time per ID.
+     *
+     * When [allowYtDlp] is false ("fast lane only"), the serialized yt-dlp
+     * slow lane is never touched: InnerTube runs alone and a miss throws
+     * [NoFastStreamException]. Fast-only and full-race calls for the same
+     * [videoId] use distinct coalesce keys so they never share a Deferred.
      */
-    suspend fun extractStreamUrl(videoId: String): String =
-        coalesce(videoId) { doExtract(it) }
+    suspend fun extractStreamUrl(videoId: String, allowYtDlp: Boolean = true): String =
+        coalesce(coalesceKey(videoId, allowYtDlp)) { doExtract(videoId, allowYtDlp) }
+
+    private fun coalesceKey(videoId: String, allowYtDlp: Boolean) =
+        if (allowYtDlp) videoId else "$videoId#fast"
 
     /**
      * Test-only: exercises the coalescing wrapper with the existing
@@ -234,8 +254,13 @@ class PreviewUrlExtractor @Inject constructor(
     internal suspend fun extractStreamUrlForTest(
         hooks: TestHooks,
         videoId: String,
-    ): String = coalesce(videoId) { id ->
-        hooks.innerTubeExtract(id) ?: hooks.ytDlpExtract(id)
+        allowYtDlp: Boolean = true,
+    ): String = coalesce(coalesceKey(videoId, allowYtDlp)) {
+        if (allowYtDlp) {
+            hooks.innerTubeExtract(videoId) ?: hooks.ytDlpExtract(videoId)
+        } else {
+            hooks.innerTubeExtract(videoId) ?: throw NoFastStreamException(videoId)
+        }
     }
 
     /**
@@ -261,19 +286,19 @@ class PreviewUrlExtractor @Inject constructor(
      * for the same videoId raced in just after the prior one completed.
      */
     private suspend fun coalesce(
-        videoId: String,
+        key: String,
         doRace: suspend (String) -> String,
     ): String {
         // Fast path — share an in-flight extract if one exists.
-        inFlightExtracts[videoId]?.let { return it.await() }
+        inFlightExtracts[key]?.let { return it.await() }
 
         // Create a LAZY Deferred so a putIfAbsent loser's Deferred never starts.
         val freshlyCreated = extractorScope.async(start = CoroutineStart.LAZY) {
-            doRace(videoId)
+            doRace(key)
         }
-        val deferred = inFlightExtracts.putIfAbsent(videoId, freshlyCreated)
+        val deferred = inFlightExtracts.putIfAbsent(key, freshlyCreated)
             ?: freshlyCreated.also { d ->
-                d.invokeOnCompletion { inFlightExtracts.remove(videoId, d) }
+                d.invokeOnCompletion { inFlightExtracts.remove(key, d) }
                 d.start()
             }
         return deferred.await()
@@ -283,7 +308,20 @@ class PreviewUrlExtractor @Inject constructor(
      * Underlying race body — original `extractStreamUrl` implementation.
      * Called via [coalesce] from the public entry point.
      */
-    private suspend fun doExtract(videoId: String): String {
+    private suspend fun doExtract(videoId: String, allowYtDlp: Boolean): String {
+        // Fast-only lane: InnerTube under its own semaphore, never the
+        // serialized yt-dlp slot. A miss is signalled (not retried here) so
+        // the caller can drop the track from background fill; the 1-ahead
+        // prefetch (allowYtDlp = true) recovers it later.
+        if (!allowYtDlp) {
+            val t0 = System.currentTimeMillis()
+            Log.d("LATDIAG", "extract-start videoId=$videoId fastOnly=1")
+            val url = innerTubeSemaphore.withPermit { extractViaInnerTube(videoId) }
+                ?: throw NoFastStreamException(videoId)
+            Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms fastOnly=1")
+            return url
+        }
+
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "extract-start videoId=$videoId")
         return try {
