@@ -245,6 +245,8 @@ git commit -m "fix(yt): prefer Opus 251 over AAC in InnerTube audio selection"
 
 **Context:** `extractStreamUrl(videoId)` → `coalesce(videoId)` → `doExtract(videoId)` → `race(innerTube, ytDlp)`. We add an `allowYtDlp` flag: when false, run InnerTube only (no yt-dlp arm) and signal "no fast URL" by throwing so `YouTubeStreamResolver` maps it to null (track dropped from background fill, caught later by prefetch). Coalescing must not let a fast-only call share a full-race call's result, so the coalesce key includes the mode. The retry entry point `extractViaYtDlpForRetry` is independent and must keep reaching yt-dlp.
 
+> **Implementer notes:** `TestHooks` is an *interface*, not a constructor — follow the existing `TestableExtractor` wrapper pattern in `PreviewUrlExtractorTest.kt` rather than the `TestHooks(...)` literal shown below. Also add `import kotlinx.coroutines.sync.withPermit` (only `Semaphore` is imported today) for the Step 3 snippet.
+
 - [ ] **Step 1: Write failing tests**
 
 ```kotlin
@@ -328,7 +330,7 @@ git commit -m "feat(yt): add allowYtDlp fast/slow split to extractStreamUrl"
 **Files:**
 - Modify: `core/media/.../streaming/YouTubeStreamResolver.kt` (`resolve`, line ~70)
 - Modify: `core/media/.../streaming/StreamSourceRegistry.kt` (`resolve`, line ~62)
-- Test: `core/media/src/test/kotlin/com/stash/core/media/streaming/StreamSourceRegistryTest.kt` (extend)
+- Test: `core/media/src/test/kotlin/com/stash/core/media/streaming/StreamSourceRegistryTest.kt` (**create** — does not exist yet; module has `YouTubeStreamResolverTest.kt` as a pattern reference)
 
 - [ ] **Step 1: Write failing test**
 
