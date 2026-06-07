@@ -62,6 +62,7 @@ Today a single `allowYouTube: Boolean` gates *all* of YouTube. Split it so the *
 
 - Thread an `allowYtDlp` (slow-lane) flag alongside `allowYouTube` from `PlayerRepositoryImpl` → `StreamSourceRegistry.resolve` → `YouTubeStreamResolver.resolve` → `PreviewUrlExtractor.extractStreamUrl(videoId, allowYtDlp)`. When `allowYtDlp = false`, the race runs **InnerTube only** (no yt-dlp arm) and returns null if InnerTube fails.
 - **Background fill** (`fillQueueAppend/Prepend`): `allowYouTube = true, allowYtDlp = false`. The whole queue resolves in order via the iOS fast lane (cap-8 parallel) → **no dropped streamable tracks (fixes symptom 2), full deep timeline (fixes symptom 1)**. Tracks where iOS fails return null and are skipped from the batch (rare now), then caught by the next-up prefetch.
+  - **Fill-skipped straggler recovery (pin during planning):** the existing `prefetchNextTrack` already re-resolves the logical next-up track (matched by `EXTRA_TRACK_ID` against `currentQueueTracks`, which retains the full list) and `insertNextMediaItem`s it when it's absent from the timeline. With Component 2 it must run that re-resolve with **`allowYtDlp = true`** so a fill-skipped (iOS-miss) track gets the yt-dlp backstop at the next-up slot. Confirm this single seam: the prefetch path's resolve call uses the slow-lane-allowed flag even though background fill did not.
 - **Foreground tapped track + next-up prefetch:** `allowYouTube = true, allowYtDlp = true` (full power, yt-dlp backstop available exactly where latency is hidden behind the current track).
 
 This is the only viable path to a fast deep queue: yt-dlp **cannot** be parallelized (see Component 3), so the cap-8 InnerTube lane must do the bulk fill.
@@ -93,6 +94,7 @@ This is the only viable path to a fast deep queue: yt-dlp **cannot** be parallel
   - audio variant order excludes login-walled clients.
   - Opus-preferred selection: `[AAC 132, Opus 130]` → Opus; `[AAC 140]` (no Opus) → AAC; ties → Opus.
   - fast/slow split: `extractStreamUrl(allowYtDlp=false)` never invokes the yt-dlp arm (extend `raceForTest`).
+  - the slow-lane gate does **not** disable `extractViaYtDlpForRetry` — the ExoPlayer-rejection retry is a separate entry point and must still reach yt-dlp regardless of the `allowYtDlp` queue-fill flag.
 - **On-device (LATDIAG, the method that found the bug):**
   - `extract-end` sub-second via iOS (`won with variant=IOS`); not yt-dlp.
   - `controller.mediaItemCount` == full queue size (not 2) for an all-YT mix.
