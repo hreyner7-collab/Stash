@@ -237,6 +237,9 @@ class PreviewUrlExtractor @Inject constructor(
     suspend fun extractStreamUrl(videoId: String, allowYtDlp: Boolean = true): String =
         coalesce(coalesceKey(videoId, allowYtDlp)) { doExtract(videoId, allowYtDlp) }
 
+    // The `#fast` suffix is collision-safe: YouTube videoIds are `#`-free
+    // 11-char base64url, so a suffixed fast-only key can never equal a real
+    // (full-race) videoId key.
     private fun coalesceKey(videoId: String, allowYtDlp: Boolean) =
         if (allowYtDlp) videoId else "$videoId#fast"
 
@@ -287,14 +290,14 @@ class PreviewUrlExtractor @Inject constructor(
      */
     private suspend fun coalesce(
         key: String,
-        doRace: suspend (String) -> String,
+        doRace: suspend () -> String,
     ): String {
         // Fast path — share an in-flight extract if one exists.
         inFlightExtracts[key]?.let { return it.await() }
 
         // Create a LAZY Deferred so a putIfAbsent loser's Deferred never starts.
         val freshlyCreated = extractorScope.async(start = CoroutineStart.LAZY) {
-            doRace(key)
+            doRace()
         }
         val deferred = inFlightExtracts.putIfAbsent(key, freshlyCreated)
             ?: freshlyCreated.also { d ->
@@ -316,8 +319,10 @@ class PreviewUrlExtractor @Inject constructor(
         if (!allowYtDlp) {
             val t0 = System.currentTimeMillis()
             Log.d("LATDIAG", "extract-start videoId=$videoId fastOnly=1")
-            val url = innerTubeSemaphore.withPermit { extractViaInnerTube(videoId) }
-                ?: throw NoFastStreamException(videoId)
+            val url = innerTubeSemaphore.withPermit { extractViaInnerTube(videoId) } ?: run {
+                Log.d("LATDIAG", "extract-fail videoId=$videoId dt=${System.currentTimeMillis() - t0}ms fastOnly=1 err=NoFastStream")
+                throw NoFastStreamException(videoId)
+            }
             Log.d("LATDIAG", "extract-end videoId=$videoId dt=${System.currentTimeMillis() - t0}ms fastOnly=1")
             return url
         }
