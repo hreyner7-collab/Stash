@@ -366,15 +366,16 @@ class InnerTubeClient @Inject constructor(
 
     /**
      * Audio-focused player lookup. Tries each variant in [AUDIO_VARIANT_ORDER]
-     * until one returns `streamingData.adaptiveFormats` with at least one
-     * entry carrying a direct `url` (i.e. unciphered). Returns the first
-     * such response, or the last-tried response if none were unciphered
-     * so downstream code still has *something* to parse.
+     * — currently IOS only — until one returns `streamingData.adaptiveFormats`
+     * with at least one entry carrying a direct `url` (i.e. unciphered).
+     * Returns that response, or the last-tried response if none were
+     * unciphered so downstream code still has *something* to parse.
      *
-     * Rationale: YouTube serves different response shapes per client.
-     * WEB_REMIX wraps URLs in `signatureCipher`, which forces our yt-dlp
-     * fallback (~14 s with QuickJS). ANDROID_VR / IOS frequently return
-     * direct URLs that play natively, cutting extraction to ~200 ms.
+     * Rationale: YouTube serves different response shapes per client. The IOS
+     * client (queried against www.youtube.com) frequently returns direct,
+     * unciphered URLs that play natively, cutting extraction to ~200 ms. On a
+     * miss the last response is returned, which downstream maps to the yt-dlp
+     * fallback (~14 s with QuickJS) for the `signatureCipher` case.
      */
     suspend fun playerForAudio(videoId: String): JsonObject? {
         var lastResponse: JsonObject? = null
