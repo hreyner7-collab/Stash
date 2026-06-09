@@ -532,6 +532,10 @@ class SearchDownloadCoordinator @Inject constructor(
         // (durationSeconds * 1_000).toLong() preserves sub-second precision —
         // .toLong().times(1_000L) would truncate 3.7s → 3_000ms (wrong).
         durationMs = durationSeconds.takeIf { it > 0 }?.let { (it * 1_000).toLong() },
+        // TrackItem is the YouTube/search-tab flow (videoId/title/artist/
+        // duration only) — no Spotify URI exists, so search-tab downloads
+        // correctly skip antra (which requires a spotify track URL).
+        spotifyUri = null,
     )
 
     /**

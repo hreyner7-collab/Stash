@@ -83,7 +83,35 @@ data class TrackQuery(
     val album: String? = null,
     val isrc: String? = null,
     val durationMs: Long? = null,
+    /**
+     * The track's Spotify URI (`spotify:track:<id>`, a bare id, or an
+     * `open.spotify.com/track/<id>` URL), when known. Used only by sources
+     * that resolve from a Spotify URL (antra). Null for search-tab /
+     * YouTube-pathway downloads, which correctly makes them skip antra.
+     */
+    val spotifyUri: String? = null,
 )
+
+/**
+ * The `https://open.spotify.com/track/<id>` URL antra's `/api/resolve`
+ * consumes, derived from [TrackQuery.spotifyUri]. Normalises the three
+ * shapes a URI arrives in (the `spotify:track:<id>` URI, a bare id, or an
+ * already-open URL) and returns null for anything that isn't a *track* —
+ * so albums/playlists/episodes never get mis-routed to a track resolver.
+ */
+fun TrackQuery.spotifyTrackUrl(): String? {
+    val raw = spotifyUri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val id = when {
+        raw.startsWith("spotify:track:") -> raw.removePrefix("spotify:track:")
+        raw.startsWith("spotify:") -> return null // album/playlist/episode URI
+        raw.contains("open.spotify.com/track/") ->
+            raw.substringAfter("open.spotify.com/track/").substringBefore("?").substringBefore("/")
+        raw.contains("open.spotify.com/") -> return null // non-track open URL
+        raw.contains(":") || raw.contains("/") -> return null // unrecognised scheme/path
+        else -> raw // bare id
+    }.trim()
+    return id.takeIf { it.isNotEmpty() }?.let { "https://open.spotify.com/track/$it" }
+}
 
 /**
  * The proxy search terms to try for this query, in priority order.

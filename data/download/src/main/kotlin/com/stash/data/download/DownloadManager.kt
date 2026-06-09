@@ -378,6 +378,7 @@ class DownloadManager @Inject constructor(
             album = track.album.takeIf { it.isNotBlank() },
             isrc = track.isrc,
             durationMs = track.durationMs.takeIf { it > 0 },
+            spotifyUri = track.spotifyUri,
         )
 
         // Bounded failover loop: the duration backstop can reject a degraded
