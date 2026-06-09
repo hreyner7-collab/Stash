@@ -3,6 +3,7 @@ package com.stash.feature.settings.components
 import android.annotation.SuppressLint
 import android.util.Log
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -34,9 +35,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.stash.data.download.lossless.antra.AntraFingerprint
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import kotlin.coroutines.resume
 
@@ -63,6 +66,9 @@ fun AntraConnectScreen(
     onClose: () -> Unit,
 ) {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // JS→Kotlin bridge so async fetch() results are actually delivered
+    // (evaluateJavascript can't await a Promise).
+    val jsBridge = remember { AntraJsBridge() }
     var statusText by remember {
         mutableStateOf(
             "To connect:\n" +
@@ -76,6 +82,7 @@ fun AntraConnectScreen(
     // ── Cookie polling + login confirmation ─────────────────────────────
     LaunchedEffect(Unit) {
         var lastCookieSig = ""
+        var diagged = false
         while (isActive && !captured) {
             delay(POLL_INTERVAL_MS)
             val cookies = CookieManager.getInstance().getCookie(ANTRA_URL).orEmpty()
@@ -91,18 +98,30 @@ fun AntraConnectScreen(
                 Log.i(TAG, "cookies for $ANTRA_URL => [$sig]")
             }
             val session = SESSION_REGEX.find(cookies)?.groupValues?.get(1)
-            val cfClearance = CF_CLEARANCE_REGEX.find(cookies)?.groupValues?.get(1)
-            if (session.isNullOrBlank() || cfClearance.isNullOrBlank()) {
-                Log.d(TAG, "harvest gate: session=${!session.isNullOrBlank()} cf_clearance=${!cfClearance.isNullOrBlank()}")
+            // cf_clearance is optional — only present while Cloudflare is
+            // actively challenging. We capture it if it's there (for the
+            // OkHttp replay) but never block on it.
+            val cfClearance = CF_CLEARANCE_REGEX.find(cookies)?.groupValues?.get(1).orEmpty()
+            if (session.isNullOrBlank()) {
+                Log.d(TAG, "harvest gate: antra_session absent")
                 continue
             }
 
-            // Both cookies present — confirm the session is actually logged
-            // in (cookies can exist pre-login) by hitting /api/auth/me in the
+            // Session cookie present — confirm the user is actually logged in
+            // (the cookie can exist pre-login) by hitting /api/auth/me in the
             // page context.
             val wv = webViewRef ?: continue
-            val username = fetchUsername(wv)
-            Log.i(TAG, "both cookies present; /api/auth/me username=${username ?: "<none>"}")
+            // Confirm the session is really logged in by hitting
+            // /api/auth/me in the page context (carries the HttpOnly
+            // antra_session cookie). Uses the JS bridge so the async fetch
+            // result is actually awaited.
+            val authMe = fetchAuthMe(wv, jsBridge)
+            if (!diagged) {
+                diagged = true
+                Log.i(TAG, "AUTH PROBE storage => ${probeAuth(wv)}")
+            }
+            val username = parseUsername(authMe)
+            Log.i(TAG, "antra_session present; /api/auth/me => ${authMe.take(200)} username=${username ?: "<none>"} (cf_clearance=${cfClearance.isNotEmpty()})")
             if (!username.isNullOrBlank()) {
                 captured = true
                 statusText = "Connected as $username — saving and closing."
@@ -172,7 +191,7 @@ fun AntraConnectScreen(
 
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
-                factory = { context -> buildWebView(context).also { webViewRef = it } },
+                factory = { context -> buildWebView(context, jsBridge).also { webViewRef = it } },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -180,27 +199,73 @@ fun AntraConnectScreen(
 }
 
 /**
- * Runs `fetch('/api/auth/me', {credentials:'include'})` inside the page and
- * returns the `username` field, or null if not logged in / the call failed.
- * The fetch runs in the WebView's context, so it carries the live
- * `cf_clearance` and the matching TLS fingerprint.
+ * JS→Kotlin bridge: an async fetch in the page calls [onResult] with the
+ * response JSON when its Promise resolves. Needed because
+ * `WebView.evaluateJavascript` returns immediately with the *Promise object*
+ * (serializing to `{}`), never the awaited value. The bridge method is
+ * invoked on a binder thread, so completing the (thread-safe)
+ * [CompletableDeferred] hands the result back to the polling coroutine.
  */
-private suspend fun fetchUsername(webView: WebView): String? =
+private class AntraJsBridge {
+    @Volatile var pending: CompletableDeferred<String>? = null
+
+    @JavascriptInterface
+    fun onResult(json: String) {
+        pending?.complete(json)
+    }
+}
+
+/**
+ * `fetch('/api/auth/me', {credentials:'include'})` inside the page (carries
+ * the HttpOnly `antra_session` cookie), awaited via [bridge]. Returns the
+ * raw `{status, body}` JSON, or an `{err}`/timeout marker.
+ */
+private suspend fun fetchAuthMe(webView: WebView, bridge: AntraJsBridge): String {
+    val deferred = CompletableDeferred<String>()
+    bridge.pending = deferred
+    val js =
+        "(async()=>{let o;try{const r=await fetch('/api/auth/me',{credentials:'include'});" +
+            "o={status:r.status,body:(await r.text()).slice(0,400)}}catch(e){o={err:String(e)}}" +
+            "AntraBridge.onResult(JSON.stringify(o))})()"
+    webView.evaluateJavascript(js, null)
+    return withTimeoutOrNull(AUTH_TIMEOUT_MS) { deferred.await() } ?: """{"err":"timeout"}"""
+}
+
+/**
+ * Extracts the username from the [fetchAuthMe] result: parses the outer
+ * `{status, body}`, requires `status == 200`, then parses `body` for a
+ * `username` (top-level or nested under `user`). Null if not logged in.
+ */
+private fun parseUsername(authMeJson: String): String? = runCatching {
+    val outer = JSONObject(authMeJson)
+    if (outer.optInt("status") != 200) return null
+    val body = outer.optString("body").takeIf { it.isNotBlank() } ?: return null
+    val obj = JSONObject(body)
+    obj.optString("username").takeIf { it.isNotBlank() }
+        ?: obj.optJSONObject("user")?.optString("username")?.takeIf { it.isNotBlank() }
+}.getOrNull()
+
+/**
+ * DIAGNOSTIC: one-shot dump of where antra keeps its credential. Returns a
+ * JSON blob with `/api/auth/me` status+body, JS-visible cookies, and
+ * localStorage/sessionStorage keys (value prefixes only). Reveals whether
+ * the API is cookie- or bearer-token-authenticated.
+ */
+private suspend fun probeAuth(webView: WebView): String =
     suspendCancellableCoroutine { cont ->
-        // An async IIFE: evaluateJavascript returns the awaited promise's
-        // resolved value (the response body text, or "" on any failure).
-        val awaited =
-            "(async()=>{try{const r=await fetch('/api/auth/me',{credentials:'include'});" +
-                "return r.ok?await r.text():''}catch(e){return ''}})()"
-        webView.evaluateJavascript(awaited) { result ->
-            // result is a JSON-encoded string (quoted) of the body text, or
-            // "null" — decode one layer, then parse the username.
-            val body = decodeJsString(result)
-            Log.i(TAG, "/api/auth/me raw body (len=${body.length}): ${body.take(300)}")
-            val username = runCatching {
-                if (body.isBlank()) null else JSONObject(body).optString("username").takeIf { it.isNotBlank() }
-            }.getOrNull()
-            if (cont.isActive) cont.resume(username)
+        // SYNCHRONOUS reads only — localStorage/sessionStorage/document.cookie
+        // return immediately, so evaluateJavascript hands back the real value
+        // (unlike an async fetch, whose Promise serializes to "{}"). This
+        // reveals whether the login credential is a cookie or a stored token.
+        val js =
+            "JSON.stringify({" +
+                "cookie:document.cookie," +
+                "lsKeys:Object.keys(localStorage)," +
+                "lsVals:Object.fromEntries(Object.keys(localStorage).map(k=>[k,(localStorage.getItem(k)||'').slice(0,70)]))," +
+                "ssKeys:Object.keys(sessionStorage)" +
+                "})"
+        webView.evaluateJavascript(js) { result ->
+            if (cont.isActive) cont.resume(decodeJsString(result).take(1200))
         }
     }
 
@@ -211,12 +276,15 @@ private fun decodeJsString(raw: String?): String {
     return runCatching { JSONObject("{\"v\":$raw}").optString("v") }.getOrDefault("")
 }
 
-@SuppressLint("SetJavaScriptEnabled")
-private fun buildWebView(context: android.content.Context): WebView {
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "AddJavascriptInterface")
+private fun buildWebView(context: android.content.Context, bridge: AntraJsBridge): WebView {
     CookieManager.getInstance().setAcceptCookie(true)
 
     return WebView(context).apply {
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+        // Bridge for awaiting in-page fetch() results. Scoped to this
+        // first-party login WebView only.
+        addJavascriptInterface(bridge, "AntraBridge")
         settings.apply {
             javaScriptEnabled = true     // Cloudflare challenge is JS
             domStorageEnabled = true     // antra SPA uses localStorage
@@ -283,5 +351,9 @@ private fun buildWebView(context: android.content.Context): WebView {
 private const val TAG = "AntraConnect"
 private const val ANTRA_URL = "https://antra.hoshi.cfd/"
 private const val POLL_INTERVAL_MS = 800L
-private val SESSION_REGEX = Regex("(?:^|;\\s*)session=([^;\\s]+)")
+private const val AUTH_TIMEOUT_MS = 6_000L
+// antra's login cookie is `antra_session` (verified on-device 2026-06-09).
+// The boundary `(?:^|;\s*)` ensures we don't match a substring of some other
+// cookie name.
+private val SESSION_REGEX = Regex("(?:^|;\\s*)antra_session=([^;\\s]+)")
 private val CF_CLEARANCE_REGEX = Regex("(?:^|;\\s*)cf_clearance=([^;\\s]+)")

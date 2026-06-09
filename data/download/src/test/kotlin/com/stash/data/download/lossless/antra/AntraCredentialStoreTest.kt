@@ -38,18 +38,25 @@ class AntraCredentialStoreTest {
     }
 
     @Test
-    fun `not connected when only one cookie present`() = runTest {
+    fun `connected on antra_session alone — cf_clearance is optional`() = runTest {
+        // On-device evidence (2026-06-09): antra's only auth cookie is
+        // `antra_session`; `cf_clearance` is absent unless Cloudflare is
+        // actively challenging. So the session token alone = connected.
         coEvery { prefs.antraSessionCookieNow() } returns "sess"
         coEvery { prefs.antraCfClearanceNow() } returns null
 
-        assertThat(store().isConnected()).isFalse()
-        assertThat(store().cookieHeader()).isNull()
+        val s = store()
+
+        assertThat(s.isConnected()).isTrue()
+        val header = s.cookieHeader()!!
+        assertThat(header).contains("antra_session=sess")
+        assertThat(header).doesNotContain("cf_clearance")
     }
 
     @Test
-    fun `not connected when cookie blank`() = runTest {
-        coEvery { prefs.antraSessionCookieNow() } returns "sess"
-        coEvery { prefs.antraCfClearanceNow() } returns "   "
+    fun `not connected when session blank`() = runTest {
+        coEvery { prefs.antraSessionCookieNow() } returns "   "
+        coEvery { prefs.antraCfClearanceNow() } returns "cf-val"
 
         assertThat(store().isConnected()).isFalse()
         assertThat(store().cookieHeader()).isNull()
@@ -63,16 +70,15 @@ class AntraCredentialStoreTest {
     }
 
     @Test
-    fun `connected when both cookies present and header carries both`() = runTest {
+    fun `header carries cf_clearance too when present`() = runTest {
         coEvery { prefs.antraSessionCookieNow() } returns "sess-val"
         coEvery { prefs.antraCfClearanceNow() } returns "cf-val"
 
         val s = store()
 
         assertThat(s.isConnected()).isTrue()
-        val header = s.cookieHeader()
-        assertThat(header).isNotNull()
-        assertThat(header).contains("session=sess-val")
+        val header = s.cookieHeader()!!
+        assertThat(header).contains("antra_session=sess-val")
         assertThat(header).contains("cf_clearance=cf-val")
     }
 

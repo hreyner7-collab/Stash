@@ -75,13 +75,17 @@ class AntraCookieInterceptor @Inject constructor(
         if (request.url.host != targetHost) return chain.proceed(request)
 
         val s = session
-        val c = cfClearance
-        if (s.isNullOrBlank() || c.isNullOrBlank()) {
+        if (s.isNullOrBlank()) {
             Log.w(TAG, "not connected; passing ${request.url.encodedPath} through")
             return chain.proceed(request)
         }
-
-        val antraCookies = "$SESSION_COOKIE=$s; $CF_CLEARANCE_COOKIE=$c"
+        // antra_session alone authenticates; cf_clearance is appended only
+        // when Cloudflare actually issued one (usually absent).
+        val c = cfClearance
+        val antraCookies = buildString {
+            append("$SESSION_COOKIE=$s")
+            if (!c.isNullOrBlank()) append("; $CF_CLEARANCE_COOKIE=$c")
+        }
         val existing = request.header("Cookie")
         val mergedCookie = if (existing.isNullOrBlank()) antraCookies else "$existing; $antraCookies"
 
@@ -105,7 +109,8 @@ class AntraCookieInterceptor @Inject constructor(
         const val TAG = "AntraCookie"
         const val ANTRA_HOST = "antra.hoshi.cfd"
         const val ANTRA_ORIGIN = "https://antra.hoshi.cfd"
-        const val SESSION_COOKIE = "session"
+        // antra's login cookie is `antra_session` (verified on-device).
+        const val SESSION_COOKIE = "antra_session"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
         // UA / sec-ch-ua live in the shared [AntraFingerprint] so the
         // connect WebView and this replay stay byte-identical.

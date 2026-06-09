@@ -28,23 +28,29 @@ class AntraCredentialStore @Inject constructor(
     private val prefs: LosslessSourcePreferences,
 ) {
 
-    /** True only when BOTH antra cookies are present (non-blank). */
+    /**
+     * True when the antra session cookie is present. `cf_clearance` is NOT
+     * required: on-device evidence (2026-06-09) shows antra authenticates on
+     * the `antra_session` cookie alone, and `cf_clearance` is only set while
+     * Cloudflare is actively challenging (usually absent).
+     */
     suspend fun isConnected(): Boolean {
-        val session = prefs.antraSessionCookieNow()
-        val cfClearance = prefs.antraCfClearanceNow()
-        return !session.isNullOrBlank() && !cfClearance.isNullOrBlank()
+        return !prefs.antraSessionCookieNow().isNullOrBlank()
     }
 
     /**
-     * The `Cookie` header value for an authenticated antra request, in the
-     * form `session=<s>; cf_clearance=<c>`. Returns null when not
-     * [isConnected] (so callers fall through cleanly rather than sending a
-     * half-authenticated request).
+     * The `Cookie` header value for an authenticated antra request:
+     * `antra_session=<s>`, plus `; cf_clearance=<c>` only when a clearance
+     * cookie was captured (it usually isn't). Returns null when there's no
+     * session cookie (so callers fall through cleanly).
      */
     suspend fun cookieHeader(): String? {
         val session = prefs.antraSessionCookieNow()?.takeIf { it.isNotBlank() } ?: return null
-        val cfClearance = prefs.antraCfClearanceNow()?.takeIf { it.isNotBlank() } ?: return null
-        return "$SESSION_COOKIE=$session; $CF_CLEARANCE_COOKIE=$cfClearance"
+        val cfClearance = prefs.antraCfClearanceNow()?.takeIf { it.isNotBlank() }
+        return buildString {
+            append("$SESSION_COOKIE=$session")
+            if (cfClearance != null) append("; $CF_CLEARANCE_COOKIE=$cfClearance")
+        }
     }
 
     /** The connected antra account's username, for Settings display. */
@@ -65,7 +71,9 @@ class AntraCredentialStore @Inject constructor(
     }
 
     private companion object {
-        const val SESSION_COOKIE = "session"
+        // antra's login cookie is named `antra_session` (verified on-device
+        // 2026-06-09), NOT `session`.
+        const val SESSION_COOKIE = "antra_session"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
     }
 }

@@ -68,18 +68,35 @@ class AntraCookieInterceptorTest {
         val recorded = server.takeRequest()
         val cookie = recorded.getHeader("Cookie")
         assertNotNull(cookie)
-        assertTrue(cookie!!.contains("session=sess-abc"))
+        assertTrue(cookie!!.contains("antra_session=sess-abc"))
         assertTrue(cookie.contains("cf_clearance=cf-xyz"))
-        // Browser fingerprint headers must accompany the cf_clearance cookie.
+        // Browser fingerprint headers accompany the cookies.
         assertNotNull(recorded.getHeader("User-Agent"))
         assertNotNull(recorded.getHeader("Origin"))
         assertNotNull(recorded.getHeader("Referer"))
         assertNotNull(recorded.getHeader("sec-ch-ua"))
     }
 
-    @Test fun `passes request through unchanged when not connected`() {
+    @Test fun `attaches antra_session alone when cf_clearance absent`() {
+        // antra authenticates on antra_session alone; cf_clearance is usually
+        // not set (no active Cloudflare challenge), so the interceptor must
+        // still attach the session cookie.
         server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
         val interceptor = AntraCookieInterceptor(prefs("sess-only", null)).apply {
+            hostOverride = server.hostName
+        }
+        clientFor(interceptor)
+            .newCall(Request.Builder().url(server.url("/api/auth/me")).build())
+            .execute().close()
+
+        val cookie = server.takeRequest().getHeader("Cookie")!!
+        assertTrue(cookie.contains("antra_session=sess-only"))
+        assertTrue(!cookie.contains("cf_clearance"))
+    }
+
+    @Test fun `passes request through unchanged when no session`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+        val interceptor = AntraCookieInterceptor(prefs(null, "cf-xyz")).apply {
             hostOverride = server.hostName
         }
         clientFor(interceptor)
@@ -118,6 +135,6 @@ class AntraCookieInterceptorTest {
 
         val cookie = server.takeRequest().getHeader("Cookie")!!
         assertTrue(cookie.contains("foo=bar"))
-        assertTrue(cookie.contains("session=sess-abc"))
+        assertTrue(cookie.contains("antra_session=sess-abc"))
     }
 }
