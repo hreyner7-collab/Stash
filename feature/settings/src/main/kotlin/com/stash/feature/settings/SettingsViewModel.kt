@@ -90,6 +90,7 @@ class SettingsViewModel @Inject constructor(
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
     private val antraCredentialStore: com.stash.data.download.lossless.antra.AntraCredentialStore,
+    private val antraClient: com.stash.data.download.lossless.antra.AntraClient,
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val qobuzSource: QobuzSource,
     private val likePreferences: LikePreferences,
@@ -946,6 +947,50 @@ class SettingsViewModel @Inject constructor(
     fun onAntraConnected(session: String, cfClearance: String, username: String) {
         viewModelScope.launch {
             antraCredentialStore.save(session = session, cfClearance = cfClearance, username = username)
+
+            // TASK-10 PROBE (temporary): the decisive Approach-A check —
+            // does Stash's OkHttp stack (non-browser TLS/UA), replaying the
+            // antra_session cookie via AntraCookieInterceptor, get past
+            // Cloudflare? me() spends NO quota. 200+username => replay works
+            // (Approach A viable). A Cloudflare 403 => AntraCloudflareException
+            // => Approach B (WebView request-proxy) is required.
+            kotlinx.coroutines.delay(1_500) // let the interceptor's cookie cache update from the saved prefs
+            val result = runCatching { antraClient.me() }
+            result
+                .onSuccess { me ->
+                    android.util.Log.i(
+                        "AntraProbe",
+                        "OkHttp /api/auth/me => ${if (me == null) "NULL (non-2xx or parse fail)" else "OK username=${me.username} singles_left=${me.singles_left}"}",
+                    )
+                }
+                .onFailure { e ->
+                    android.util.Log.w("AntraProbe", "OkHttp /api/auth/me threw ${e.javaClass.simpleName}: ${e.message}", e)
+                }
+
+            // TASK-10 FULL-LIFECYCLE PROBE (temporary; spends 1 single):
+            // exercises resolve -> createJob -> pollStatus -> /download bytes
+            // over Stash's OkHttp stack, to confirm the most Cloudflare-
+            // sensitive endpoint (/download, large binary) also replays.
+            runCatching {
+                val testUrl = "https://open.spotify.com/track/1mMYaXpT65iZDtvfRA9EkE"
+                val resolved = antraClient.resolve(testUrl)
+                android.util.Log.i("AntraProbe", "resolve => ${resolved?.tracks?.size ?: "null"} tracks first='${resolved?.tracks?.firstOrNull()?.title}' art=${resolved?.artwork_url != null}")
+                val job = antraClient.createJob(testUrl, startIndex = 0, endIndex = 1)
+                android.util.Log.i("AntraProbe", "createJob => job_id=${job?.job_id}")
+                if (job != null) {
+                    val status = antraClient.pollStatus(job.job_id)
+                    android.util.Log.i("AntraProbe", "pollStatus => status=${status.status} filename=${status.filename} error=${status.error}")
+                    if (status.status == "complete") {
+                        val tmp = java.io.File.createTempFile("antra-probe", ".flac")
+                        val ok = antraClient.downloadTo(job.job_id, tmp)
+                        val magic = runCatching { tmp.inputStream().use { String(it.readNBytes(4)) } }.getOrDefault("????")
+                        android.util.Log.i("AntraProbe", "downloadTo => ok=$ok bytes=${tmp.length()} magic='$magic' (fLaC expected)")
+                        tmp.delete()
+                    }
+                }
+            }.onFailure { e ->
+                android.util.Log.w("AntraProbe", "lifecycle threw ${e.javaClass.simpleName}: ${e.message}", e)
+            }
         }
     }
 

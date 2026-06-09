@@ -130,6 +130,7 @@ class AntraClient @Inject constructor(
             if (status == null) {
                 return@withContext errorStatus(jobId, "status fetch failed")
             }
+            Log.d(TAG, "poll #$polls job=$jobId status=${status.status} done=${status.done}/${status.total} file=${status.filename}")
             if (status.status in TERMINAL_STATES) {
                 return@withContext status
             }
