@@ -345,10 +345,17 @@ class LosslessSourcePreferences @Inject constructor(
          * 2. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br
          *    (added in v0.9.10; sibling Qobuz-DL proxy, different operator,
          *    no captcha gate — outages uncorrelated with squid.wtf)
+         * 3. antra — independent per-user lossless via antra.hoshi.cfd
+         *    (added in v0.9.49; own multi-source backend, structurally
+         *    independent of the shared Qobuz proxies, so it engages only
+         *    when both Qobuz proxies miss). Last by design — it's job-based
+         *    and spends the user's own quota, so it's a fallback of last
+         *    resort before YouTube.
          */
         val DEFAULT_PRIORITY: List<String> = listOf(
             "squid_qobuz",
             "kennyy_qobuz",
+            "antra",
         )
     }
 }

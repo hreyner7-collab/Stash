@@ -18,7 +18,11 @@ import javax.inject.Singleton
  *   2. [QobuzStreamResolver]   — `qobuz.squid.wtf`. Same Qobuz catalog,
  *      requires a user-pasted `captcha_verified_at` cookie. Auto-skipped
  *      when no cookie is set or the current cookie has been marked stale.
- *   3. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *   3. [AntraStreamResolver]   — `antra.hoshi.cfd`, independent per-user
+ *      lossless (own multi-source backend). Self-gates: returns null when
+ *      not connected / out of quota, so it only engages when both Qobuz
+ *      proxies miss. Plays a locally-cached FLAC (no signed CDN URL).
+ *   4. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
  *      resort, reached only when the track genuinely isn't in the Qobuz
  *      catalog (Bandcamp re-uploads, region-exclusive, underground
  *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a
@@ -43,6 +47,7 @@ import javax.inject.Singleton
 class StreamSourceRegistry @Inject constructor(
     private val kennyy: KennyyStreamResolver,
     private val qobuz: QobuzStreamResolver,
+    private val antra: AntraStreamResolver,
     private val youtube: YouTubeStreamResolver,
     private val streamingPreference: StreamingPreference,
 ) {
@@ -79,6 +84,11 @@ class StreamSourceRegistry @Inject constructor(
             } else {
                 add("kennyy" to kennyy::resolve)
                 add("squid" to qobuz::resolve)
+                // antra self-gates (null when not connected / out of quota),
+                // so it only serves when both Qobuz proxies miss. Kept out of
+                // the forceYt branch above on purpose: that toggle exists to
+                // force the YouTube path by skipping ALL lossless sources.
+                add("antra" to antra::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }

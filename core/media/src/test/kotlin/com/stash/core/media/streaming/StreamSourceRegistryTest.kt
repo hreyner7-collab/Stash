@@ -1,5 +1,6 @@
 package com.stash.core.media.streaming
 
+import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
 import io.mockk.coEvery
@@ -14,10 +15,11 @@ class StreamSourceRegistryTest {
 
     private val kennyy: KennyyStreamResolver = mockk()
     private val qobuz: QobuzStreamResolver = mockk()
+    private val antra: AntraStreamResolver = mockk()
     private val youtube: YouTubeStreamResolver = mockk()
     private val streamingPreference: StreamingPreference = mockk()
 
-    private fun registry() = StreamSourceRegistry(kennyy, qobuz, youtube, streamingPreference)
+    private fun registry() = StreamSourceRegistry(kennyy, qobuz, antra, youtube, streamingPreference)
 
     /**
      * The background-fill path passes `allowYtDlp = false` so the YouTube
@@ -29,6 +31,7 @@ class StreamSourceRegistryTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
+        coEvery { antra.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -46,11 +49,49 @@ class StreamSourceRegistryTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
+        coEvery { antra.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
         registry().resolve(track, allowYouTube = true)
 
+        coVerify { youtube.resolve(track, allowYtDlp = true) }
+    }
+
+    /**
+     * antra sits AFTER squid and BEFORE youtube: when both Qobuz proxies
+     * miss but antra resolves, antra serves and youtube is never consulted.
+     */
+    @Test
+    fun resolve_antra_served_before_youtube_when_qobuz_misses() = runTest {
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { kennyy.resolve(any()) } returns null
+        coEvery { qobuz.resolve(any()) } returns null
+        coEvery { antra.resolve(any()) } returns antraStreamUrl()
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true)
+
+        assertThat(result?.origin).isEqualTo("antra")
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
+    /**
+     * antra self-gates by returning null (not connected / out of quota);
+     * the registry then falls through to youtube.
+     */
+    @Test
+    fun resolve_falls_to_youtube_when_antra_returns_null() = runTest {
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { kennyy.resolve(any()) } returns null
+        coEvery { qobuz.resolve(any()) } returns null
+        coEvery { antra.resolve(any()) } returns null
+        coEvery { youtube.resolve(any(), any()) } returns null
+        val track = stubTrack()
+
+        registry().resolve(track, allowYouTube = true)
+
+        coVerify { antra.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
@@ -78,5 +119,13 @@ class StreamSourceRegistryTest {
         album = "Album",
         durationMs = 200_000L,
         youtubeId = "abc123",
+    )
+
+    private fun antraStreamUrl(): StreamUrl = StreamUrl(
+        url = "file:///cache/antra/1.flac",
+        expiresAtMs = Long.MAX_VALUE,
+        codec = "flac",
+        bitsPerSample = 24,
+        origin = "antra",
     )
 }
