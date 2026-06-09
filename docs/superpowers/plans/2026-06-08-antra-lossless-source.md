@@ -173,7 +173,10 @@ Behavior: all calls on `Dispatchers.IO`; non-2xx → return null (or for `pollSt
 
 - [ ] **Step 1: Failing test** — `TrackQuery(artist="A", title="B", spotifyUri="spotify:track:xyz").spotifyTrackUrl() == "https://open.spotify.com/track/xyz"`; returns null when `spotifyUri` is null or not a track URI. (Add a small `TrackQuery.spotifyTrackUrl()` extension that converts `spotify:track:<id>` or a bare id to the open.spotify.com URL.)
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement** — add `val spotifyUri: String? = null` to `TrackQuery`; add `fun TrackQuery.spotifyTrackUrl(): String?`. Populate `spotifyUri = track.spotifyUri` (or entity equivalent) at the 3 construction sites. (Default arg keeps all existing `TrackQuery(...)` calls/tests compiling.)
+- [ ] **Step 3: Implement** — add `val spotifyUri: String? = null` to `TrackQuery`; add `fun TrackQuery.spotifyTrackUrl(): String?`. Populate `spotifyUri` at the 3 construction sites:
+    - `DownloadManager.kt:375` and `LosslessRetryWorker.kt:65` — pass `spotifyUri = track.spotifyUri` (the track/entity has the field).
+    - `SearchDownloadCoordinator.kt:527` (`TrackItem.toQuery()`) — **`TrackItem` has NO `spotifyUri` field** (it's the YouTube/search-tab flow: videoId/title/artist/duration only). Pass `spotifyUri = null` here. That correctly makes search-tab downloads skip antra, consistent with the spec's "only tracks with a spotifyUri can use antra" limitation. Do NOT hunt for a non-existent field.
+    - (Default arg keeps all existing `TrackQuery(...)` calls/tests compiling.)
 - [ ] **Step 4: Run — PASS;** also run the full `:data:download:testDebugUnitTest` to confirm no construction site broke. (Note the pre-existing unrelated red `YtLibraryCanonicalizerTest`.)
 - [ ] **Step 5: Commit** — `feat(antra): thread spotifyUri through TrackQuery`
 
@@ -224,7 +227,9 @@ Behavior: all calls on `Dispatchers.IO`; non-2xx → return null (or for `pollSt
 
 - [ ] **Step 1: Failing test** — in `StreamSourceRegistryTest`, mock kennyy+squid miss, antra returns a StreamUrl → assert antra served; and assert order (antra tried before youtube).
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement** the `StreamSourceRegistry` wiring + `AntraModule`. Confirm the download registry picks up `AntraSource` via the same DI mechanism as kennyy (verify in `LosslessSourceRegistry` — it iterates the injected set; ensure `AntraSource` is in it and ordered last).
+- [ ] **Step 3: Implement** the `StreamSourceRegistry` wiring + `AntraModule`. Notes verified against the real code:
+    - Download side: `KennyyModule` uses `@Binds @IntoSet` into `Set<LosslessSource>`; `LosslessSourceRegistry` orders by `LosslessSourcePreferences.priorityOrder` and **appends sources not in that list, in registration order** — so a fresh `AntraSource` naturally falls last. Register it the same `@IntoSet` way; **also check `LosslessSourcePreferences`' default priority list and append `"antra"` there if a hardcoded default exists** (so it's last, not accidentally first).
+    - Stream side: `StreamSourceRegistry` has **no** health-gate call — resolvers self-gate by returning null. So antra's stream wiring is just adding it to the resolver list after squid / before youtube; **no `LosslessSourceHealthGate` call is needed on the stream side** (the spec's "gated by health gate" applies to the download registry, which already does it for all `LosslessSource`s including antra).
 - [ ] **Step 4: Run — PASS;** then `./gradlew :app:assembleDebug` to confirm the Hilt graph compiles end-to-end.
 - [ ] **Step 5: Commit** — `feat(antra): register AntraSource + AntraStreamResolver in failover chains`
 
