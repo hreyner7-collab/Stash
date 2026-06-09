@@ -96,9 +96,9 @@ All requests are cookie-authenticated (`session` from login + `cf_clearance` fro
 
 ## Open questions / risks
 
-1. **A-vs-B (the central risk):** will a WebView-harvested `cf_clearance` survive replay through OkHttp's TLS stack? Resolved empirically on-device; B is the fallback.
+1. **A-vs-B (the central risk):** will a WebView-harvested session survive replay through OkHttp's TLS stack? **RESOLVED 2026-06-09: yes — zero Cloudflare 403s on-device (see Task 10 below); Approach B never needed.**
 2. **Quota reset semantics** — period length of the 99-singles cap is unknown; we only read `singles_left` and skip at 0 (no client-side reset modeling needed).
-3. **`/download` cookie need** — confirm whether `/api/jobs/<id>/download` requires the session cookie (likely yes); if so `fetchFlac` carries it. Already covered by the interceptor.
+3. **`/download` cookie need** — **RESOLVED 2026-06-09: the interceptor's cookie replay covers `/download`; 27 MB FLAC fetched clean on-device.**
 
 ## Verification Results
 
@@ -125,14 +125,25 @@ All code for Approach A (Phases 1–5, Tasks 1–9) is implemented TDD-first and
 
 **Implementation note (deviation from plan):** the plan's Task 8 Step 2 said add antra to "both the `forceYt` and normal branches" of `StreamSourceRegistry`. antra was added to the **normal branch only** — the `forceYt` toggle's documented purpose is to skip ALL lossless sources to reproduce the YouTube-only fallback path, so adding antra (a lossless source) there would defeat the toggle. Single-source-of-truth UA lives in the new `AntraFingerprint` object, shared by the WebView (mint) and interceptor (replay).
 
-### Task 10 — on-device end-to-end (PENDING — decides Approach A vs B)
+### Task 10 — on-device end-to-end (PASSED 2026-06-09 — **Approach A confirmed**)
 
-**Not yet run.** Requires the user to log into their own antra account and trigger a real lossless download. This is the empirical Cloudflare test:
+Run on the user's Pixel 6 Pro against their real antra account (`rawnald1`).
 
-1. Settings → "Connect antra" → log in → confirm the row shows the username.
-2. Trigger a lossless download for a track that misses kennyy/squid but has a `spotifyUri`. Capture logcat.
-3. **Decision point:** if any antra OkHttp call (especially `GET /api/jobs/<id>/download`) returns Cloudflare `403`, Approach A's cookie-replay is insufficient → build **Phase 6 (Approach B, WebView request-proxy)**. If FLAC bytes come back clean → **Approach A is sufficient; done.**
-4. Stream check: play the track via antra → fetches to cache + plays; second play is a cache hit (no new job, `singles_left` unchanged).
-5. No-regression: kennyy/squid lossless + YouTube fallback still behave normally.
+**Auth-model corrections found during connect (commit `0d89b43f`):** antra's login cookie is an HttpOnly **`antra_session`** (64 chars), not `session`; `cf_clearance` never existed for this client (Cloudflare wasn't challenging), so it is captured opportunistically but not required. `/api/auth/me` returns `{username, is_admin, is_supporter, concurrent_jobs, albums_left, playlists_left, singles_left}` (username top-level). Confirming login from the connect WebView required a JS→Kotlin bridge (`AntraJsBridge`) because `evaluateJavascript` returns an async fetch's un-awaited Promise (`{}`).
 
-(Note: per session memory the user is free-only on a shared, maxed Xfinity hotspot that has blocked download tests before — the antra download leg may need a different network to validate.)
+**The decisive Cloudflare test:** a temporary probe (commit `eb5c271b`, reverted after the test) ran the full lifecycle from `SettingsViewModel` over Stash's plain OkHttp stack — non-browser TLS, pinned `AntraFingerprint` UA, `antra_session` replayed by `AntraCookieInterceptor`:
+
+```
+/api/auth/me  => 200 username=rawnald1
+/api/resolve  => 200 1 track 'Fresh'
+/api/jobs     => 200 job_id=b02bfdba
+/status polls => 200 ... status=complete filename=Fresh.flac
+/download     => 200 ok=true bytes=27131849 magic='fLaC'
+```
+
+**Zero Cloudflare 403s anywhere, including the large-binary `/download` fetch. Approach A (cookie replay) is sufficient; Phase 6 (Approach B, WebView request-proxy) is NOT needed and was never built.**
+
+Notes:
+- Connect flow verified end-to-end: log in → harvest `antra_session` → in-page `/api/auth/me` confirm → save → Settings row shows username.
+- The lifecycle was exercised via the probe rather than the organic download path; the organic path uses the same `AntraClient` + interceptor, so the Cloudflare question it was gating on is answered. Organic stream-resolve + no-regression (kennyy/squid/YT) checks remain ordinary QA items for release testing.
+- A duplicate probe run got `createJob => job_id=null` (likely duplicate/concurrent-job rejection) — graceful, no crash.

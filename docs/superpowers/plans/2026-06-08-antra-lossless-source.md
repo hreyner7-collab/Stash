@@ -252,13 +252,15 @@ Behavior: all calls on `Dispatchers.IO`; non-2xx → return null (or for `pollSt
 ### Task 10: On-device end-to-end verification (decides A vs B)
 
 > No code unless this fails. This is the empirical Cloudflare test.
+>
+> **RESULT 2026-06-09: PASSED — Approach A confirmed, Phase 6 not needed.** Run via a temporary probe (commit `eb5c271b`, reverted) instead of an organic registry-routed download: full me→resolve→createJob→poll→`/download` lifecycle over plain OkHttp returned a 27 MB `fLaC` file with zero Cloudflare 403s. Details in the spec's Verification Results.
 
-- [ ] **Step 1:** Connect antra (Task 9). Find a streamable track that is NOT on kennyy/squid lossless but HAS a `spotifyUri` (or temporarily force the registry to try antra first for one track).
-- [ ] **Step 2 (download):** Trigger a lossless download routed to antra. Capture logcat. **Assert:** resolve→job→poll→`/download` fetch returns FLAC bytes (no Cloudflare `403` on the OkHttp `/download` fetch); the file lands with the right duration (existing duration backstop passes); Now Playing shows a lossless/FLAC badge.
-- [ ] **Step 3 (stream):** Play that track via antra. **Assert:** it fetches to cache and plays; a second play is a cache hit (no new job, `singles_left` unchanged).
-- [ ] **Step 4 (no-regression):** With antra connected, confirm normal kennyy/squid lossless + YouTube fallback still behave (antra only engages when the Qobuz proxies miss).
-- [ ] **Step 5:** If any antra OkHttp call (especially `/download`) returns Cloudflare `403` → the cookie-replay (Approach A) is TLS-bound and insufficient → proceed to **Phase 6**. Otherwise, A is sufficient — **done**.
-- [ ] **Step 6:** Append a `## Verification Results` section to the spec with the outcome (A sufficient, or B needed).
+- [x] **Step 1:** Connect antra (Task 9). ~~Find a streamable track~~ → probe used a hardcoded test track (`1mMYaXpT65iZDtvfRA9EkE`, 'Fresh').
+- [x] **Step 2 (download):** resolve→job→poll→`/download` returned FLAC bytes (`bytes=27131849 magic='fLaC'`), no Cloudflare `403` anywhere. (Duration backstop / Now Playing badge not exercised by the probe — release QA.)
+- [ ] **Step 3 (stream):** deferred to release QA (same `AntraClient`+interceptor transport the probe verified; spends a single per cache-miss).
+- [ ] **Step 4 (no-regression):** deferred to release QA (kennyy/squid/YT with antra connected).
+- [x] **Step 5:** No 403s → **Approach A sufficient; Phase 6 skipped.**
+- [x] **Step 6:** Spec `## Verification Results` updated with the outcome.
 
 ---
 
