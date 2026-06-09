@@ -249,36 +249,19 @@ class NowPlayingViewModel @Inject constructor(
         ) { state, positionMs, liveTrack, optimistic ->
             _uiState.update { current ->
                 val baseTrack = liveTrack ?: state.currentTrack
-                // When the player is streaming, the Room row's format fields
-                // are stale or default ("opus") — the row was synced without
-                // actually downloading the audio, so it has no real codec/bit
-                // depth/sample rate. The active MediaItem carries the Qobuz-
-                // reported format in its extras; overlay those onto the
-                // displayed Track so Now Playing shows the right badge.
-                val streamFormat = state.currentTrack
-                val track = if (
-                    state.isStreaming &&
-                    baseTrack != null &&
-                    streamFormat != null &&
-                    // ids diverge once `ensureTrackPersisted` writes a real
-                    // Room row for a streaming-engine synthetic id, so match
-                    // on youtube_id as a fallback to keep the codec badge alive.
-                    (streamFormat.id == baseTrack.id ||
-                        (!streamFormat.youtubeId.isNullOrBlank() &&
-                            streamFormat.youtubeId == baseTrack.youtubeId)) &&
-                    streamFormat.fileFormat.isNotBlank() &&
-                    streamFormat.fileFormat != "opus"
-                ) {
-                    baseTrack.copy(
-                        fileFormat = streamFormat.fileFormat,
-                        bitsPerSample = streamFormat.bitsPerSample ?: baseTrack.bitsPerSample,
-                        sampleRateHz = streamFormat.sampleRateHz ?: baseTrack.sampleRateHz,
-                        qualityKbps = if (streamFormat.qualityKbps > 0) streamFormat.qualityKbps else baseTrack.qualityKbps,
-                        // streamOrigin only exists on MediaItem-derived tracks (not in
-                        // Room), so always overlay from the active item when streaming.
-                        streamOrigin = streamFormat.streamOrigin,
-                    )
-                } else baseTrack
+                // When the active track came from a stream resolver, the Room
+                // row's format fields are stale or default ("opus") — the row
+                // was synced without downloading the audio, so it has no real
+                // codec/bit-depth/sample-rate. The active MediaItem carries the
+                // served format in its extras; overlay those so Now Playing
+                // shows the right badge. Keyed on stream origin, not the
+                // http-only isStreaming flag, so antra's file:// FLAC is also
+                // labeled correctly (see [overlayDisplayTrack]).
+                val track = overlayDisplayTrack(
+                    isHttpStreaming = state.isStreaming,
+                    streamFormat = state.currentTrack,
+                    baseTrack = baseTrack,
+                )
                 // ExoPlayer always knows the real duration once the
                 // stream loads; the Track-domain durationMs may still be
                 // 0 for streaming-engine tracks whose search-result
@@ -792,5 +775,49 @@ internal fun snackbarCopyFor(result: UpgradeResult): String = when (result) {
     UpgradeResult.Upgraded -> "Upgraded to FLAC"
     UpgradeResult.NoMatch -> "No lossless match found"
     UpgradeResult.Error -> "Couldn't check lossless sources"
+}
+
+/**
+ * Decide the Track to DISPLAY in Now Playing, overlaying the actually-served
+ * stream format (codec/bit-depth/sample-rate/bitrate) from the active
+ * MediaItem onto [baseTrack]. Streaming-only Room rows carry a stale
+ * `file_format` ("opus") from sync, so the live stream's real format must win.
+ *
+ * Keyed on the MediaItem actually carrying a **stream origin** (it was
+ * produced by a stream resolver), NOT on [isHttpStreaming]. antra serves its
+ * lossless FLAC from a LOCAL cache file (`file://`), so the player's
+ * http(s)-only streaming flag is false for it — gating on that flag left a
+ * real 24-bit antra FLAC mislabeled "OPUS". http streams (kennyy/squid) keep
+ * working because they ALSO set a stream origin; [isHttpStreaming] is retained
+ * only as a defensive OR.
+ *
+ * No overlay (returns [baseTrack] unchanged) when: there is no base track, the
+ * active item didn't come from a stream resolver, ids don't match, or the
+ * stream's own format is blank/"opus" (a genuine YouTube-fallback opus must
+ * not be relabeled FLAC). Top-level + `internal` so the test can call it
+ * without booting the ViewModel.
+ */
+internal fun overlayDisplayTrack(
+    isHttpStreaming: Boolean,
+    streamFormat: Track?,
+    baseTrack: Track?,
+): Track? {
+    if (baseTrack == null) return null
+    if (streamFormat == null) return baseTrack
+    val cameFromStreamResolver = isHttpStreaming || streamFormat.streamOrigin != null
+    val idMatches = streamFormat.id == baseTrack.id ||
+        (!streamFormat.youtubeId.isNullOrBlank() && streamFormat.youtubeId == baseTrack.youtubeId)
+    val hasRealFormat = streamFormat.fileFormat.isNotBlank() && streamFormat.fileFormat != "opus"
+    return if (cameFromStreamResolver && idMatches && hasRealFormat) {
+        baseTrack.copy(
+            fileFormat = streamFormat.fileFormat,
+            bitsPerSample = streamFormat.bitsPerSample ?: baseTrack.bitsPerSample,
+            sampleRateHz = streamFormat.sampleRateHz ?: baseTrack.sampleRateHz,
+            qualityKbps = if (streamFormat.qualityKbps > 0) streamFormat.qualityKbps else baseTrack.qualityKbps,
+            // streamOrigin only exists on MediaItem-derived tracks (not in
+            // Room), so always overlay from the active item when streaming.
+            streamOrigin = streamFormat.streamOrigin,
+        )
+    } else baseTrack
 }
 
