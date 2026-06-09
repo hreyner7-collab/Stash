@@ -15,7 +15,10 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -51,6 +54,18 @@ class AntraStreamResolver internal constructor(
         jobGate: AntraJobGate,
     ) : this(client, store, context.cacheDir, jobGate)
 
+    /**
+     * In-flight resolves keyed by track id. The cache file is written only
+     * after the job-gate releases, so two concurrent callers for the same
+     * uncached track (the next-track prefetch + a foreground tap, or two
+     * racing prefetches) would each see no cache, create their own job, and
+     * spend a separate single — observed on-device as 3 jobs for one track.
+     * The first caller owns the work and shares its result through this map;
+     * the rest join. Guarded by [inFlightMutex] for atomic get-or-create.
+     */
+    private val inFlight = HashMap<Long, CompletableDeferred<StreamUrl?>>()
+    private val inFlightMutex = Mutex()
+
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         val spotifyUrl = TrackQuery(
             artist = track.artist,
@@ -65,6 +80,40 @@ class AntraStreamResolver internal constructor(
             return streamUrlFor(cacheFile)
         }
 
+        // Coalesce concurrent resolves of the same track onto one job.
+        val (shared, isOwner) = inFlightMutex.withLock {
+            inFlight[track.id]?.let { it to false }
+                ?: CompletableDeferred<StreamUrl?>().also { inFlight[track.id] = it } to true
+        }
+        if (!isOwner) {
+            Log.d(TAG, "join in-flight resolve id=${track.id} (no extra quota spend)")
+            return shared.await()
+        }
+
+        return try {
+            val result = fetchToCache(track, spotifyUrl, cacheFile)
+            shared.complete(result)
+            result
+        } catch (e: Throwable) {
+            // Propagate to joiners as a clean miss; the owner still throws so
+            // its own catch chain below maps the failure to null per type.
+            shared.complete(null)
+            throw e
+        } finally {
+            inFlightMutex.withLock { inFlight.remove(track.id) }
+        }
+    }
+
+    /**
+     * Owner-only: the actual job→poll→download→cache flow, with the same
+     * failure-to-null mapping as before. Split out so [resolve] can wrap it
+     * in the in-flight-coalescing guard.
+     */
+    private suspend fun fetchToCache(
+        track: TrackEntity,
+        spotifyUrl: String,
+        cacheFile: File,
+    ): StreamUrl? {
         return try {
             withTimeout(STREAM_TIMEOUT_MS) {
                 // The job portion runs under the shared gate so a stream

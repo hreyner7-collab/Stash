@@ -73,11 +73,13 @@ class StreamSourceRegistry @Inject constructor(
      * @param allowAntra pass `false` to keep antra out of the chain. An
      *   antra resolve is EXPENSIVE: it spends one single from a finite
      *   per-account quota and occupies antra's exclusive job slot for
-     *   60-120s. Every speculative caller (setQueue's background fill,
-     *   both next-track prefetchers) passes `false`; only a track the
-     *   user is actually playing may resolve via antra. Without this a
-     *   single playlist tap during a kennyy outage drains the quota at
-     *   ~1 single/90s (observed on-device 2026-06-09).
+     *   60-120s. setQueue's queue-wide background fill passes `false` —
+     *   without that, one playlist tap during a kennyy outage drains the
+     *   quota at ~1 single/90s (observed on-device 2026-06-09). The
+     *   tapped track and the single NEXT-UP prefetch keep the default
+     *   `true`: both are spent the moment they actually play, and the
+     *   next-up prefetch is what keeps auto-advance seamless across
+     *   antra's 60-120s job latency.
      */
     suspend fun resolve(
         track: TrackEntity,

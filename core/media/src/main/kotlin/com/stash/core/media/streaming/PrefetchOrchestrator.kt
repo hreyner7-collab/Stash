@@ -95,13 +95,21 @@ class PrefetchOrchestrator @Inject constructor(
 
                 val track = trackDao.getById(nextTrackId) ?: return@launch
                 if (track.isDownloaded) return@launch
-                if (!track.isStreamable) return@launch
+                // Skip only rows CONFIRMED unstreamable (checked and false).
+                // Synced-library rows sit at isStreamable=false with
+                // isStreamableCheckedAt=null ("never checked" — the
+                // AvailabilityCheckWorker that set the flag is gone);
+                // gating on the bare flag silently disabled next-track
+                // prefetch for the whole synced library.
+                if (!track.isStreamable && track.isStreamableCheckedAt != null) return@launch
 
-                // allowAntra = false: prefetch is speculative — an antra
-                // resolve spends 1 single from a finite quota and holds
-                // antra's exclusive job slot for 60-120s. Antra is reserved
-                // for the track the user is actually playing.
-                val resolved = streamResolver.resolve(track, allowAntra = false)
+                // antra ALLOWED (unlike the queue-wide background fill):
+                // this fires past 60% of the current track for the single
+                // next-up item, whose antra single gets spent either way
+                // when auto-advance reaches it. The antra resolver's
+                // track-keyed cache means a double resolve with the repo's
+                // own next-track prefetch never spends twice.
+                val resolved = streamResolver.resolve(track)
                 if (resolved != null) {
                     streamUrlCache.put(nextTrackId, resolved)
                     Log.d(TAG, "Prefetched stream URL for track $nextTrackId")

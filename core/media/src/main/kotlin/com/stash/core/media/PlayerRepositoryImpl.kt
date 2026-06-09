@@ -35,6 +35,7 @@ import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_I
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_IS_STREAMABLE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_YOUTUBE_ID
 import com.stash.core.model.TrackItem
+import com.stash.core.model.isUnavailableForDisplay
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -249,7 +250,23 @@ class PlayerRepositoryImpl @Inject constructor(
      * minutes later, clobbering whatever the user is currently playing.
      */
     @Volatile
-    private var setQueueEpoch: Long = 0L
+    internal var setQueueEpoch: Long = 0L
+
+    /**
+     * Epoch of the [setQueue] tapped-track resolve currently in flight, or
+     * -1 when none. While it matches [setQueueEpoch], [computeIsBuffering]
+     * keeps [PlayerState.isBuffering] true: the previous queue keeps
+     * playing during the resolve, and its controller events re-run
+     * [updateState] — without this flag they stomp setQueue's optimistic
+     * spinner back to false mid-resolve (invisible at yt-dlp's ~11s, but
+     * an antra job takes 60-120s and the player looked frozen/broken).
+     * Set after the optimistic emit; cleared on the failure path and just
+     * before playback starts on success. A superseding setQueue overwrites
+     * it with its own epoch, so a stale resolve can't hold the spinner.
+     * Internal (with [setQueueEpoch]) as a test seam.
+     */
+    @Volatile
+    internal var tapResolveEpoch: Long = -1L
 
     private val _userMessages = kotlinx.coroutines.flow.MutableSharedFlow<String>(
         extraBufferCapacity = 4,
@@ -345,6 +362,9 @@ class PlayerRepositoryImpl @Inject constructor(
             isPlaying = false,
             isBuffering = true,
         )
+        // Keep the spinner alive across updateState() calls for the whole
+        // resolve — see [tapResolveEpoch].
+        tapResolveEpoch = myEpoch
 
         // Resolve ONLY the tapped track. Earlier revisions probed forward
         // through the next few entries looking for *anything* playable,
@@ -384,6 +404,7 @@ class PlayerRepositoryImpl @Inject constructor(
             )
             _userMessages.tryEmit("Couldn't play this track right now.")
             // Clear the optimistic spinner — nothing is going to play.
+            tapResolveEpoch = -1L
             _playerState.value = _playerState.value.copy(isBuffering = false)
             return
         }
@@ -394,9 +415,24 @@ class PlayerRepositoryImpl @Inject constructor(
                 "${tracks.size - 1} more to resolve in background",
         )
 
+        // Hand the spinner over to real controller state: prepare() puts
+        // ExoPlayer into STATE_BUFFERING, which computeIsBuffering passes
+        // through, so there is no visible gap.
+        tapResolveEpoch = -1L
         controller.setMediaItems(listOf(startItem), /* startIndex = */ 0, /* startPositionMs = */ 0L)
         controller.prepare()
         controller.play()
+
+        // Kick the next-track prefetch for the tapped track's successor
+        // explicitly. The init-block watcher keys on currentIndex CHANGES,
+        // and the tapped track sits at timeline index 0 — if the previous
+        // queue was also at index 0 (or idle), distinctUntilChanged swallows
+        // the emission and the first track's next-up never prefetches.
+        // Matters most when the background fill can't pre-resolve anything
+        // (Qobuz-proxy outage / antra drill): without this, the timeline
+        // holds only the tapped track and playback dies at its end instead
+        // of flowing into the prefetched-and-inserted next track.
+        scope.launch { prefetchNextTrack(0) }
 
         // Fill the rest of the queue in the background. Tracks after the
         // start anchor are appended first (skip-next is the common case);
@@ -435,7 +471,8 @@ class PlayerRepositoryImpl @Inject constructor(
                 // slot PER TRACK, so a playlist tap during a kennyy outage
                 // would otherwise drain the whole quota (seen on-device
                 // 2026-06-09). Antra stays available to the tapped track
-                // and to JIT resolution of the track actually being played.
+                // and to the single next-up prefetch (prefetchNextTrack /
+                // PrefetchOrchestrator), which keeps auto-advance seamless.
                 fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false, allowAntra = false)
                 fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false, allowAntra = false)
                 Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
@@ -566,7 +603,11 @@ class PlayerRepositoryImpl @Inject constructor(
 
         val next = tracks[nextIndex]
         if (next.filePath != null) return
-        if (!next.isStreamable) return
+        // Only a CONFIRMED-unstreamable row (checked and false) is skipped.
+        // Synced-library rows are all "never checked" (isStreamable=false,
+        // isStreamableCheckedAt=null) — the bare-flag gate silently killed
+        // next-track prefetch for every synced track.
+        if (next.isUnavailableForDisplay) return
         if (!streamingPreference.current()) return
 
         // Fresh-cache check — avoid redundant work when the URL is good.
@@ -578,9 +619,13 @@ class PlayerRepositoryImpl @Inject constructor(
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
         val entity = trackDao.getById(next.id) ?: next.toEntity()
         val resolved = try {
-            // allowAntra = false: this prefetch is speculative (the user may
-            // skip/stop before auto-advance) — never spend antra quota on it.
-            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true, allowAntra = false)
+            // antra ALLOWED here (unlike the queue-wide background fill):
+            // this is the single next-up track during active playback — its
+            // antra single gets spent either way the moment auto-advance
+            // reaches it (and a skip-next lands on this same track), while
+            // an antra job needs 60-120s, so prefetching it is the only way
+            // auto-advance stays seamless during a Qobuz-proxy outage.
+            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
@@ -606,7 +651,7 @@ class PlayerRepositoryImpl @Inject constructor(
         // path, NOT the reverted stash-lazy:// placeholder/synthetic-id scheme.
         val swapped = refreshControllerMediaItem(controller, next, resolved)
         if (!swapped) {
-            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true, allowAntra = false) as? StreamRoutingResult.Item)?.mediaItem
+            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true) as? StreamRoutingResult.Item)?.mediaItem
             if (item != null) insertNextMediaItem(controller, next.id, item)
         }
     }
@@ -1371,6 +1416,16 @@ class PlayerRepositoryImpl @Inject constructor(
      * Reads the current state from the [MediaController] and publishes it to
      * [_playerState]. Also persists the current position via [PlaybackStateStore].
      */
+    /**
+     * `true` while the active track is loading from the user's point of
+     * view: ExoPlayer is genuinely buffering, OR a [setQueue] tapped-track
+     * resolve is still in flight ([tapResolveEpoch] matches the current
+     * [setQueueEpoch] — a stale epoch from a superseded call doesn't count).
+     */
+    internal fun computeIsBuffering(controllerBuffering: Boolean): Boolean =
+        controllerBuffering ||
+            (tapResolveEpoch != -1L && tapResolveEpoch == setQueueEpoch)
+
     private fun updateState(controller: MediaController) {
         val currentItem = controller.currentMediaItem
         val track = currentItem?.toTrack()
@@ -1401,10 +1456,14 @@ class PlayerRepositoryImpl @Inject constructor(
             isStreaming = isStreaming,
             // STATE_BUFFERING covers normal buffering AND the in-data-source
             // 403→yt-dlp re-resolve (RefreshingDataSource blocks the loader
-            // thread while a skipped-to YouTube placeholder is recovered). The
-            // tapped-track resolve gap is covered separately by setQueue's
-            // optimistic emit, which this overwrites once playback starts.
-            isBuffering = controller.playbackState == Player.STATE_BUFFERING,
+            // thread while a skipped-to YouTube placeholder is recovered).
+            // The tapped-track resolve gap (yt-dlp ~11s, antra 60-120s) is
+            // covered by the [tapResolveEpoch] term inside computeIsBuffering
+            // — setQueue's optimistic emit alone gets stomped by the first
+            // controller event from the still-playing previous queue.
+            isBuffering = computeIsBuffering(
+                controller.playbackState == Player.STATE_BUFFERING,
+            ),
         )
         _playerState.value = newState
 

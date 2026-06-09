@@ -117,7 +117,7 @@ class StreamingPrefetchTest {
         coEvery { streamingPreference.current() } returns true
         coEvery { streamUrlCache.get(99L) } returns null
         coEvery { trackDao.getById(99L) } returns nextTrack
-        coEvery { streamResolver.resolve(nextTrack, allowAntra = false) } returns resolved
+        coEvery { streamResolver.resolve(nextTrack) } returns resolved
 
         orchestrator.onPlaybackProgress(
             scope = testScope,
@@ -127,7 +127,7 @@ class StreamingPrefetchTest {
         )
         testScope.advanceUntilIdle()
 
-        coVerify(exactly = 1) { streamResolver.resolve(nextTrack, allowAntra = false) }
+        coVerify(exactly = 1) { streamResolver.resolve(nextTrack) }
         verify(exactly = 1) { streamUrlCache.put(99L, resolved) }
     }
 
@@ -158,9 +158,16 @@ class StreamingPrefetchTest {
 
     @Test
     fun progress_above60Percent_butNotStreamable_doesNotResolve() = runTest {
-        // Defense-in-depth — a row marked isStreamable=false should
-        // never be sent to Kennyy.
-        val nextTrack = streamableTrack(id = 99L).copy(isStreamable = false)
+        // Defense-in-depth — a row CONFIRMED unstreamable (checked and
+        // false) is never sent to a resolver. Unchecked rows
+        // (isStreamableCheckedAt = null) DO resolve: the synced library
+        // sits entirely unchecked since AvailabilityCheckWorker was
+        // removed, and gating on the bare flag silently killed
+        // next-track prefetch for all of it.
+        val nextTrack = streamableTrack(id = 99L).copy(
+            isStreamable = false,
+            isStreamableCheckedAt = 1_700_000_000_000L,
+        )
         coEvery { streamingPreference.current() } returns true
         coEvery { streamUrlCache.get(99L) } returns null
         coEvery { trackDao.getById(99L) } returns nextTrack
@@ -202,7 +209,7 @@ class StreamingPrefetchTest {
         coEvery { streamingPreference.current() } returns true
         coEvery { streamUrlCache.get(99L) } returns null
         coEvery { trackDao.getById(99L) } returns nextTrack
-        coEvery { streamResolver.resolve(nextTrack, allowAntra = false) } returns null // simulate failure
+        coEvery { streamResolver.resolve(nextTrack) } returns null // simulate failure
 
         orchestrator.onPlaybackProgress(
             scope = testScope,
@@ -221,7 +228,7 @@ class StreamingPrefetchTest {
         )
         testScope.advanceUntilIdle()
 
-        coVerify(exactly = 1) { streamResolver.resolve(nextTrack, allowAntra = false) }
+        coVerify(exactly = 1) { streamResolver.resolve(nextTrack) }
     }
 
     @Test
@@ -233,7 +240,7 @@ class StreamingPrefetchTest {
         coEvery { streamingPreference.current() } returns true
         coEvery { streamUrlCache.get(99L) } returns null
         coEvery { trackDao.getById(99L) } returns nextTrack
-        coEvery { streamResolver.resolve(nextTrack, allowAntra = false) } returns
+        coEvery { streamResolver.resolve(nextTrack) } returns
             StreamUrl(url = "https://cdn/x?etsp=1", expiresAtMs = 1_000L)
 
         orchestrator.onPlaybackProgress(
@@ -254,7 +261,7 @@ class StreamingPrefetchTest {
         )
         testScope.advanceUntilIdle()
 
-        coVerify(exactly = 2) { streamResolver.resolve(nextTrack, allowAntra = false) }
+        coVerify(exactly = 2) { streamResolver.resolve(nextTrack) }
     }
 
     @Test
