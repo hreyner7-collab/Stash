@@ -114,9 +114,14 @@ class SpotifyUriResolver @Inject constructor(
         }
         val prevAttempts = if (existing?.status == STATUS_TRANSIENT) existing.attempts else 0
 
-        // (4) Search + score.
+        // (4) Search + score. Use the web-player `searchDesktop` GraphQL
+        // operation (Partner API) — the public /v1/search REST endpoint
+        // hard-rate-limits both client_credentials and sp_dc tokens (24h/short
+        // 429s, confirmed on-device 2026-06-09). searchTracksGraphQL returns []
+        // on any failure (incl. a stale persisted-query hash) rather than
+        // throwing, so an empty list is treated as a transient miss.
         val candidates: List<SpotifyTrackCandidate> = try {
-            spotify.searchTracks(buildQuery(track))
+            spotify.searchTracksGraphQL(buildQuery(track))
         } catch (e: CancellationException) {
             throw e
         } catch (e: SpotifyRateLimitException) {
@@ -127,7 +132,14 @@ class SpotifyUriResolver @Inject constructor(
             cacheTransient(trackId, prevAttempts, MIN_TRANSIENT_TTL_MS)
             return null
         } catch (e: Exception) {
-            // SpotifyApiException and anything else non-cancellation: transient.
+            // anything else non-cancellation: transient.
+            cacheTransient(trackId, prevAttempts, MIN_TRANSIENT_TTL_MS)
+            return null
+        }
+        // Empty candidates from GraphQL = either genuinely no match OR a
+        // stale persisted-query hash / token blip. Treat as TRANSIENT (short
+        // backoff) NOT a 30-day NO_MATCH, so a hash refresh self-heals fast.
+        if (candidates.isEmpty()) {
             cacheTransient(trackId, prevAttempts, MIN_TRANSIENT_TTL_MS)
             return null
         }
@@ -220,25 +232,24 @@ class SpotifyUriResolver @Inject constructor(
     }
 
     /**
-     * Builds the Spotify `/search` query, primary-artist first: sending the
-     * full multi-artist credit verbatim makes Spotify surface the featured
-     * artists' popular tracks instead of the actual song, so we use only the
-     * primary artist (the first [ArtistMatching.artistParts] element, falling
-     * back to the text before the first comma).
+     * Builds the searchDesktop `searchTerm` as PLAIN TEXT ("title artist").
+     * searchDesktop is the web-player's free-text search — it does NOT accept
+     * the `/v1/search` field-filter syntax (`track:"…" artist:"…"`); passing
+     * filters makes it parse the whole thing as a literal title and return 0
+     * results. We use the primary artist only (sending the full multi-artist
+     * credit surfaces the featured artists' popular tracks instead).
      */
     private fun buildQuery(track: TrackQuery): String {
-        // Use the READABLE primary artist (split on the separator but keep the
-        // original text), NOT ArtistMatching.artistParts — that helper strips
-        // to alphanumeric-only for COMPARISON ("Steely Dan" -> "steelydan"),
-        // which mangles the search query. Spotify search is case-insensitive,
-        // so the readable primary ("Steely Dan", "Al Green") is what we want.
+        // Readable primary artist (split on the separator, keep original text —
+        // NOT ArtistMatching.artistParts, which strips to alphanumeric for
+        // COMPARISON: "Steely Dan" -> "steelydan").
         val primary = track.artist
             .split(ArtistMatching.ARTIST_PART_SEPARATOR)
             .firstOrNull()
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: track.artist.trim()
-        return "track:\"${track.title}\" artist:\"$primary\""
+        return "${track.title} $primary".trim()
     }
 
     /** "spotify:track:<id>" → "https://open.spotify.com/track/<id>"; null otherwise. */

@@ -76,7 +76,7 @@ class SpotifyUriResolverTest {
         val url = resolver().resolveUrl(42L, track())
 
         assertThat(url).isEqualTo("https://open.spotify.com/track/abc")
-        coVerify(exactly = 0) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 0) { spotify.searchTracksGraphQL(any(), any()) }
     }
 
     @Test fun `cache NO_MATCH within TTL returns null without searching`() = runTest {
@@ -94,7 +94,7 @@ class SpotifyUriResolverTest {
         val url = resolver().resolveUrl(42L, track())
 
         assertThat(url).isNull()
-        coVerify(exactly = 0) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 0) { spotify.searchTracksGraphQL(any(), any()) }
     }
 
     @Test fun `cache TRANSIENT within TTL returns null without searching`() = runTest {
@@ -113,12 +113,12 @@ class SpotifyUriResolverTest {
         val url = resolver().resolveUrl(42L, track())
 
         assertThat(url).isNull()
-        coVerify(exactly = 0) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 0) { spotify.searchTracksGraphQL(any(), any()) }
     }
 
     @Test fun `miss then search then scorer accepts then upserts MATCHED then returns url`() = runTest {
         coEvery { dao.get(42L) } returns null
-        coEvery { spotify.searchTracks(any(), any(), any()) } returns listOf(candidate("xyz"))
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } returns listOf(candidate("xyz"))
         coEvery { scorer.pick(any(), any()) } returns
             SpotifySearchScorer.Decision(candidate("xyz"), "accepted")
         val slot = slot<SpotifyResolutionEntity>()
@@ -134,7 +134,7 @@ class SpotifyUriResolverTest {
 
     @Test fun `miss then search then scorer rejects then upserts NO_MATCH 30d then null`() = runTest {
         coEvery { dao.get(42L) } returns null
-        coEvery { spotify.searchTracks(any(), any(), any()) } returns listOf(candidate())
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } returns listOf(candidate())
         coEvery { scorer.pick(any(), any()) } returns
             SpotifySearchScorer.Decision(null, "no candidate passed gates")
         val slot = slot<SpotifyResolutionEntity>()
@@ -150,7 +150,7 @@ class SpotifyUriResolverTest {
 
     @Test fun `429 upserts TRANSIENT not NO_MATCH then null`() = runTest {
         coEvery { dao.get(42L) } returns null
-        coEvery { spotify.searchTracks(any(), any(), any()) } throws
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } throws
             SpotifyRateLimitException(retryAfterSeconds = null)
         val slot = slot<SpotifyResolutionEntity>()
         coEvery { dao.upsert(capture(slot)) } just Runs
@@ -167,7 +167,7 @@ class SpotifyUriResolverTest {
         val url = resolver().resolveUrl(42L, track().copy(durationMs = null))
 
         assertThat(url).isNull()
-        coVerify(exactly = 0) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 0) { spotify.searchTracksGraphQL(any(), any()) }
         coVerify(exactly = 0) { dao.upsert(any()) }
     }
 
@@ -175,7 +175,7 @@ class SpotifyUriResolverTest {
     @Test fun `concurrent resolves of same track issue one search`() = runTest {
         coEvery { dao.get(42L) } returns null
         val release = CompletableDeferred<Unit>()
-        coEvery { spotify.searchTracks(any(), any(), any()) } coAnswers {
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } coAnswers {
             release.await()
             listOf(candidate("xyz"))
         }
@@ -195,7 +195,7 @@ class SpotifyUriResolverTest {
 
         assertThat(ra).isEqualTo("https://open.spotify.com/track/xyz")
         assertThat(rb).isEqualTo("https://open.spotify.com/track/xyz")
-        coVerify(exactly = 1) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 1) { spotify.searchTracksGraphQL(any(), any()) }
     }
 
     @Test fun `TRANSIENT promoted to NO_MATCH after attempts over 5`() = runTest {
@@ -210,7 +210,7 @@ class SpotifyUriResolverTest {
             expiresAtMs = now - 1, // expired -> re-search
             attempts = 5,
         )
-        coEvery { spotify.searchTracks(any(), any(), any()) } throws
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } throws
             SpotifyRateLimitException(retryAfterSeconds = null)
         val slot = slot<SpotifyResolutionEntity>()
         coEvery { dao.upsert(capture(slot)) } just Runs
@@ -233,7 +233,7 @@ class SpotifyUriResolverTest {
             resolvedAtMs = now - 60 * day,
             expiresAtMs = now - 1, // expired
         )
-        coEvery { spotify.searchTracks(any(), any(), any()) } returns listOf(candidate("xyz"))
+        coEvery { spotify.searchTracksGraphQL(any(), any()) } returns listOf(candidate("xyz"))
         coEvery { scorer.pick(any(), any()) } returns
             SpotifySearchScorer.Decision(candidate("xyz"), "accepted")
         coEvery { dao.upsert(any()) } just Runs
@@ -241,6 +241,6 @@ class SpotifyUriResolverTest {
         val url = resolver().resolveUrl(42L, track())
 
         assertThat(url).isEqualTo("https://open.spotify.com/track/xyz")
-        coVerify(exactly = 1) { spotify.searchTracks(any(), any(), any()) }
+        coVerify(exactly = 1) { spotify.searchTracksGraphQL(any(), any()) }
     }
 }

@@ -547,6 +547,105 @@ class SpotifyApiClient @Inject constructor(
         return okHttpClient.newCall(request).execute()
     }
 
+    /**
+     * Search tracks via the web player's `searchDesktop` GraphQL operation
+     * (Partner API), NOT the rate-limited public /v1/search REST endpoint.
+     * Same auth/plumbing as the other GraphQL operations (sp_dc access token +
+     * client token). Returns full track metadata (name/artists/duration) so the
+     * bulletproof matcher still runs.
+     *
+     * Returns [] on any failure (no token, HTTP error, parse failure, or the
+     * persisted-query hash going stale). Unlike [searchTracks] this does NOT
+     * throw on rate limits — the Partner API isn't quota-throttled like the
+     * public API — so the caller treats an empty list as "no candidates".
+     */
+    suspend fun searchTracksGraphQL(query: String, limit: Int = 10): List<SpotifyTrackCandidate> =
+        withContext(Dispatchers.IO) {
+            val variables = buildJsonObject {
+                put("searchTerm", query)
+                put("offset", 0)
+                put("limit", limit)
+                put("numberOfTopResults", 5)
+                put("includeAudiobooks", false)
+                put("includePreReleases", false)
+            }.toString()
+
+            val responseJson = executeGraphQL(
+                operationName = "searchDesktop",
+                variables = variables,
+                hash = SpotifyAuthConfig.HASH_SEARCH_DESKTOP,
+            ) ?: return@withContext emptyList<SpotifyTrackCandidate>()
+
+            parseSearchDesktop(responseJson).also {
+                Log.d(TAG, "searchTracksGraphQL: parsed ${it.size} candidates for '$query'")
+            }
+        }
+
+    /**
+     * Parse a `searchDesktop` GraphQL response into [SpotifyTrackCandidate]s.
+     * Path: data.searchV2.tracksV2.items[].item.data → { uri, name,
+     * artists.items[].profile.name, duration.totalMilliseconds }. Null-safe at
+     * every hop so a schema tweak yields an empty list, never a crash.
+     */
+    private fun parseSearchDesktop(root: JsonObject): List<SpotifyTrackCandidate> {
+        return try {
+            val searchV2 = root["data"]?.jsonObject?.get("searchV2")?.jsonObject
+            // TEMP-DIAG: log the searchV2 child keys so we can confirm the
+            // tracksV2 path on-device (remove once verified).
+            Log.d(TAG, "parseSearchDesktop: searchV2 keys=${searchV2?.keys}")
+            val items = searchV2
+                ?.get("tracksV2")?.jsonObject
+                ?.get("items")?.jsonArray
+                ?: return emptyList()
+            Log.d(TAG, "parseSearchDesktop: tracksV2.items count=${items.size}")
+
+            items.mapNotNull { itemEl ->
+                val itemObj = itemEl as? JsonObject ?: return@mapNotNull null
+                // The track payload sits under item.data; tolerate a flatter data.
+                val data = (itemObj["item"]?.jsonObject?.get("data")?.jsonObject)
+                    ?: itemObj["data"]?.jsonObject
+                    ?: return@mapNotNull null
+
+                val typename = data["__typename"]?.jsonPrimitive?.contentOrNull
+                if (typename != null && typename != "Track") return@mapNotNull null
+
+                val uri = data["uri"]?.jsonPrimitive?.contentOrNull
+                val id = uri?.removePrefix("spotify:track:")?.takeIf { it != uri && it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val name = data["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+
+                val artists = data["artists"]?.jsonObject
+                    ?.get("items")?.jsonArray
+                    ?.mapNotNull {
+                        it.jsonObject["profile"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
+                    }
+                    ?: emptyList()
+
+                val durationMs = data["duration"]?.jsonObject
+                    ?.get("totalMilliseconds")?.jsonPrimitive?.longOrNull
+                    ?: 0L
+
+                val album = data["albumOfTrack"]?.jsonObject
+                    ?.get("name")?.jsonPrimitive?.contentOrNull
+                    ?: ""
+
+                SpotifyTrackCandidate(
+                    id = id,
+                    name = name,
+                    artists = artists,
+                    albumName = album,
+                    durationMs = durationMs,
+                    isrc = null, // searchDesktop doesn't surface ISRC
+                    explicit = data["contentRating"]?.jsonObject
+                        ?.get("label")?.jsonPrimitive?.contentOrNull == "EXPLICIT",
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "parseSearchDesktop: parse failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ── Prong 1: Client Credentials + Public Web API ────────────────────
 
     /**
