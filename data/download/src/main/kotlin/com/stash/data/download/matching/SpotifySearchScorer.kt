@@ -27,6 +27,19 @@ class SpotifySearchScorer @Inject constructor(private val matcher: TrackMatcher)
             compareBy<SpotifyTrackCandidate> { durDeltaSec(track, it) }
                 .thenByDescending { titleSim(track, it) },
         ) ?: return Decision(null, "no candidate passed gates")
+
+        // Abstain when another passer is genuinely indistinguishable from the
+        // best — within AMBIGUOUS_TITLE_SIM and AMBIGUOUS_DUR_SEC (e.g. two
+        // regional masters). Accepting either would risk the wrong recording.
+        val bestDur = durDeltaSec(track, best)
+        val bestSim = titleSim(track, best)
+        val ambiguous = passers.any { other ->
+            other !== best &&
+                abs(titleSim(track, other) - bestSim) <= AMBIGUOUS_TITLE_SIM &&
+                abs(durDeltaSec(track, other) - bestDur) <= AMBIGUOUS_DUR_SEC
+        }
+        if (ambiguous) return Decision(null, "ambiguous")
+
         return Decision(best, "accepted")
     }
 
@@ -99,6 +112,10 @@ class SpotifySearchScorer @Inject constructor(private val matcher: TrackMatcher)
         const val DUR_TOLERANCE_SEC = 4L
         const val TITLE_SIM_THRESHOLD = 0.92
         const val ARTIST_SIM_THRESHOLD = 0.85
+
+        /** Two passers within these deltas of the best are treated as ambiguous. */
+        const val AMBIGUOUS_TITLE_SIM = 0.02
+        const val AMBIGUOUS_DUR_SEC = 2L
 
         /**
          * Disqualifying version markers. If any of these is present (as a whole

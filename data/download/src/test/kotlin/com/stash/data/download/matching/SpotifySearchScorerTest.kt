@@ -126,4 +126,52 @@ class SpotifySearchScorerTest {
 
         assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
     }
+
+    @Test
+    fun `accepts multi-artist in different order`() {
+        val t = track(title = "Song", artist = "Alpha, Bravo", durMs = 200_000)
+        val c = cand(name = "Song", artists = listOf("Bravo", "Alpha"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isEqualTo(c)
+    }
+
+    @Test
+    fun `accepts feat in title validated via artists array`() {
+        // canonicalTitle strips "(feat. Xenon)"; Xenon is validated via artists[].
+        val t = track(title = "Song (feat. Xenon)", artist = "Primary", durMs = 200_000)
+        val c = cand(name = "Song", artists = listOf("Primary", "Xenon"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isEqualTo(c)
+    }
+
+    @Test
+    fun `rejects when our duration unknown`() {
+        val t = track(title = "Song", artist = "Artist", durMs = null)
+        val c = cand(name = "Song", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `accepts when version token present in both`() {
+        // Symmetric: both titles have "live" so there is no conflict.
+        val t = track(title = "Song (Live)", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song (Live)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isEqualTo(c)
+    }
+
+    @Test
+    fun `abstains when two candidates are ambiguous`() {
+        // Two regional masters: identical title+artist, durations within 2s of
+        // each other and both within tolerance — genuinely ambiguous.
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val a = cand(name = "Song", artists = listOf("Artist"), durMs = 200_000, id = "a")
+        val b = cand(name = "Song", artists = listOf("Artist"), durMs = 201_000, id = "b")
+
+        val decision = scorer.pick(t, listOf(a, b))
+
+        assertThat(decision.accepted).isNull()
+        assertThat(decision.reason).isEqualTo("ambiguous")
+    }
 }
