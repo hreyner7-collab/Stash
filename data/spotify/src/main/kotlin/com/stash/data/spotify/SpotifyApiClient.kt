@@ -14,6 +14,8 @@ import com.stash.data.spotify.model.SpotifyTrackItem
 import com.stash.data.spotify.model.SpotifyTrackObject
 import com.stash.data.spotify.model.SpotifyTracksRef
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -115,6 +117,14 @@ class SpotifyApiClient @Inject constructor(
     private var clientCredentialsExpiry: Long = 0
 
     /**
+     * Serializes refreshes of [clientCredentialsToken]. Concurrent callers
+     * (e.g. parallel [searchTracks] calls) would otherwise each fire a token
+     * request when the cache expires; the mutex + in-lock double-check makes
+     * exactly one refresh win and everyone else reuse its result.
+     */
+    private val tokenMutex = Mutex()
+
+    /**
      * Returns a valid client_credentials token, refreshing if expired.
      * The token is cached for 1 hour minus a 60-second safety margin.
      *
@@ -127,16 +137,27 @@ class SpotifyApiClient @Inject constructor(
             return cached
         }
 
-        Log.d(TAG, "getClientCredentialsToken: cache expired or empty, acquiring new token")
-        val token = spotifyAuthManager.getClientCredentialsToken()
-        if (token != null) {
-            clientCredentialsToken = token
-            clientCredentialsExpiry = now + 3600 // 1 hour
-            Log.d(TAG, "getClientCredentialsToken: cached new token, expires at ${clientCredentialsExpiry}")
-        } else {
-            Log.e(TAG, "getClientCredentialsToken: failed to acquire token")
+        // Serialize the refresh so concurrent callers don't each acquire a
+        // fresh token. Double-check inside the lock: a caller that blocked
+        // here while another refreshed reuses the now-valid cached token.
+        return tokenMutex.withLock {
+            val recheckNow = System.currentTimeMillis() / 1000
+            val recached = clientCredentialsToken
+            if (recached != null && recheckNow < clientCredentialsExpiry - 60) {
+                return@withLock recached
+            }
+
+            Log.d(TAG, "getClientCredentialsToken: cache expired or empty, acquiring new token")
+            val token = spotifyAuthManager.getClientCredentialsToken()
+            if (token != null) {
+                clientCredentialsToken = token
+                clientCredentialsExpiry = recheckNow + 3600 // 1 hour
+                Log.d(TAG, "getClientCredentialsToken: cached new token, expires at ${clientCredentialsExpiry}")
+            } else {
+                Log.e(TAG, "getClientCredentialsToken: failed to acquire token")
+            }
+            token
         }
-        return token
     }
 
     // ── GraphQL Client Token Cache (for sp_dc operations) ───────────────
@@ -439,6 +460,86 @@ class SpotifyApiClient @Inject constructor(
             Log.e(TAG, "parseHomeFeedForSpotifyMixes: failed", e)
             emptyList()
         }
+    }
+
+    /**
+     * Searches the public Spotify catalog for tracks via the Web API
+     * `/v1/search?type=track` endpoint, using a client_credentials token.
+     *
+     * Returns up to [limit] candidate tracks that the caller's scorer judges.
+     * Parseable-but-empty responses yield an empty list.
+     *
+     * @param query  The free-text search query (URL-encoded internally).
+     * @param limit  Max candidates to return (Spotify caps at 50).
+     * @param market ISO 3166-1 alpha-2 market for relinking/availability.
+     * @return List of [SpotifyTrackCandidate], possibly empty.
+     * @throws SpotifyRateLimitException on HTTP 429 (so callers can back off).
+     * @throws SpotifyApiException on other non-2xx responses or missing token.
+     */
+    suspend fun searchTracks(
+        query: String,
+        limit: Int = 8,
+        market: String = "US",
+    ): List<SpotifyTrackCandidate> = withContext(Dispatchers.IO) {
+        val token = getClientCredentialsToken()
+            ?: throw SpotifyApiException(
+                httpCode = 0,
+                url = "$WEB_API_BASE/search",
+                message = "searchTracks: could not acquire client_credentials token",
+            )
+
+        val url = "$WEB_API_BASE/search?type=track&limit=$limit&market=$market" +
+            "&q=${URLEncoder.encode(query, "UTF-8")}"
+
+        Log.d(TAG, "searchTracks: GET $url")
+
+        var response = executeSearchRequest(url, token)
+        var responseBody = response.body?.string()
+
+        // 401: token may have expired — refresh once and retry.
+        if (response.code == 401) {
+            Log.w(TAG, "searchTracks: 401, refreshing token and retrying once")
+            clientCredentialsToken = null
+            val refreshed = getClientCredentialsToken()
+                ?: throw SpotifyApiException(
+                    httpCode = 401,
+                    url = url,
+                    message = "searchTracks: token refresh failed after 401",
+                )
+            response = executeSearchRequest(url, refreshed)
+            responseBody = response.body?.string()
+        }
+
+        if (response.code == 429) {
+            val retryAfter = response.header("Retry-After")?.toLongOrNull()
+            Log.w(TAG, "searchTracks: 429 rate limited (Retry-After=$retryAfter)")
+            throw SpotifyRateLimitException(retryAfterSeconds = retryAfter)
+        }
+
+        if (!response.isSuccessful) {
+            throw SpotifyApiException(
+                httpCode = response.code,
+                url = url,
+                message = "searchTracks: HTTP ${response.code}, " +
+                    "bodyLen=${responseBody?.length ?: 0}",
+            )
+        }
+
+        val body = responseBody ?: return@withContext emptyList()
+        val candidates = parseSearchTracks(body)
+        Log.d(TAG, "searchTracks: parsed ${candidates.size} candidates for query '$query'")
+        candidates
+    }
+
+    /** Builds and executes a single authenticated GET against the search endpoint. */
+    private fun executeSearchRequest(url: String, token: String): okhttp3.Response {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Authorization", "Bearer $token")
+            .header("Accept", "application/json")
+            .build()
+        return okHttpClient.newCall(request).execute()
     }
 
     // ── Prong 1: Client Credentials + Public Web API ────────────────────
