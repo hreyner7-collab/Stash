@@ -227,9 +227,17 @@ class SpotifyUriResolver @Inject constructor(
      * back to the text before the first comma).
      */
     private fun buildQuery(track: TrackQuery): String {
-        val primary = ArtistMatching.artistParts(track.artist).firstOrNull()
+        // Use the READABLE primary artist (split on the separator but keep the
+        // original text), NOT ArtistMatching.artistParts — that helper strips
+        // to alphanumeric-only for COMPARISON ("Steely Dan" -> "steelydan"),
+        // which mangles the search query. Spotify search is case-insensitive,
+        // so the readable primary ("Steely Dan", "Al Green") is what we want.
+        val primary = track.artist
+            .split(ArtistMatching.ARTIST_PART_SEPARATOR)
+            .firstOrNull()
+            ?.trim()
             ?.takeIf { it.isNotBlank() }
-            ?: track.artist.substringBefore(",").trim()
+            ?: track.artist.trim()
         return "track:\"${track.title}\" artist:\"$primary\""
     }
 

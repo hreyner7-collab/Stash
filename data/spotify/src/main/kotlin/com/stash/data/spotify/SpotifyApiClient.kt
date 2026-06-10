@@ -481,11 +481,17 @@ class SpotifyApiClient @Inject constructor(
         limit: Int = 8,
         market: String = "US",
     ): List<SpotifyTrackCandidate> = withContext(Dispatchers.IO) {
-        val token = getClientCredentialsToken()
+        // Use the user's sp_dc-derived WEB access token, NOT the app-level
+        // client_credentials token. Spotify hard-blocks /v1/search for
+        // client_credentials (observed on-device: 429 Retry-After=86400 on a
+        // fresh token) — search requires a user-authorized token. This web
+        // token is the same one used for liked-songs / private playlists
+        // (executeGraphQL) and carries the user's search quota.
+        val token = tokenManager.getSpotifyAccessToken()
             ?: throw SpotifyApiException(
                 httpCode = 0,
                 url = "$WEB_API_BASE/search",
-                message = "searchTracks: could not acquire client_credentials token",
+                message = "searchTracks: no Spotify web access token (user not connected)",
             )
 
         val url = "$WEB_API_BASE/search?type=track&limit=$limit&market=$market" +
@@ -496,15 +502,14 @@ class SpotifyApiClient @Inject constructor(
         var response = executeSearchRequest(url, token)
         var responseBody = response.body?.string()
 
-        // 401: token may have expired — refresh once and retry.
+        // 401: web token expired — force-refresh once and retry.
         if (response.code == 401) {
-            Log.w(TAG, "searchTracks: 401, refreshing token and retrying once")
-            clientCredentialsToken = null
-            val refreshed = getClientCredentialsToken()
+            Log.w(TAG, "searchTracks: 401, refreshing web access token and retrying once")
+            val refreshed = tokenManager.forceRefreshSpotifyAccessToken()
                 ?: throw SpotifyApiException(
                     httpCode = 401,
                     url = url,
-                    message = "searchTracks: token refresh failed after 401",
+                    message = "searchTracks: web token refresh failed after 401",
                 )
             response = executeSearchRequest(url, refreshed)
             responseBody = response.body?.string()
