@@ -1,7 +1,7 @@
 # Spotify-URI Resolver for antra — Design
 
 **Date:** 2026-06-09
-**Status:** Approved (3-agent design consensus; pending user review)
+**Status:** Approved (3-agent design consensus + 2-round spec review; pending user review)
 **Author:** brainstorming session + opus design panel
 
 ## Problem
@@ -60,7 +60,9 @@ suspend fun searchTracks(query: String, limit: Int = 8, market: String = "US"): 
 
 Reuses `getClientCredentialsToken()` and its existing 401-refresh-once path. The
 `external_ids` truncation quirk documented on the playlist path does **not**
-apply to `/search`.
+apply to `/search`. **`SpotifyRateLimitException(retryAfter)` is a NEW exception
+type** (only `SpotifyApiException` exists today) — add it alongside the search
+method.
 
 ### 2. `SpotifySearchScorer` — the bulletproof rule (`:data:download`, `…matching`)
 Given our track + a candidate list, returns the single accepted candidate or
@@ -115,7 +117,7 @@ Persistence (schema below).
 ### Integration seam (two edits, one extension)
 ```kotlin
 // data/download/.../lossless/LosslessSource.kt
-// resolveUri returns the open.spotify.com/track/<id> URL directly (the resolver
+// resolveUrl returns the open.spotify.com/track/<id> URL directly (the resolver
 // already has the bare id; no copy()/re-parse round-trip through spotifyTrackUrl).
 suspend fun TrackQuery.resolvedSpotifyTrackUrl(resolver: SpotifyUriResolver): String? =
     spotifyTrackUrl() ?: trackId?.let { id -> resolver.resolveUrl(id, this) }
@@ -174,15 +176,26 @@ multi-artist memory) but use Spotify field filters for precision:
 | `durDeltaSec` | `abs(track.durationMs − cand.durationMs) / 1000` |
 | `versionConflict` | see "Version veto" below — computed over **raw lowercased** titles, NOT canonical |
 
-**Artist match (`artistOk`).** Reuse `MatchScorer`'s machinery, NOT
+**Artist match (`artistOk`).** Reuse `MatchScorer`'s artist machinery, NOT
 `TrackMatcher.canonicalArtist` (which sorts/joins the whole credit into one
 string and is wrong for per-element membership). Split the track's artist credit
-into parts via `MatchScorer.ARTIST_PART_SEPARATOR` (`,;&/／・|` + feat./ft./and).
-`artistOk` is true iff: the track's **primary** part matches some `cand.artists[]`
-element by `jaroWinkler ≥ 0.85` **or** `MatchScorer.containsRun` token-run
-containment; **and** every additional track artist part is likewise a member of
-the candidate's artist set. Each `cand.artists[]` element is compared per-element
-(not joined). This is order-insensitive and feat.-placement-insensitive.
+into parts via `MatchScorer.ARTIST_PART_SEPARATOR` (`,;&/／・|` + feat./ft./and)
+and strip each to a comparable form via its `artistParts` helper. `artistOk` is
+true iff: the track's **primary** part matches some `cand.artists[]` element by
+`jaroWinkler(strippedPart, strippedCandArtist) ≥ 0.85` **or** `containsRun`
+token-run containment (the latter is the CJK / multi-word escape, mirroring how
+`MatchScorer.artistAppearsInTitle` composes them); **and** every additional track
+artist part is likewise a member of the candidate's artist set. Each
+`cand.artists[]` element is compared per-element (not joined). Order-insensitive
+and feat.-placement-insensitive.
+
+> **Implementation note (visibility):** `MatchScorer.ARTIST_PART_SEPARATOR`,
+> `artistParts`, and `containsRun` are currently `private` — a separate
+> `SpotifySearchScorer` cannot call them. Promote these three to `internal`
+> (same `:data:download` module) **or** extract them into a shared
+> `ArtistMatching` object/helper that both `MatchScorer` and `SpotifySearchScorer`
+> use. Pick the extraction if it stays small; otherwise `internal` is acceptable.
+> Do NOT duplicate the logic.
 
 **Version veto (`versionConflict`).** **Critical:** compute over **raw lowercased
 titles**, exactly as `MatchScorer.computePenalty` does (`targetTitle.lowercase()`
@@ -341,7 +354,7 @@ artist gates catch labelled variants; the ≤4 s gate catches the unlabelled one
 
 ## Failure / rate-limit handling
 - **429:** `searchTracks` throws `SpotifyRateLimitException(retryAfter)`;
-  `resolveUri` catches → writes `TRANSIENT` (`expiresAtMs = now + max(15min, retryAfter)`,
+  `resolveUrl` catches → writes `TRANSIENT` (`expiresAtMs = now + max(15min, retryAfter)`,
   `attempts++`) → returns null → antra fails over to YouTube. Never `NO_MATCH`.
 - **Token 401:** reuse `SpotifyApiClient`'s existing null-cache-refresh-once-retry
   path; persistent failure → `TRANSIENT`.
@@ -354,10 +367,10 @@ artist gates catch labelled variants; the ≤4 s gate catches the unlabelled one
   with sync; gate `searchTracks` behind a lightweight `"spotify_search"`
   token-bucket (reuse `AggregatorRateLimiter`, e.g. 5 req/s). On-demand single-
   track resolution already drips, so this is a backstop, not a throttle.
-- **Token-refresh race:** confirm `getClientCredentialsToken()`'s refresh is
-  mutex-guarded; a resolver 401-refresh and a concurrent sync 401-refresh must
-  not double-acquire. If it is not already guarded, add a `Mutex` around the
-  refresh (one-line assertion to verify during implementation).
+- **Token-refresh race:** `getClientCredentialsToken()`'s token cache is a plain
+  field with no `Mutex` today. Add a `Mutex` around the refresh so a resolver
+  401-refresh and a concurrent sync 401-refresh don't double-acquire. (This is a
+  required small edit, not a "verify if needed".)
 - **`market` coverage cost (honest note):** `market = "US"` collapses Spotify's
   per-market duplicate track objects, but a recording present ONLY on a non-US
   catalog (some regional K-pop/J-pop/Latin releases) returns zero candidates →
