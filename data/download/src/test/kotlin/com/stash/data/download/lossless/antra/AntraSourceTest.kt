@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.TrackQuery
+import com.stash.data.download.lossless.spotifyresolve.SpotifyUriResolver
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -26,8 +27,9 @@ class AntraSourceTest {
     private val client: AntraClient = mockk()
     private val store: AntraCredentialStore = mockk()
     private val rateLimiter: AggregatorRateLimiter = mockk()
+    private val spotifyUriResolver: SpotifyUriResolver = mockk(relaxed = true)
 
-    private fun source() = AntraSource(client, store, rateLimiter, AntraJobGate())
+    private fun source() = AntraSource(client, store, rateLimiter, AntraJobGate(), spotifyUriResolver)
 
     private val query = TrackQuery(
         artist = "Curtis Mayfield",
