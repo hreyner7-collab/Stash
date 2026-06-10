@@ -58,4 +58,72 @@ class SpotifySearchScorerTest {
 
         assertThat(decision.accepted).isNull()
     }
+
+    @Test
+    fun `rejects live with big duration delta`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song (Live)", artists = listOf("Artist"), durMs = 240_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects remaster`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        // Parenthetical form so canonicalTitle strips it and titleSim ~1.0 —
+        // forcing the raw-title veto (not the title gate) to do the rejecting.
+        val c = cand(name = "Song (2011 Remaster)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects cover by different artist`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song", artists = listOf("Some Cover Band"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects sped up`() {
+        // Same duration so ONLY the raw-title veto (not the duration gate) rejects.
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song (Sped Up)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects karaoke`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song (Karaoke)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects instrumental`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song (Instrumental)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects different song with low title similarity`() {
+        val t = track(title = "Purple Haze", artist = "Jimi Hendrix", durMs = 200_000)
+        val c = cand(name = "Crosstown Traffic", artists = listOf("Jimi Hendrix"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
+
+    @Test
+    fun `rejects extended mix`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        // Parenthetical + same duration so the raw-title veto does the rejecting.
+        val c = cand(name = "Song (Extended Mix)", artists = listOf("Artist"), durMs = 200_000)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
+    }
 }
