@@ -89,11 +89,19 @@ class SpotifyUriResolver @Inject constructor(
     private val dao: SpotifyResolutionDao,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    /** Cache-first. Returns "spotify:track:<id>" on a confident match, else null
-     *  (no confident match OR transient failure — both fall back to YouTube). */
-    suspend fun resolveUri(trackId: Long, track: TrackQuery): String?
+    /** Cache-first. Returns the full "https://open.spotify.com/track/<id>" URL on
+     *  a confident match, else null (no confident match OR transient failure —
+     *  both fall back to YouTube). Built from the bare id the resolver holds, so
+     *  the caller needs no copy()/re-parse round-trip. Internally the side-table
+     *  stores the "spotify:track:<id>" URI form. */
+    suspend fun resolveUrl(trackId: Long, track: TrackQuery): String?
 }
 ```
+
+If `track.durationMs` is null/0 (`durKnown == false`), `resolveUrl` returns null
+**immediately without an API call and without writing the cache** — the gate
+can't run, so there is nothing to cache, and a future `duration_ms` backfill can
+flip the track to resolvable with no stale `NO_MATCH` row to clear.
 
 Owns **per-trackId in-flight coalescing** (mirrors `AntraStreamResolver`'s
 `HashMap<Long, CompletableDeferred>` + `Mutex`) so a foreground tap and the
@@ -107,19 +115,30 @@ Persistence (schema below).
 ### Integration seam (two edits, one extension)
 ```kotlin
 // data/download/.../lossless/LosslessSource.kt
+// resolveUri returns the open.spotify.com/track/<id> URL directly (the resolver
+// already has the bare id; no copy()/re-parse round-trip through spotifyTrackUrl).
 suspend fun TrackQuery.resolvedSpotifyTrackUrl(resolver: SpotifyUriResolver): String? =
-    spotifyTrackUrl() ?: trackId?.let { id ->
-        resolver.resolveUri(id, this)?.let { copy(spotifyUri = it).spotifyTrackUrl() }
-    }
+    spotifyTrackUrl() ?: trackId?.let { id -> resolver.resolveUrl(id, this) }
 ```
 - Add `val trackId: Long? = null` to `TrackQuery`. A null `trackId` simply skips
   resolution (degrades to today's behavior) — a missed wire-up is **safe, never
   wrong**.
-- `AntraSource.resolve()` (download): `query.resolvedSpotifyTrackUrl(resolver) ?: return null`.
-- `AntraStreamResolver.resolve(track)` (stream, `:core:media`, already depends on
-  `:data:download`): same, with `track.id` threaded into the `TrackQuery`.
-- Both call it **after** the cheap `isEnabled()`/`isConnected()` checks, so the
-  search only runs when antra is genuinely about to do a 60–120 s job.
+- `SpotifyUriResolver.resolveUrl(trackId, track)` returns the full
+  `https://open.spotify.com/track/<id>` URL on a confident match (it builds it
+  from the bare id it already holds), else null.
+- **`AntraSource.resolve()` (download):** `query.resolvedSpotifyTrackUrl(resolver) ?: return null`.
+  The download-side `TrackQuery` (built in `DownloadManager.kt:398`) **already
+  carries `durationMs`, `album`, `isrc`** — only add `trackId = track.id` there.
+- **`AntraStreamResolver.resolve(track)` (stream, `:core:media`, already depends on
+  `:data:download`):** the current stream-side `TrackQuery` (`AntraStreamResolver.kt:70`)
+  passes ONLY `artist`, `title`, `spotifyUri`. It **must be extended to thread
+  `trackId = track.id` AND `durationMs = track.durationMs`** (and `album =
+  track.album` for the album-qualified query). Without `durationMs`, the acceptance
+  rule's `durKnown` gate rejects EVERY streamed track → resolution would no-op on
+  the stream path. This is a required edit, not optional.
+- Both call the extension **after** the cheap `isEnabled()`/`isConnected()`
+  checks, so the search only runs when antra is genuinely about to do a 60–120 s
+  job.
 
 ## Resolution algorithm
 
@@ -149,16 +168,57 @@ multi-artist memory) but use Spotify field filters for precision:
 ### Signals (per candidate, against the original track)
 | Signal | Definition |
 |---|---|
-| `titleSim` | `jaroWinkler(canonicalTitle(track.title), canonicalTitle(cand.name))` |
-| `artistOk` | the **primary** artist matches some `cand.artists[]` at `jaroWinkler(canonicalArtist) ≥ 0.85` or canonical containment, **and** every additional track artist is a ≥0.85 set-member of `cand.artists` (order-insensitive, feat.-placement-insensitive) |
+| `titleSim` | `jaroWinkler(canonicalTitle(track.title), canonicalTitle(cand.name))` (via `TrackMatcher`; `canonicalTitle` strips parentheticals + feat + lowercases — used **only** for similarity) |
+| `artistOk` | see "Artist match" below — part-wise, order-insensitive, reuses `MatchScorer`'s `artistParts` + token-run containment |
 | `durKnown` | `track.durationMs != null && track.durationMs > 0 && cand.durationMs > 0` |
 | `durDeltaSec` | `abs(track.durationMs − cand.durationMs) / 1000` |
-| `versionConflict` | true iff, for any token in the disqualifying set, its presence in `canonicalTitle(track.title)` **differs** from its presence in `canonicalTitle(cand.name)` (symmetric: must be in **both** or **neither**) |
+| `versionConflict` | see "Version veto" below — computed over **raw lowercased** titles, NOT canonical |
 
-Disqualifying token set: `{live, remaster, remastered, acoustic, instrumental,
-karaoke, sped up, slowed, nightcore, cover, remix, rework, edit, radio edit,
-demo, mono, re-recorded, taylor's version, commentary}` (reuse
-`MatchScorer.computePenalty`'s keyword set).
+**Artist match (`artistOk`).** Reuse `MatchScorer`'s machinery, NOT
+`TrackMatcher.canonicalArtist` (which sorts/joins the whole credit into one
+string and is wrong for per-element membership). Split the track's artist credit
+into parts via `MatchScorer.ARTIST_PART_SEPARATOR` (`,;&/／・|` + feat./ft./and).
+`artistOk` is true iff: the track's **primary** part matches some `cand.artists[]`
+element by `jaroWinkler ≥ 0.85` **or** `MatchScorer.containsRun` token-run
+containment; **and** every additional track artist part is likewise a member of
+the candidate's artist set. Each `cand.artists[]` element is compared per-element
+(not joined). This is order-insensitive and feat.-placement-insensitive.
+
+**Version veto (`versionConflict`).** **Critical:** compute over **raw lowercased
+titles**, exactly as `MatchScorer.computePenalty` does (`targetTitle.lowercase()`
+/ `candidateTitle.lowercase()`) — **NOT** `canonicalTitle`. `canonicalTitle`
+strips all parenthetical/bracketed content (`PARENTHETICAL_REGEX`) *and* feat
+before the scan, which would delete every `(Live)`/`(Remaster)`/`(Acoustic)`
+token and make this veto a no-op (this was the original spec's load-bearing bug —
+see "Why raw titles" below). `versionConflict` is true iff, for any token in the
+disqualifying set, its presence in `track.title.lowercase()` **differs** from its
+presence in `cand.name.lowercase()` (symmetric: must be in **both** or
+**neither**). Tokens are matched on **word boundaries** (`\b…\b` / token split),
+so "live" does not match inside "Oliver", "edit" inside "editor", "demo" inside
+"Demolition".
+
+**Disqualifying token set** — defined explicitly and self-contained in
+`SpotifySearchScorer` (do **not** delegate to `MatchScorer.computePenalty`, whose
+set is tuned for a different soft-penalty purpose and omits several traps).
+Reconciled set:
+`{ live, concert, unplugged, session, acoustic, instrumental, karaoke,
+remaster, remastered, sped up, spedup, slowed, nightcore, cover, remix, rework,
+edit, radio edit, extended, demo, mono, re-recorded, rerecorded,
+taylor's version, commentary, mtv }`.
+Multi-word tokens ("sped up", "radio edit", "taylor's version") are matched as
+contiguous word sequences. This set deliberately ADDS `extended`/`unplugged`/
+`session`/`concert`/`mtv` (real wrong-version traps absent from the original
+list) and keeps `remaster`/`demo`/`mono`/`taylor's version` (absent from
+`computePenalty`).
+
+**Why raw titles (load-bearing).** Because `canonicalTitle` strips parentheticals,
+"Song (Live)" and "Song" both canonicalize to "song" → `titleSim = 1.0`. So
+`titleSim` alone CANNOT distinguish a labelled variant from the original; the
+version veto (over raw titles) is what rejects it. If the veto ran over canonical
+titles it would never fire, and a labelled live/remaster/acoustic cut that landed
+within ±4 s (remasters often preserve runtime) would be **accepted as the
+original** — violating "never wrong." The raw-title version check is therefore
+not optional polish; it closes that false-accept window.
 
 ### Acceptance rule (the bulletproof core)
 A candidate is **accepted iff ALL** hold:
@@ -243,9 +303,20 @@ DAO: `get(trackId): SpotifyResolutionEntity?`, `@Upsert upsert(e)`, and a
   cached as `NO_MATCH`, or one rate-limit burst permanently disables antra for
   thousands of tracks.
 
-`resolveUri` read path: `get(trackId)` → `MATCHED` ⇒ return URI; `NO_MATCH`/
-`TRANSIENT` and `now < expiresAtMs` ⇒ return null; else (miss/expired) ⇒ resolve
-and upsert.
+`resolveUrl` read path: if `durKnown == false` ⇒ return null (no search, no
+cache, see above). Else `get(trackId)` → `MATCHED` ⇒ return the URL form of
+`spotifyUri`; `NO_MATCH`/`TRANSIENT` and `now < expiresAtMs` ⇒ return null
+(respect the negative cache, no API call); else (miss or expired) ⇒ resolve and
+upsert.
+
+**TRANSIENT → NO_MATCH promotion happens on write during the next resolve**, not
+passively: when an expired `TRANSIENT` row is re-resolved and the search *again*
+fails transiently, increment `attempts`; once `attempts > 5`, write the new row
+as `NO_MATCH` (30-day TTL) instead of `TRANSIENT`. A genuine success or empty
+result at any point supersedes the row (`MATCHED` or `NO_MATCH`) and the
+`attempts` counter is irrelevant thereafter. The audit column `durDeltaSec` is
+stored in **whole seconds** (the gate unit); if finer audit precision is wanted
+later, widen to a `durDeltaMs` column — not needed for the gate.
 
 Migration 31→32: `CREATE TABLE spotify_resolution (...)`. No data backfill.
 
@@ -263,7 +334,7 @@ Migration 31→32: `CREATE TABLE spotify_resolution (...)`. No data backfill.
 | Instrumental vs vocal | `versionConflict` if labelled; else duration usually differs |
 | Single vs album version | `durDeltaSec ≤ 4` (edits differ in length); identical length ⇒ effectively same master, accept |
 | Regional duplicates / two masters | `market=US` collapses most; the ambiguity-abstain rule rejects genuine ties |
-| Our `duration_ms` unknown | `durKnown == false` ⇒ reject (write `NO_MATCH`) |
+| Our `duration_ms` unknown | `durKnown == false` ⇒ return null with NO search and NO cache write (a duration backfill can flip it later; not a `NO_MATCH`) |
 
 The recurring theme: **duration is the trap-catcher of last resort.** Title/
 artist gates catch labelled variants; the ≤4 s gate catches the unlabelled ones.
@@ -283,6 +354,17 @@ artist gates catch labelled variants; the ≤4 s gate catches the unlabelled one
   with sync; gate `searchTracks` behind a lightweight `"spotify_search"`
   token-bucket (reuse `AggregatorRateLimiter`, e.g. 5 req/s). On-demand single-
   track resolution already drips, so this is a backstop, not a throttle.
+- **Token-refresh race:** confirm `getClientCredentialsToken()`'s refresh is
+  mutex-guarded; a resolver 401-refresh and a concurrent sync 401-refresh must
+  not double-acquire. If it is not already guarded, add a `Mutex` around the
+  refresh (one-line assertion to verify during implementation).
+- **`market` coverage cost (honest note):** `market = "US"` collapses Spotify's
+  per-market duplicate track objects, but a recording present ONLY on a non-US
+  catalog (some regional K-pop/J-pop/Latin releases) returns zero candidates →
+  `NO_MATCH` for 30 days. For a heavily non-Western library this is a real recall
+  hole, accepted under "a missed match is fine." A future enhancement reads the
+  market from the user's locale (app-only client_credentials tokens cannot use
+  `market=from_token`, so locale-derived is the realistic path).
 - Resolution **does not** spend antra quota (`singles_left`); only an accepted
   match proceeds to enqueue a job, exactly as today.
 
