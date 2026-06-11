@@ -69,3 +69,7 @@ node_modules/
 
 # Superpowers visual-companion server artifacts (per-session local state)
 .superpowers/
+
+# Claude Code per-machine local state (the shared .claude/ config stays tracked)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
