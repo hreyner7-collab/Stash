@@ -145,6 +145,21 @@ class SpotifyUriResolver @Inject constructor(
         }
 
         val decision = scorer.pick(track, candidates)
+        // TEMP-DIAG: per-candidate dump so NO_MATCH causes are visible on-device
+        // (remove once the match-rate tuning session is done).
+        Log.d(
+            TAG,
+            "score '${track.title}' / '${track.artist}' dur=${track.durationMs}ms " +
+                "-> ${decision.reason}" +
+                (decision.accepted?.let { " id=${it.id}" } ?: ""),
+        )
+        candidates.forEachIndexed { i, c ->
+            Log.d(
+                TAG,
+                "  cand[$i] '${c.name}' / ${c.artists} / album='${c.albumName}' " +
+                    "dur=${c.durationMs}ms id=${c.id}",
+            )
+        }
         val accepted = decision.accepted
         return if (accepted != null) {
             cacheMatched(trackId, track, accepted)

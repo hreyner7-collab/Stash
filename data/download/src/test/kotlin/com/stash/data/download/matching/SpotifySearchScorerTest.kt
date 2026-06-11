@@ -162,16 +162,64 @@ class SpotifySearchScorerTest {
     }
 
     @Test
-    fun `abstains when two candidates are ambiguous`() {
-        // Two regional masters: identical title+artist, durations within 2s of
-        // each other and both within tolerance — genuinely ambiguous.
+    fun `abstains when near-tied passers are different recordings`() {
+        // Same title, near-identical duration, but DIFFERENT artist line-ups —
+        // could be an alt take / collab version. Genuinely ambiguous.
         val t = track(title = "Song", artist = "Artist", durMs = 200_000)
         val a = cand(name = "Song", artists = listOf("Artist"), durMs = 200_000, id = "a")
-        val b = cand(name = "Song", artists = listOf("Artist"), durMs = 201_000, id = "b")
+        val b = cand(name = "Song", artists = listOf("Artist", "Guest"), durMs = 201_000, id = "b")
 
         val decision = scorer.pick(t, listOf(a, b))
 
         assertThat(decision.accepted).isNull()
         assertThat(decision.reason).isEqualTo("ambiguous")
+    }
+
+    @Test
+    fun `accepts identical recording duplicated across compilations`() {
+        // Device-confirmed 2026-06-10 ("Stairway to Heaven - Remaster" on
+        // Led Zeppelin IV Deluxe AND Remaster editions): the same master
+        // licensed onto multiple albums is ONE recording — duplicates must
+        // not trigger the ambiguity abstain.
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val a = cand(name = "Song", artists = listOf("Artist"), durMs = 200_000, id = "a")
+        val b = cand(name = "Song", artists = listOf("Artist"), durMs = 200_000, id = "b")
+
+        val decision = scorer.pick(t, listOf(a, b))
+
+        assertThat(decision.accepted).isNotNull()
+        assertThat(decision.reason).isEqualTo("accepted")
+    }
+
+    @Test
+    fun `accepts same master with sub-second drift across editions`() {
+        // Device-confirmed ("That's All I Ask" x3 albums, 80ms apart): tiny
+        // edition-to-edition duration drift is still the same recording.
+        val t = track(title = "Song", artist = "Artist", durMs = 149_000)
+        val a = cand(name = "Song", artists = listOf("Artist"), durMs = 147_906, id = "a")
+        val b = cand(name = "Song", artists = listOf("Artist"), durMs = 147_986, id = "b")
+        val c = cand(name = "Song", artists = listOf("Artist"), durMs = 147_906, id = "c")
+
+        val decision = scorer.pick(t, listOf(a, b, c))
+
+        assertThat(decision.accepted).isNotNull()
+    }
+
+    @Test
+    fun `accepts video-padded duration delta up to 10s`() {
+        // Device-confirmed ("Hurricane (Official Video)" 190s vs album 181.2s):
+        // music-video rips pad intro/outro around the same audio.
+        val t = track(title = "Song (Official Video)", artist = "Artist", durMs = 190_000)
+        val c = cand(name = "Song", artists = listOf("Artist"), durMs = 181_153)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isEqualTo(c)
+    }
+
+    @Test
+    fun `rejects duration delta over 10s`() {
+        val t = track(title = "Song", artist = "Artist", durMs = 200_000)
+        val c = cand(name = "Song", artists = listOf("Artist"), durMs = 188_999)
+
+        assertThat(scorer.pick(t, listOf(c)).accepted).isNull()
     }
 }

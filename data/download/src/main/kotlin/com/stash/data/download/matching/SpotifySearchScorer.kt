@@ -29,18 +29,39 @@ class SpotifySearchScorer @Inject constructor(private val matcher: TrackMatcher)
         ) ?: return Decision(null, "no candidate passed gates")
 
         // Abstain when another passer is genuinely indistinguishable from the
-        // best — within AMBIGUOUS_TITLE_SIM and AMBIGUOUS_DUR_SEC (e.g. two
-        // regional masters). Accepting either would risk the wrong recording.
+        // best — within AMBIGUOUS_TITLE_SIM and AMBIGUOUS_DUR_SEC — UNLESS it
+        // is the SAME RECORDING (identical canonical title + artist line-up,
+        // duration within SAME_RECORDING_DUR_SEC). Popular tracks appear on
+        // the album plus N compilations as literal duplicates of one master
+        // (device-confirmed 2026-06-10: "Stairway to Heaven - Remaster" on
+        // two IV editions, "That's All I Ask" on three albums 80ms apart);
+        // accepting any duplicate is risk-free, so duplicates never abstain.
         val bestDur = durDeltaSec(track, best)
         val bestSim = titleSim(track, best)
         val ambiguous = passers.any { other ->
             other !== best &&
                 abs(titleSim(track, other) - bestSim) <= AMBIGUOUS_TITLE_SIM &&
-                abs(durDeltaSec(track, other) - bestDur) <= AMBIGUOUS_DUR_SEC
+                abs(durDeltaSec(track, other) - bestDur) <= AMBIGUOUS_DUR_SEC &&
+                !sameRecording(best, other)
         }
         if (ambiguous) return Decision(null, "ambiguous")
 
         return Decision(best, "accepted")
+    }
+
+    /**
+     * Two candidates are the same recording when their canonical titles match
+     * exactly, their durations are within [SAME_RECORDING_DUR_SEC], and their
+     * artist line-ups are identical as canonical SETS (set equality — NOT the
+     * per-part gate used against our track, so "Artist" vs "Artist Tribute"
+     * or an added feat. credit stays distinct and still abstains).
+     */
+    private fun sameRecording(a: SpotifyTrackCandidate, b: SpotifyTrackCandidate): Boolean {
+        if (matcher.canonicalTitle(a.name) != matcher.canonicalTitle(b.name)) return false
+        if (abs(a.durationMs - b.durationMs) / 1000 > SAME_RECORDING_DUR_SEC) return false
+        val aArtists = a.artists.map { matcher.canonicalArtist(it) }.toSet()
+        val bArtists = b.artists.map { matcher.canonicalArtist(it) }.toSet()
+        return aArtists.isNotEmpty() && aArtists == bArtists
     }
 
     private fun passes(track: TrackQuery, cand: SpotifyTrackCandidate): Boolean {
@@ -109,13 +130,25 @@ class SpotifySearchScorer @Inject constructor(private val matcher: TrackMatcher)
         abs(track.durationMs!! - cand.durationMs) / 1000
 
     private companion object {
-        const val DUR_TOLERANCE_SEC = 4L
+        /**
+         * 10s (was 4s): YouTube-sourced durations carry video padding —
+         * official-video rips run several seconds longer than the album audio
+         * (device-confirmed 2026-06-10: "Hurricane" video 190s vs album 181.2s,
+         * "Venus" rip 182s vs canonical 187.5s). Wrong-version protection
+         * stays with the title gate, artist gate, version-token veto, and the
+         * ambiguity abstain.
+         */
+        const val DUR_TOLERANCE_SEC = 10L
         const val TITLE_SIM_THRESHOLD = 0.92
         const val ARTIST_SIM_THRESHOLD = 0.85
 
         /** Two passers within these deltas of the best are treated as ambiguous. */
         const val AMBIGUOUS_TITLE_SIM = 0.02
         const val AMBIGUOUS_DUR_SEC = 2L
+
+        /** Duration window within which two same-title/same-artist candidates
+         * count as one recording (edition-to-edition drift is sub-second). */
+        const val SAME_RECORDING_DUR_SEC = 2L
 
         /**
          * Disqualifying version markers. If any of these is present (as a whole
