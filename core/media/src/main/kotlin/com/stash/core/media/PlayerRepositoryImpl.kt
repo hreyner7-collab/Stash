@@ -197,9 +197,10 @@ class PlayerRepositoryImpl @Inject constructor(
         }
     }
 
-    /** Cached [MediaController] instance; null until [ensureController] succeeds. */
+    /** Cached [MediaController] instance; null until [ensureController] succeeds.
+     * Internal as a test seam: gate/queue tests inject a mock controller here. */
     @Volatile
-    private var controllerDeferred: MediaController? = null
+    internal var controllerDeferred: MediaController? = null
 
     /**
      * v0.9.14: True while a "Shuffle Library" queue is active. Set by
@@ -218,12 +219,27 @@ class PlayerRepositoryImpl @Inject constructor(
     private var librarySnapshot: List<Track> = emptyList()
 
     /**
-     * Snapshot of the [Track] list most recently passed to [setQueue]. Drives
-     * the next-track prefetch watcher — we look up the next-to-play Track by
-     * index here rather than relying on the controller's MediaItems, so
-     * tracks that were silently dropped by background fill (iOS-miss
-     * stragglers the fast-lane allowYtDlp=false fill couldn't resolve) can
-     * still be discovered for the eager prefetch.
+     * The LOGICAL playback queue — the user-intended track order, independent
+     * of which entries currently have a resolved MediaItem in the controller
+     * timeline (the fast-lane background fill silently drops what it can't
+     * resolve; antra is excluded from fill entirely).
+     *
+     * Three consumers:
+     *  1. The next-track prefetch watcher, which looks up the next-to-play
+     *     Track here so dropped stragglers are still discovered and resolved
+     *     just-in-time.
+     *  2. The queue display ([updateState] via [QueueDisplay.compute]) — the
+     *     sheet shows THIS list, not the sparse timeline.
+     *  3. The queue ops ([skipToQueueIndex]/[removeFromQueue]/[moveInQueue]),
+     *     whose incoming indices refer to this list when the display is
+     *     logical (see [logicalDisplayActive]).
+     *
+     * Every queue mutation path must keep it in sync: [setQueue] (replace),
+     * [shuffleLibrary] (replace), [growLibraryShuffle] (append), [addNext]
+     * (insert), [addToQueue] (append), [evictTrackFromQueue] (remove),
+     * [playTrack]/[playFromStreamInner] (single/clear). A missed path
+     * degrades gracefully: the display falls back to the timeline whenever
+     * the playing track isn't in this list.
      */
     @Volatile
     private var currentQueueTracks: List<Track> = emptyList()
@@ -350,21 +366,25 @@ class PlayerRepositoryImpl @Inject constructor(
         val myEpoch = ++setQueueEpoch
         val tappedTrack = tracks[safeStart]
 
-        // Optimistic loading state: show the tapped track + spinner
-        // immediately. Resolving a YouTube-fallback track via yt-dlp takes
-        // ~11 s, and no MediaItem is set yet, so without this the UI would
-        // sit on the previous track with no feedback — looking frozen and
-        // tempting the user to re-tap (which supersedes and cancels this
-        // resolve). Overwritten by updateState once playback starts; cleared
-        // explicitly on the hard-failure path below.
-        _playerState.value = _playerState.value.copy(
-            currentTrack = tappedTrack,
-            isPlaying = false,
-            isBuffering = true,
-        )
-        // Keep the spinner alive across updateState() calls for the whole
-        // resolve — see [tapResolveEpoch].
-        tapResolveEpoch = myEpoch
+        // Optimistic loading state — ONLY when nothing is loaded. With an
+        // idle player the mini player is hidden, so showing the tapped track
+        // + spinner is the only feedback that the tap registered (a yt-dlp
+        // resolve takes ~11 s, antra 60-120 s). But when a track IS loaded,
+        // swapping the display to the tapped track turns the play/pause
+        // button into a disabled spinner for the whole resolve — hijacking
+        // control of still-playing audio. In that case the display stays on
+        // the current track until the resolved track actually starts
+        // (setMediaItems below).
+        if (controller.currentMediaItem == null) {
+            _playerState.value = _playerState.value.copy(
+                currentTrack = tappedTrack,
+                isPlaying = false,
+                isBuffering = true,
+            )
+            // Keep the spinner alive across updateState() calls for the whole
+            // resolve — see [tapResolveEpoch].
+            tapResolveEpoch = myEpoch
+        }
 
         // Resolve ONLY the tapped track. Earlier revisions probed forward
         // through the next few entries looking for *anything* playable,
@@ -761,6 +781,11 @@ class PlayerRepositoryImpl @Inject constructor(
         val shuffled = all.shuffled()
         librarySnapshot = shuffled
         libraryShuffleActive = true
+        // Keep the logical queue in lockstep: all-downloaded tracks resolve
+        // 1:1 into the timeline, but a stale logical list from an earlier
+        // setQueue would otherwise hijack the queue display whenever the
+        // playing track happened to be in it.
+        currentQueueTracks = shuffled
 
         val mediaItems = shuffled.map { it.toMediaItem() }
         controller.setMediaItems(mediaItems, /* startIndex = */ 0, /* startPositionMs = */ 0L)
@@ -806,6 +831,7 @@ class PlayerRepositoryImpl @Inject constructor(
             if (toAppend.isEmpty()) return
 
             controller.addMediaItems(toAppend.map { it.toMediaItem() })
+            currentQueueTracks = currentQueueTracks + toAppend
         }
     }
 
@@ -818,6 +844,18 @@ class PlayerRepositoryImpl @Inject constructor(
         val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
         val insertIndex = controller.currentMediaItemIndex + 1
         controller.addMediaItem(insertIndex, mediaItem)
+        // Mirror into the logical queue right after the playing track's
+        // logical position (falling back to append) so the queue sheet
+        // shows the Play-Next insert where it will actually play.
+        val currentId = controller.currentMediaItem?.mediaMetadata?.extras
+            ?.getLong(EXTRA_TRACK_ID, -1L) ?: -1L
+        val logicalPos = currentQueueTracks.indexOfFirst { it.id == currentId }
+        currentQueueTracks = when {
+            wasEmpty -> listOf(track)
+            logicalPos >= 0 -> currentQueueTracks.toMutableList()
+                .apply { add(logicalPos + 1, track) }
+            else -> currentQueueTracks + track
+        }
         // If the queue was empty, the user tapped "Play next" with nothing
         // playing — they expect the song to actually start, not just sit
         // silently in a queue they can't see. Prepare and play.
@@ -835,6 +873,7 @@ class PlayerRepositoryImpl @Inject constructor(
         val semaphore = Semaphore(1)
         val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
         controller.addMediaItem(mediaItem)
+        currentQueueTracks = if (wasEmpty) listOf(track) else currentQueueTracks + track
         if (wasEmpty) {
             controller.prepare()
             controller.play()
@@ -857,6 +896,10 @@ class PlayerRepositoryImpl @Inject constructor(
             }.awaitAll()
         }.filterNotNull()
         Log.d(TAG, "addToQueue(batch) resolved ${resolved.size}/${tracks.size} tracks")
+        // Append ALL requested tracks (not just the resolved subset) to the
+        // logical queue — unresolved ones are recovered just-in-time by
+        // prefetchNextTrack / skipToQueueIndex, and the sheet should show them.
+        currentQueueTracks = if (wasEmpty) tracks else currentQueueTracks + tracks
         if (resolved.isEmpty()) return
         controller.addMediaItems(resolved)
         Log.d(TAG, "addToQueue(batch) after addMediaItems: controller.mediaItemCount=${controller.mediaItemCount}")
@@ -882,8 +925,47 @@ class PlayerRepositoryImpl @Inject constructor(
         )
     }
 
+    /**
+     * `true` when the queue the UI displays is the logical queue (see
+     * [QueueDisplay.compute]) — in which case the indices arriving from the
+     * queue sheet are LOGICAL indices and must be translated to timeline
+     * slots by track id. Must mirror the predicate inside [updateState]
+     * exactly, or the two index spaces silently diverge.
+     */
+    private fun logicalDisplayActive(controller: MediaController): Boolean {
+        val id = controller.currentMediaItem?.mediaMetadata?.extras
+            ?.getLong(EXTRA_TRACK_ID, -1L) ?: -1L
+        return id > 0L && currentQueueTracks.any { it.id == id }
+    }
+
+    /** Timeline slot holding [trackId], or -1 when the track was dropped by
+     * the fast-lane background fill and has no MediaItem yet. */
+    private fun timelineIndexOfTrackId(controller: MediaController, trackId: Long): Int {
+        for (i in 0 until controller.mediaItemCount) {
+            val item = controller.getMediaItemAt(i)
+            val id = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID)
+                ?: item.mediaId.toLongOrNull()
+            if (id == trackId) return i
+        }
+        return -1
+    }
+
     override suspend fun removeFromQueue(index: Int) {
         val controller = ensureController() ?: return
+        if (logicalDisplayActive(controller)) {
+            val logical = currentQueueTracks
+            val target = logical.getOrNull(index) ?: return
+            currentQueueTracks = logical.filterIndexed { i, _ -> i != index }
+            val timelineIdx = timelineIndexOfTrackId(controller, target.id)
+            if (timelineIdx >= 0) {
+                controller.removeMediaItem(timelineIdx)
+            } else {
+                // Track had no timeline slot — no controller event will fire,
+                // so push the new logical queue to the UI ourselves.
+                updateState(controller)
+            }
+            return
+        }
         if (index in 0 until controller.mediaItemCount) {
             controller.removeMediaItem(index)
         }
@@ -891,6 +973,38 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun moveInQueue(from: Int, to: Int) {
         val controller = ensureController() ?: return
+        if (logicalDisplayActive(controller)) {
+            val logical = currentQueueTracks
+            if (from !in logical.indices || to !in logical.indices || from == to) return
+            val mutable = logical.toMutableList()
+            val moved = mutable.removeAt(from)
+            mutable.add(to, moved)
+            currentQueueTracks = mutable
+
+            val timelineFrom = timelineIndexOfTrackId(controller, moved.id)
+            if (timelineFrom >= 0) {
+                val timelineIdsWithoutMoved = buildList {
+                    for (i in 0 until controller.mediaItemCount) {
+                        if (i == timelineFrom) continue
+                        val item = controller.getMediaItemAt(i)
+                        add(
+                            item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID)
+                                ?: item.mediaId.toLongOrNull() ?: -1L
+                        )
+                    }
+                }
+                val timelineTo =
+                    QueueDisplay.moveTimelineTarget(mutable, to, timelineIdsWithoutMoved)
+                if (timelineFrom != timelineTo) {
+                    controller.moveMediaItem(timelineFrom, timelineTo)
+                } else {
+                    updateState(controller)
+                }
+            } else {
+                updateState(controller)
+            }
+            return
+        }
         val count = controller.mediaItemCount
         if (from in 0 until count && to in 0 until count && from != to) {
             controller.moveMediaItem(from, to)
@@ -899,6 +1013,21 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun skipToQueueIndex(index: Int) {
         val controller = ensureController() ?: return
+        if (logicalDisplayActive(controller)) {
+            val target = currentQueueTracks.getOrNull(index) ?: return
+            val timelineIdx = timelineIndexOfTrackId(controller, target.id)
+            if (timelineIdx >= 0) {
+                controller.seekToDefaultPosition(timelineIdx)
+            } else {
+                // The tapped queue row was dropped from the timeline by the
+                // fast-lane fill (unresolved stream track). Route through
+                // setQueue so the full resolve machinery — slow yt-dlp lane,
+                // antra, the supersede race guard, the failure toast — does
+                // its job. Same logical queue, new start anchor.
+                setQueue(currentQueueTracks, index)
+            }
+            return
+        }
         if (index in 0 until controller.mediaItemCount) {
             controller.seekToDefaultPosition(index)
         }
@@ -918,14 +1047,20 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     private fun evictTrackFromQueue(deletedTrackId: Long) {
         val controller = controllerDeferred ?: return
+        currentQueueTracks = currentQueueTracks.filterNot { it.id == deletedTrackId }
+        var removedFromTimeline = false
         for (i in controller.mediaItemCount - 1 downTo 0) {
             val item = controller.getMediaItemAt(i)
             val queuedId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID)
                 ?: item.mediaId.toLongOrNull()
             if (queuedId == deletedTrackId) {
                 controller.removeMediaItem(i)
+                removedFromTimeline = true
             }
         }
+        // A logical-only eviction fires no controller event — refresh the
+        // published queue ourselves so the sheet drops the deleted track.
+        if (!removedFromTimeline) updateState(controller)
     }
 
     // ---- Streaming routing ----
@@ -934,6 +1069,10 @@ class PlayerRepositoryImpl @Inject constructor(
         val entity = trackDao.getById(track.id) ?: track.toEntity()
         val result = buildMediaItemForTrack(entity)
         if (result is StreamRoutingResult.Item) {
+            // Single-track play replaces the whole queue — the logical queue
+            // must follow, or a stale playlist list would keep hijacking the
+            // queue display whenever this track happens to be in it.
+            currentQueueTracks = listOf(track)
             playSingleMediaItem(result.mediaItem)
         }
         return result
@@ -1007,6 +1146,9 @@ class PlayerRepositoryImpl @Inject constructor(
         )
         val result = buildMediaItemForTrack(transient)
         if (result is StreamRoutingResult.Item) {
+            // Single-item replacement: drop the stale logical queue so the
+            // queue display falls back to the (one-item) timeline.
+            currentQueueTracks = emptyList()
             playSingleMediaItem(result.mediaItem)
         }
         return result
@@ -1440,11 +1582,27 @@ class PlayerRepositoryImpl @Inject constructor(
     private fun updateState(controller: MediaController) {
         val currentItem = controller.currentMediaItem
         val track = currentItem?.toTrack()
-        val queue = buildList {
+        val timelineQueue = buildList {
             for (i in 0 until controller.mediaItemCount) {
                 add(controller.getMediaItemAt(i).toTrack())
             }
         }
+
+        // Display the LOGICAL queue (the Track list handed to setQueue), not
+        // the raw timeline. The fast-lane background fill drops stream tracks
+        // it can't resolve (antra is excluded from fill entirely), so during
+        // antra streaming the timeline is a sparse downloaded-only subset
+        // while playback follows the logical queue via prefetch insertion —
+        // the timeline made "Up Next" lie. Falls back to the timeline when
+        // the current item isn't in the logical queue (single-track play,
+        // restored session). See [QueueDisplay].
+        val currentTrackId = currentItem?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L)
+        val display = QueueDisplay.compute(
+            timelineQueue = timelineQueue,
+            timelineIndex = controller.currentMediaItemIndex,
+            logicalQueue = currentQueueTracks,
+            currentTrackId = currentTrackId,
+        )
 
         // Streaming detection: a track is "streaming" when it came from a
         // stream resolver, not purely when its URI is http(s). Kennyy/squid/
@@ -1465,8 +1623,8 @@ class PlayerRepositoryImpl @Inject constructor(
             durationMs = controller.duration.coerceAtLeast(0),
             isShuffleEnabled = controller.shuffleModeEnabled,
             repeatMode = controller.repeatMode.toRepeatMode(),
-            queue = queue,
-            currentIndex = controller.currentMediaItemIndex,
+            queue = display.queue,
+            currentIndex = display.currentIndex,
             isStreaming = isStreaming,
             // STATE_BUFFERING covers normal buffering AND the in-data-source
             // 403→yt-dlp re-resolve (RefreshingDataSource blocks the loader
