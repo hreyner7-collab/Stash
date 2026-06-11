@@ -583,49 +583,59 @@ class SpotifyApiClient @Inject constructor(
 
     /**
      * Parse a `searchDesktop` GraphQL response into [SpotifyTrackCandidate]s.
-     * Path: data.searchV2.tracksV2.items[].item.data → { uri, name,
-     * artists.items[].profile.name, duration.totalMilliseconds }. Null-safe at
-     * every hop so a schema tweak yields an empty list, never a crash.
+     *
+     * The response shape depends on which persisted-query hash is live
+     * (device-confirmed 2026-06-10), so both variants are handled:
+     *  - `data.search.tracks.items[].track`           (current hash)
+     *  - `data.searchV2.tracksV2.items[].item.data`   (newer web-player hash)
+     * Track fields: { uri, name, artists.items[].profile.name,
+     * duration.totalMilliseconds, album|albumOfTrack.name, contentRating.label }.
+     * Null-safe at every hop so a schema tweak yields an empty list, never a crash.
      */
     private fun parseSearchDesktop(root: JsonObject): List<SpotifyTrackCandidate> {
         return try {
-            val searchV2 = root["data"]?.jsonObject?.get("searchV2")?.jsonObject
-            // TEMP-DIAG: log the searchV2 child keys so we can confirm the
-            // tracksV2 path on-device (remove once verified).
-            Log.d(TAG, "parseSearchDesktop: searchV2 keys=${searchV2?.keys}")
-            val items = searchV2
-                ?.get("tracksV2")?.jsonObject
+            val data = root["data"]?.jsonObject
+            val items = data?.get("search")?.jsonObject
+                ?.get("tracks")?.jsonObject
                 ?.get("items")?.jsonArray
-                ?: return emptyList()
-            Log.d(TAG, "parseSearchDesktop: tracksV2.items count=${items.size}")
+                ?: data?.get("searchV2")?.jsonObject
+                    ?.get("tracksV2")?.jsonObject
+                    ?.get("items")?.jsonArray
+                ?: run {
+                    Log.w(TAG, "parseSearchDesktop: no tracks container, " +
+                        "data keys=${data?.keys}")
+                    return emptyList()
+                }
 
             items.mapNotNull { itemEl ->
                 val itemObj = itemEl as? JsonObject ?: return@mapNotNull null
-                // The track payload sits under item.data; tolerate a flatter data.
-                val data = (itemObj["item"]?.jsonObject?.get("data")?.jsonObject)
+                // Track payload: item.track (search), item.item.data (searchV2),
+                // or a flatter item.data.
+                val track = itemObj["track"]?.jsonObject
+                    ?: itemObj["item"]?.jsonObject?.get("data")?.jsonObject
                     ?: itemObj["data"]?.jsonObject
                     ?: return@mapNotNull null
 
-                val typename = data["__typename"]?.jsonPrimitive?.contentOrNull
+                val typename = track["__typename"]?.jsonPrimitive?.contentOrNull
                 if (typename != null && typename != "Track") return@mapNotNull null
 
-                val uri = data["uri"]?.jsonPrimitive?.contentOrNull
+                val uri = track["uri"]?.jsonPrimitive?.contentOrNull
                 val id = uri?.removePrefix("spotify:track:")?.takeIf { it != uri && it.isNotBlank() }
                     ?: return@mapNotNull null
-                val name = data["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val name = track["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
 
-                val artists = data["artists"]?.jsonObject
+                val artists = track["artists"]?.jsonObject
                     ?.get("items")?.jsonArray
                     ?.mapNotNull {
                         it.jsonObject["profile"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
                     }
                     ?: emptyList()
 
-                val durationMs = data["duration"]?.jsonObject
+                val durationMs = track["duration"]?.jsonObject
                     ?.get("totalMilliseconds")?.jsonPrimitive?.longOrNull
                     ?: 0L
 
-                val album = data["albumOfTrack"]?.jsonObject
+                val album = (track["album"] ?: track["albumOfTrack"])?.jsonObject
                     ?.get("name")?.jsonPrimitive?.contentOrNull
                     ?: ""
 
@@ -636,7 +646,7 @@ class SpotifyApiClient @Inject constructor(
                     albumName = album,
                     durationMs = durationMs,
                     isrc = null, // searchDesktop doesn't surface ISRC
-                    explicit = data["contentRating"]?.jsonObject
+                    explicit = track["contentRating"]?.jsonObject
                         ?.get("label")?.jsonPrimitive?.contentOrNull == "EXPLICIT",
                 )
             }
