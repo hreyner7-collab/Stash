@@ -76,14 +76,6 @@ class MatchScorer @Inject constructor(
          * title is labelled.
          */
         const val EXPLICIT_MISMATCH_PENALTY = 0.15f
-
-        /**
-         * Multi-artist credit separators used by [artistParts]. Covers ASCII
-         * (`,;&/|`), CJK full-width slash/middot (`／・`), and the spelled-out
-         * " feat. / ft. / and " joiners.
-         */
-        private val ARTIST_PART_SEPARATOR =
-            Regex("""[,;&/／・|]|\s+(?:feat\.?|ft\.?|and)\s+""", RegexOption.IGNORE_CASE)
     }
 
     /**
@@ -229,7 +221,7 @@ class MatchScorer @Inject constructor(
      */
     fun titleContainsTarget(targetTitle: String, candidateTitle: String): Boolean {
         val target = looseTokens(trackMatcher.canonicalTitle(targetTitle))
-        return containsRun(haystack = looseTokens(candidateTitle), needle = target)
+        return ArtistMatching.containsRun(haystack = looseTokens(candidateTitle), needle = target)
     }
 
     /**
@@ -246,8 +238,8 @@ class MatchScorer @Inject constructor(
      * are the authoritative audio source).
      */
     fun artistPartMatches(targetArtist: String, candidateUploader: String): Boolean {
-        val targetParts = artistParts(targetArtist)
-        val candidateParts = artistParts(candidateUploader.replace(" - Topic", ""))
+        val targetParts = ArtistMatching.artistParts(targetArtist)
+        val candidateParts = ArtistMatching.artistParts(candidateUploader.replace(" - Topic", ""))
         if (targetParts.isEmpty() || candidateParts.isEmpty()) return false
         return targetParts.any { t ->
             candidateParts.any { c ->
@@ -276,10 +268,10 @@ class MatchScorer @Inject constructor(
         if (candidate.isEmpty()) return false
         // Each distinct artist in a multi-artist credit, matched as its own
         // contiguous word run ("Will Stetson" → ["will","stetson"]).
-        return targetArtist.split(ARTIST_PART_SEPARATOR)
+        return targetArtist.split(ArtistMatching.ARTIST_PART_SEPARATOR)
             .map { looseTokens(it) }
             .filter { tokens -> tokens.sumOf { it.length } >= 2 }
-            .any { artistTokens -> containsRun(haystack = candidate, needle = artistTokens) }
+            .any { artistTokens -> ArtistMatching.containsRun(haystack = candidate, needle = artistTokens) }
     }
 
     /** Artist score credited when [artistAppearsInTitle] holds but the uploader
@@ -298,26 +290,6 @@ class MatchScorer @Inject constructor(
             .joinToString("")
             .split(' ')
             .filter { it.isNotBlank() }
-
-    /** True when [needle] appears as a contiguous run of tokens in [haystack]. */
-    private fun containsRun(haystack: List<String>, needle: List<String>): Boolean {
-        if (needle.isEmpty() || needle.size > haystack.size) return false
-        for (start in 0..(haystack.size - needle.size)) {
-            if (haystack.subList(start, start + needle.size) == needle) return true
-        }
-        return false
-    }
-
-    /**
-     * Split an artist credit into normalised comparison parts: break on
-     * multi-artist separators (`,;&/／・|` and " feat./ft./and "), then strip
-     * each part down to its letter/digit characters (so "Kairiki bear" and
-     * "Kairikibear" coincide). Parts shorter than 2 chars are dropped.
-     */
-    private fun artistParts(artist: String): List<String> =
-        artist.split(ARTIST_PART_SEPARATOR)
-            .map { part -> part.lowercase().filter { it.isLetterOrDigit() } }
-            .filter { it.length >= 2 }
 
     // -- Private scoring helpers --------------------------------------------------
 

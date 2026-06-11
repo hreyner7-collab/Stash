@@ -1,5 +1,7 @@
 package com.stash.data.download.lossless
 
+import com.stash.data.download.lossless.spotifyresolve.SpotifyUriResolver
+
 /**
  * Pluggable resolver for lossless (or higher-quality-than-current) audio
  * sources. Each external source — squid.wtf's per-provider endpoints,
@@ -90,6 +92,13 @@ data class TrackQuery(
      * YouTube-pathway downloads, which correctly makes them skip antra.
      */
     val spotifyUri: String? = null,
+    /**
+     * The local DB id of the track, when known. Used as the resolution key by
+     * [SpotifyUriResolver] (cache side-table + in-flight coalescing) when no
+     * [spotifyUri] is present, so a YouTube-pathway track can still be routed
+     * to antra after a Spotify search. Null when there is no backing DB row.
+     */
+    val trackId: Long? = null,
 )
 
 /**
@@ -112,6 +121,16 @@ fun TrackQuery.spotifyTrackUrl(): String? {
     }.trim()
     return id.takeIf { it.isNotEmpty() }?.let { "https://open.spotify.com/track/$it" }
 }
+
+/**
+ * The Spotify track URL to hand antra: the existing one derived from
+ * [spotifyUri] when present, otherwise — when a [trackId] is available —
+ * a [SpotifyUriResolver] lookup (cache-first Spotify search). Returns null
+ * when there is neither a usable existing URL nor a trackId to resolve on,
+ * so the resolver is never consulted for a track it could not key.
+ */
+suspend fun TrackQuery.resolvedSpotifyTrackUrl(resolver: SpotifyUriResolver): String? =
+    spotifyTrackUrl() ?: trackId?.let { id -> resolver.resolveUrl(id, this) }
 
 /**
  * The proxy search terms to try for this query, in priority order.

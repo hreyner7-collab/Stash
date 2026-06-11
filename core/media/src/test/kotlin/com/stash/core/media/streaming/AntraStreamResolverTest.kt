@@ -8,6 +8,7 @@ import com.stash.data.download.lossless.antra.AntraJobGate
 import com.stash.data.download.lossless.antra.AntraJobCreated
 import com.stash.data.download.lossless.antra.AntraJobStatus
 import com.stash.data.download.lossless.antra.AntraMe
+import com.stash.data.download.lossless.spotifyresolve.SpotifyUriResolver
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -34,6 +35,7 @@ class AntraStreamResolverTest {
 
     private val client: AntraClient = mockk(relaxed = true)
     private val store: AntraCredentialStore = mockk()
+    private val spotifyUriResolver: SpotifyUriResolver = mockk(relaxed = true)
     private lateinit var cacheDir: File
     private lateinit var resolver: AntraStreamResolver
 
@@ -41,7 +43,7 @@ class AntraStreamResolverTest {
         cacheDir = File.createTempFile("antra-cache", "").apply {
             delete(); mkdirs()
         }
-        resolver = AntraStreamResolver(client, store, cacheDir, AntraJobGate())
+        resolver = AntraStreamResolver(client, store, cacheDir, AntraJobGate(), spotifyUriResolver)
     }
 
     @After fun tearDown() {

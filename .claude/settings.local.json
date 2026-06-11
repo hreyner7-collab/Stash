@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(./gradlew :data:ytmusic:test :core:data:test --console=plain)",
+      "Bash(./gradlew :app:installDebug --console=plain)",
+      "Bash(adb devices *)",
+      "Bash(adb logcat *)",
+      "Bash(python *)",
+      "Bash(rm home-dark.png home-light.png liked-songs-light.png now-playing.png queue.png)",
+      "Bash(cp \"/c/Users/theno/Downloads/New folder \\(6\\)/Screenshot_20260507-133553~2.png\" home.png)",
+      "Bash(cp \"/c/Users/theno/Downloads/New folder \\(6\\)/Screenshot_20260507-133602~2.png\" now-playing.png)",
+      "Read(//c/c/Users/theno/Projects/MP3APK/docs/**)",
+      "Bash(cp \"/c/Users/theno/Downloads/New folder \\(6\\)/Screenshot_20260507-135236~2.png\" /c/Users/theno/Projects/MP3APK/docs/screenshots/now-playing.png)",
+      "Bash(git push *)"
+    ]
+  }
+}

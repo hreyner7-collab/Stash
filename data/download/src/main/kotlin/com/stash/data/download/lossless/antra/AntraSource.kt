@@ -7,7 +7,8 @@ import com.stash.data.download.lossless.LosslessSource
 import com.stash.data.download.lossless.RateLimitState
 import com.stash.data.download.lossless.SourceResult
 import com.stash.data.download.lossless.TrackQuery
-import com.stash.data.download.lossless.spotifyTrackUrl
+import com.stash.data.download.lossless.resolvedSpotifyTrackUrl
+import com.stash.data.download.lossless.spotifyresolve.SpotifyUriResolver
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -42,6 +43,7 @@ class AntraSource @Inject constructor(
     private val credentialStore: AntraCredentialStore,
     private val rateLimiter: AggregatorRateLimiter,
     private val jobGate: AntraJobGate,
+    private val spotifyUriResolver: SpotifyUriResolver,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
@@ -54,7 +56,7 @@ class AntraSource @Inject constructor(
 
     override suspend fun resolve(query: TrackQuery): SourceResult? {
         if (!isEnabled()) return null
-        val spotifyUrl = query.spotifyTrackUrl() ?: return null
+        val spotifyUrl = query.resolvedSpotifyTrackUrl(spotifyUriResolver) ?: return null
 
         if (!rateLimiter.acquire(id)) return null
         return try {

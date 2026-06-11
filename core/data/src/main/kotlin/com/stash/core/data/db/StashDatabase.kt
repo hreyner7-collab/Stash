@@ -15,6 +15,7 @@ import com.stash.core.data.db.dao.LyricsDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.RemoteSnapshotDao
 import com.stash.core.data.db.dao.SourceAccountDao
+import com.stash.core.data.db.dao.SpotifyResolutionDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackBlocklistDao
@@ -32,6 +33,7 @@ import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.RemotePlaylistSnapshotEntity
 import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
 import com.stash.core.data.db.entity.SourceAccountEntity
+import com.stash.core.data.db.entity.SpotifyResolutionEntity
 import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.SyncHistoryEntity
 import com.stash.core.data.db.entity.TrackBlocklistEntity
@@ -75,8 +77,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackSkipEventEntity::class,
         LyricsEntity::class,
         LastFmCacheEntity::class,
+        SpotifyResolutionEntity::class,
     ],
-    version = 31,
+    version = 32,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -111,6 +114,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun lyricsDao(): LyricsDao
 
     abstract fun lastFmCacheDao(): LastFmCacheDao
+
+    abstract fun spotifyResolutionDao(): SpotifyResolutionDao
 
 
     companion object {
@@ -821,6 +826,32 @@ abstract class StashDatabase : RoomDatabase() {
                         cache_key TEXT NOT NULL PRIMARY KEY,
                         json TEXT NOT NULL,
                         fetched_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v31 → v32: add the `spotify_resolution` side-table that caches the
+         * outcome of resolving a local track to a Spotify URI (positive /
+         * negative / transient), so the antra Spotify-URI resolver doesn't
+         * re-search Spotify on every play. Purely additive — keyed by trackId.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS spotify_resolution (
+                        trackId INTEGER NOT NULL PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        spotifyUri TEXT,
+                        matchedIsrc TEXT,
+                        titleSim REAL,
+                        durDeltaSec INTEGER,
+                        resolvedAtMs INTEGER NOT NULL,
+                        expiresAtMs INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 1
                     )
                     """.trimIndent()
                 )
