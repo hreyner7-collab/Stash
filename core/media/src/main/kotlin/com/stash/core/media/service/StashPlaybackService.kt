@@ -729,10 +729,56 @@ class StashPlaybackService : MediaLibraryService() {
                         )
                     }
                 }
+                // Browse-tap on a playlist/recently-added child (#154/#173):
+                // the mediaId carries its parent, so rebuild the whole parent
+                // as the queue, starting at the tapped track — mirroring the
+                // SHUFFLE_PLAY_ expansion above, but in order and unshuffled.
+                if (mediaItems.size == 1) {
+                    val parsed = AutoBrowseQueue.parse(mediaItems[0].mediaId)
+                    if (parsed != null) {
+                        val plan = AutoBrowseQueue.queuePlan(
+                            tracksForBrowseParent(parsed.parentId),
+                            tappedTrackId = parsed.trackId,
+                        )
+                        if (plan.tracks.isNotEmpty()) {
+                            val items = plan.tracks.map { track ->
+                                MediaItem.Builder()
+                                    .setMediaId(track.id.toString())
+                                    .setUri(track.filePath ?: "")
+                                    .setMediaMetadata(track.toMediaMetadata())
+                                    .build()
+                            }
+                            // An explicit in-order tap means in-order playback;
+                            // shuffle stays reachable via the Shuffle Play entry.
+                            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                mediaSession.player.shuffleModeEnabled = false
+                            }
+                            return@future MediaSession.MediaItemsWithStartPosition(
+                                items,
+                                plan.startIndex,
+                                C.TIME_UNSET,
+                            )
+                        }
+                    }
+                }
                 val resolvedItems = mediaItems.map { resolveMediaItem(it) }
                 MediaSession.MediaItemsWithStartPosition(resolvedItems, startIndex, startPositionMs)
             }
         }
+
+        /**
+         * Loads the track list backing an Auto browse parent id — the same
+         * rows (and order) `onGetChildren` listed for it.
+         */
+        private suspend fun tracksForBrowseParent(parentId: String): List<TrackEntity> =
+            when {
+                parentId.startsWith(PLAYLIST_PREFIX) ->
+                    parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                        ?.let { playlistDao.getTracksForPlaylist(it) }
+                        ?: emptyList()
+                parentId == RECENTLY_ADDED_ID -> trackDao.getRecentlyAdded(20).first()
+                else -> emptyList()
+            }
 
         @OptIn(UnstableApi::class)
         override fun onAddMediaItems(
@@ -753,7 +799,19 @@ class StashPlaybackService : MediaLibraryService() {
                         }.shuffled()
                     }
                 }
-                mediaItems.map { resolveMediaItem(it) }
+                mediaItems.map { item ->
+                    // A browse-child id in an ADD context (e.g. "add to queue")
+                    // means just that one track — strip the parent envelope and
+                    // resolve it as a normal library item. Queue expansion only
+                    // happens on a SET (onSetMediaItems above).
+                    val parsed = AutoBrowseQueue.parse(item.mediaId)
+                    val normalized = if (parsed != null) {
+                        item.buildUpon().setMediaId(parsed.trackId.toString()).build()
+                    } else {
+                        item
+                    }
+                    resolveMediaItem(normalized)
+                }
             }
         }
 
@@ -794,13 +852,23 @@ class StashPlaybackService : MediaLibraryService() {
                 else -> {
                     // Try to resolve track or playlist
                     serviceScope.future {
-                        val trackId = mediaId.toLongOrNull()
+                        // Browse-child ids (AUTOQ_…) resolve to their track,
+                        // keeping the parent-carrying mediaId intact so a
+                        // subsequent tap still expands the playlist (#154/#173).
+                        val trackId = AutoBrowseQueue.parse(mediaId)?.trackId
+                            ?: mediaId.toLongOrNull()
                         if (trackId != null) {
                             val track = trackDao.getById(trackId)
                             if (track != null) {
                                 return@future LibraryResult.ofItem(
                                     MediaItem.Builder()
-                                        .setMediaId(track.id.toString())
+                                        .setMediaId(
+                                            if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) {
+                                                mediaId
+                                            } else {
+                                                track.id.toString()
+                                            },
+                                        )
                                         .setUri(track.filePath ?: "")
                                         .setMediaMetadata(
                                             track.toMediaMetadata(),
@@ -935,7 +1003,7 @@ class StashPlaybackService : MediaLibraryService() {
                     RECENTLY_ADDED_ID -> {
                         trackDao.getRecentlyAdded(20).first().map { track ->
                             MediaItem.Builder()
-                                .setMediaId(track.id.toString())
+                                .setMediaId(AutoBrowseQueue.childMediaId(parentId, track.id))
                                 .setUri(track.filePath ?: "")
                                 .setMediaMetadata(
                                     track.toMediaMetadata(),
@@ -961,9 +1029,11 @@ class StashPlaybackService : MediaLibraryService() {
 
                                 // v0.9.37: include streamable tracks so stream-only Mix entries are
                                 // playable. Downloaded-only filter would silently drop them.
+                                // mediaId carries the parent playlist (AUTOQ_…) so a tap can
+                                // queue the WHOLE playlist, not a single item — #154/#173.
                                 val tracks = playlistDao.getTracksForPlaylist(playlistId).filter{track -> track.isDownloaded || track.isStreamable}.map { track ->
                                     MediaItem.Builder()
-                                        .setMediaId(track.id.toString())
+                                        .setMediaId(AutoBrowseQueue.childMediaId(parentId, track.id))
                                         .setUri(track.filePath ?: "")
                                         .setMediaMetadata(
                                             track.toMediaMetadata(),
