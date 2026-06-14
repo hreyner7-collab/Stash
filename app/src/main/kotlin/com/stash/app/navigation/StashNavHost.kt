@@ -20,7 +20,7 @@ import com.stash.feature.search.AlbumDiscoveryScreen
 import com.stash.feature.search.ArtistProfileScreen
 import com.stash.feature.search.SearchScreen
 import com.stash.feature.settings.BlockedSongsScreen
-import com.stash.feature.settings.SettingsScreen
+import com.stash.feature.settings.SettingsHubScreen
 import com.stash.feature.settings.equalizer.EqualizerScreen
 import com.stash.feature.settings.libraryhealth.LibraryHealthScreen
 import com.stash.feature.sync.FailedDownloadsScreen
@@ -124,20 +124,76 @@ fun StashNavHost(
             )
         }
         composable<SettingsRoute> {
-            SettingsScreen(
-                onNavigateToEqualizer = {
-                    navController.navigate(EqualizerRoute)
-                },
-                onNavigateToLibraryHealth = {
-                    navController.navigate(LibraryHealthRoute)
-                },
-                onNavigateToSquidWtfCaptcha = {
-                    navController.navigate(SquidWtfCaptchaRoute)
-                },
-                onNavigateToAntraConnect = {
-                    navController.navigate(AntraConnectRoute)
-                },
+            val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+            SettingsHubScreen(
+                onOpenPlayback = { navController.navigate(SettingsPlaybackRoute) },
+                onOpenAudioQuality = { navController.navigate(SettingsAudioQualityRoute) },
+                onOpenAccounts = { navController.navigate(SettingsAccountsRoute) },
+                onOpenLibraryStorage = { navController.navigate(SettingsLibraryStorageRoute) },
+                onOpenAppearance = { navController.navigate(SettingsAppearanceRoute) },
+                onOpenAbout = { navController.navigate(SettingsAboutRoute) },
+                onDonate = { runCatching { uriHandler.openUri("https://ko-fi.com/rawnald") } },
+                onStar = { runCatching { uriHandler.openUri("https://github.com/rawnaldclark/Stash") } },
+            )
+        }
+
+        composable<SettingsPlaybackRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsPlaybackScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAudioQualityRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAudioQualityScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToEqualizer = { navController.navigate(EqualizerRoute) },
+                onNavigateToAntraConnect = { navController.navigate(AntraConnectRoute) },
+                onNavigateToSquidWtfCaptcha = { navController.navigate(SquidWtfCaptchaRoute) },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAccountsRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAccountsScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsLibraryStorageRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsLibraryStorageScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToLibraryHealth = { navController.navigate(LibraryHealthRoute) },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAppearanceRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAppearanceScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = viewModel,
+            )
+        }
+        composable<SettingsAboutRoute> { backStackEntry ->
+            val settingsEntry = remember(backStackEntry) { navController.getBackStackEntry(SettingsRoute) }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.SettingsAboutScreen(
+                onBack = { navController.popBackStack() },
                 onNavigateToDiagnosticsPreview = { navController.navigate(DiagnosticsPreviewRoute) },
+                viewModel = viewModel,
             )
         }
 
