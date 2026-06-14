@@ -42,6 +42,7 @@ out of the graph. THE ON-DEVICE SIDE THEN OWES A KOTLIN MEL IMPLEMENTATION
 out loudly in findings, because it breaks the "raw PCM in" contract.
 """
 
+import math
 import os
 
 import numpy as np
@@ -50,6 +51,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import laion_clap
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# LIVE-RUN FIX (torch 2.4.1): exporting RoBERTa's fused
+# torch.nn.functional.scaled_dot_product_attention to ONNX opset17 crashes the
+# symbolic exporter ("TypeError: z_(): incompatible function arguments" inside
+# symbolic_opset14.scaled_dot_product_attention). Swap SDPA for its
+# mathematically identical eager formulation during export so the tracer emits
+# plain matmul/softmax/add ops it CAN export. Numerically equivalent; only the
+# graph representation changes. The audio (HTSAT) branch doesn't use SDPA, so
+# patching globally is safe.
+# ──────────────────────────────────────────────────────────────────────────
+def _sdpa_eager(query, key, value, attn_mask=None, dropout_p=0.0,
+                is_causal=False, scale=None):
+    scale_factor = (1.0 / math.sqrt(query.size(-1))) if scale is None else scale
+    attn_weight = (query @ key.transpose(-2, -1)) * scale_factor
+    if is_causal:
+        L, S = query.size(-2), key.size(-2)
+        mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril()
+        attn_weight = attn_weight.masked_fill(~mask, float("-inf"))
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_weight = attn_weight.masked_fill(~attn_mask, float("-inf"))
+        else:
+            attn_weight = attn_weight + attn_mask
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    return attn_weight @ value
+
+
+F.scaled_dot_product_attention = _sdpa_eager
+torch.nn.functional.scaled_dot_product_attention = _sdpa_eager
 
 CKPT = "music_audioset_epoch_15_esc_90.14.pt"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,20 +156,25 @@ def export() -> None:
     model = _load_clap()
 
     # ── audio ───────────────────────────────────────────────────────────────
-    audio_branch = AudioBranch(model).eval()
-    dummy_pcm = torch.zeros(1, AUDIO_SAMPLES, dtype=torch.float32)
-    torch.onnx.export(
-        audio_branch,
-        (dummy_pcm,),
-        AUDIO_ONNX,
-        input_names=["pcm"],
-        output_names=["embed"],
-        opset_version=17,
-        # Audio length is FIXED -> no dynamic axes for the audio graph.
-        dynamic_axes=None,
-        do_constant_folding=True,
-    )
-    print(f"[export] wrote audio model -> {AUDIO_ONNX}")
+    # Idempotent: skip if a prior run already wrote it (the audio export is the
+    # slow part; the text branch is what we're iterating on).
+    if os.path.exists(AUDIO_ONNX):
+        print(f"[export] audio model already exists, skipping -> {AUDIO_ONNX}")
+    else:
+        audio_branch = AudioBranch(model).eval()
+        dummy_pcm = torch.zeros(1, AUDIO_SAMPLES, dtype=torch.float32)
+        torch.onnx.export(
+            audio_branch,
+            (dummy_pcm,),
+            AUDIO_ONNX,
+            input_names=["pcm"],
+            output_names=["embed"],
+            opset_version=17,
+            # Audio length is FIXED -> no dynamic axes for the audio graph.
+            dynamic_axes=None,
+            do_constant_folding=True,
+        )
+        print(f"[export] wrote audio model -> {AUDIO_ONNX}")
 
     # ── text ────────────────────────────────────────────────────────────────
     text_branch = TextBranch(model).eval()

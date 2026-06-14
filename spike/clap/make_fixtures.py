@@ -73,18 +73,14 @@ QUERIES = [
 # Aim for several genres with >=2 clips each so same-vs-cross separation is real.
 # These are PLACEHOLDERS — replace with real local files before running.
 # ──────────────────────────────────────────────────────────────────────────
+# Built live from spike/clap/source_clips/ (20 tracks pulled off the device,
+# named "<genre>_<artist>.m4a"). Genre = filename prefix before the first "_".
+import glob as _glob
+
+_SRC_DIR = os.path.join(HERE, "source_clips")
 MANIFEST = [
-    # (r"C:\music\blues\bluesy_riff.flac",        "blues"),
-    # (r"C:\music\blues\delta_slide.flac",        "blues"),
-    # (r"C:\music\techno\techno_loop.flac",       "techno"),
-    # (r"C:\music\techno\acid_pump.flac",         "techno"),
-    # (r"C:\music\classical\nocturne.flac",       "classical"),
-    # (r"C:\music\classical\string_quartet.flac", "classical"),
-    # (r"C:\music\metal\drop_d_chug.flac",        "metal"),
-    # (r"C:\music\metal\blast_beat.flac",         "metal"),
-    # (r"C:\music\jazz\bebop_head.flac",          "jazz"),
-    # (r"C:\music\jazz\walking_bass.flac",        "jazz"),
-    # ... fill to ~20, spread across genres.
+    (p, os.path.basename(p).split("_", 1)[0])
+    for p in sorted(_glob.glob(os.path.join(_SRC_DIR, "*.m4a")))
 ]
 
 

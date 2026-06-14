@@ -33,11 +33,18 @@ def _mb(path: str) -> float:
 
 def quantize_one(src: str, dst: str) -> None:
     if not os.path.exists(src):
-        raise FileNotFoundError(f"{src} not found — run export_clap_onnx.py first.")
+        raise FileNotFoundError(f"{src} not found - run export_clap_onnx.py first.")
+    # LIVE-RUN FIX: quantize ONLY MatMul. Default dynamic quant also quantizes
+    # Conv -> ConvInteger, which the spectrogram-extractor's STFT-as-Conv in the
+    # audio graph uses, and ORT's CPU/Android kernels do NOT implement
+    # ConvInteger (NOT_IMPLEMENTED at session init). MatMul carries the bulk of
+    # the weights (all transformer/projection layers) so size still drops hard,
+    # and the model stays runnable. Embeddings (Gather) + Conv stay fp32.
     quantize_dynamic(
         model_input=src,
         model_output=dst,
         weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul"],
     )
 
 
@@ -48,10 +55,10 @@ def main() -> None:
     audio_fp32, audio_int8 = _mb(AUDIO_FP32), _mb(AUDIO_INT8)
     text_fp32, text_int8 = _mb(TEXT_FP32), _mb(TEXT_INT8)
 
-    print("──────────────────────────────────────────────────────────")
+    print("-" * 58)
     print(f"audio  fp32 = {audio_fp32:7.1f} MB   int8 = {audio_int8:7.1f} MB")
     print(f"text   fp32 = {text_fp32:7.1f} MB   int8 = {text_int8:7.1f} MB")
-    print("──────────────────────────────────────────────────────────")
+    print("-" * 58)
     verdict = "PASS" if audio_int8 <= EXIT1_TARGET_MB else "FAIL"
     print(
         f"EXIT CRITERION #1 [{verdict}]: audio int8 = {audio_int8:.1f} MB "
