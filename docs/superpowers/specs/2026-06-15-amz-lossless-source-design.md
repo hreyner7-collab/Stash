@@ -78,12 +78,14 @@ layout. Each unit has one purpose and a small, testable interface.
 | `AmzApiModels` | `@Serializable` DTOs for search/track responses + lenient `Json`. | `QobuzApiModels` |
 | `AmzMatcher` | Scores search candidates against the `TrackQuery` (artist+title); picks the best ASIN; confirms via `/api/track` (ISRC match when available). | `MatchScorer` logic |
 | `AmzSource : LosslessSource` | `id="amz"`, `displayName="Amazon Music (amz.squid.wtf)"`; the resolve flow; returns `SourceResult`. | `QobuzSource` |
-| `AmzStreamResolver` | Streaming adapter producing a `StreamUrl` (Approach A: authed `/api/stream`; fallback B: cache-to-local). | `QobuzStreamResolver` |
+| `AmzStreamResolver` | Streaming adapter: fetches the FLAC to an evictable cache file (via the shared authed-fetch seam) and returns a `file://` `StreamUrl` (cache-to-local, v1 default). | retired antra stream resolver (cache-to-local) |
 | `AmzModule` (Hilt) | `@Binds @IntoSet` `AmzSource` into `Set<LosslessSource>`; provides client/interceptor. | `qobuz` DI |
 
 **Wiring**
 - Download: registered into `Set<LosslessSource>`; `"amz"` appended to
-  `LosslessSourcePreferences.DEFAULT_PRIORITY` after `kennyy_qobuz`/`squid_qobuz`.
+  `LosslessSourcePreferences.DEFAULT_PRIORITY` (currently `squid_qobuz`,
+  `kennyy_qobuz`) as the last lossless entry — i.e. after both Qobuz proxies,
+  before the YouTube fallback.
 - Streaming: `AmzStreamResolver` added to `StreamSourceRegistry`'s **normal**
   branch, after `squid` and before `youtube` (NOT in the forceYt branch).
 - Both paths gated by the existing `LosslessSourceHealthGate` and
@@ -107,24 +109,40 @@ layout. Each unit has one purpose and a small, testable interface.
 4. `AmzApiClient.track(asin)` → confirm match: when `query.isrc != null`,
    require `metadata.isrc == query.isrc` for confidence ≥ 0.95; otherwise use the
    fuzzy artist+title score. Reject on duration mismatch if duration is exposed.
-5. Return `SourceResult(downloadUrl = streamUrl(asin), downloadHeaders = {},
-   format = AudioFormat("flac", 0, 0, 0), confidence, coverArtUrl = direct
+5. Return `SourceResult(sourceId = "amz", downloadUrl = streamUrl(asin),
+   downloadHeaders = {}, format = AudioFormat(codec = "flac", bitrateKbps = 0,
+   sampleRateHz = 0, bitsPerSample = 0), confidence, coverArtUrl = direct
    m.media-amazon cover, sourceTrackId = asin)`.
-6. The amz **download fetch goes through the interceptor-bearing client** so the
-   token is fresh at fetch time (see Requirement 3) — not a header snapshot.
-   Post-download, the existing `AudioDurationExtractor`/quality probe sets the
-   authoritative bits/sample-rate and the duration backstop validates the file.
+6. The amz download fetch must carry a *fresh* `x-captcha-token` at fetch time
+   (see Requirement 3 — this is **new plumbing**, not the existing static-header
+   path). Post-download, the existing `AudioDurationExtractor`/quality probe sets
+   the authoritative bits/sample-rate and the duration backstop validates the
+   file.
 
 ### Streaming (`AmzStreamResolver.resolve(track)`)
-- **Approach A (default):** return a `StreamUrl` whose playback routes through a
-  Media3 `OkHttpDataSource` built on the **interceptor-bearing client**, so
-  `x-captcha-token` rides every request (initial + range/seek) and a mid-stream
-  stale-token 401 auto-re-mints and retries transparently.
-- **Approach B (fallback):** if on-device verification shows `/api/stream` does
-  NOT honor Range requests (or the streaming factory cannot carry an authed data
-  source), download the FLAC to an evictable cache file and play the local file
-  (the pattern the retired antra resolver used). amz has no per-play quota, so
-  re-fetching is only a bandwidth/latency cost, not a quota cost.
+Reality check (confirmed against the code during spec review): `StreamUrl`
+carries only `url + expiresAtMs + codec metadata + origin` (no header/auth
+field), and `StreamingMediaSourceFactory` hardcodes a single
+`DefaultHttpDataSource.Factory()` for all sources — kennyy/squid work only
+because their auth is baked into a *signed CDN URL*. amz's per-request
+`x-captcha-token` header model has no seam in that chain today.
+
+- **Approach B — cache-to-local — is the v1 default.** `AmzStreamResolver`
+  fetches the FLAC to an evictable cache file via the same authed-fetch seam the
+  download path uses (Requirement 3), then returns a `StreamUrl` pointing at the
+  local `file://` (the pattern the retired antra resolver used). This reuses the
+  one new seam, needs **no** changes to `StreamUrl` or
+  `StreamingMediaSourceFactory`, and is immune to mid-stream token expiry (the
+  token is only needed during the one-shot fetch). amz has no per-play quota, so
+  re-fetching costs only bandwidth/latency, not quota. Cost: a pre-play wait
+  while the ~56 MB file downloads (acceptable; antra did the same).
+- **Approach A — direct authed streaming — is a FUTURE optimization, out of
+  scope for v1.** It would require new plumbing: a header field on `StreamUrl`
+  (or a per-source data-source factory) and a Media3 `OkHttpDataSource.Factory`
+  built on the interceptor-bearing client so `x-captcha-token` rides every
+  range/seek request and a mid-stream 401 auto-re-mints. Only worth doing if the
+  pre-play wait proves annoying AND `/api/stream` honors Range (see
+  verify-on-device).
 
 ## Design requirements (folded-in critique)
 
@@ -139,17 +157,27 @@ layout. Each unit has one purpose and a small, testable interface.
    ISRC search returns nothing. amz must build its own `"<artist> <title>"`
    query and use ISRC only for `/api/track` confirmation — it must NOT call
    `TrackQuery.searchTerms()` (which emits the bare ISRC when present).
-3. **Re-mint at fetch time, not resolve time.** A token snapshotted into
-   `downloadHeaders` at resolve can expire before a queued sync download runs.
-   amz downloads (and streams) fetch through the interceptor-bearing client so
-   the token is re-minted on a stale-token response.
+3. **Re-mint at fetch time, not resolve time — and this is NEW plumbing.** A
+   token snapshotted into `SourceResult.downloadHeaders` at resolve can expire
+   before a queued sync download runs. **The existing download path cannot do
+   this:** `LosslessUrlDownloader` uses one shared `OkHttpClient` and applies
+   `downloadHeaders` as static headers — there is no per-source interceptor.
+   v1 must add the seam. Recommended approach: register `AmzCaptchaInterceptor`
+   (host-scoped — a no-op for any host other than `amz.squid.wtf`) on the
+   **shared** `OkHttpClient` via Hilt, so both `AmzApiClient`'s calls AND
+   `LosslessUrlDownloader`'s fetch get the token attached and auto-re-minted on a
+   stale-token response, with no header snapshot. (A host-scoped interceptor is
+   safe on the shared client by construction — it never touches Spotify/YouTube/
+   Last.fm requests. This is the seam the streaming cache-to-local fetch reuses
+   too.) The plan must treat this as net-new wiring, not reuse.
 4. **Single-flight captcha mint.** Guard minting with a `Mutex` so parallel
    resolves share one PoW solve instead of stampeding (PBKDF2 cost=1000 is real
    CPU).
 5. **Do not assume 24-bit FLAC.** `tier:"best"` returns whatever that track's
    max is on Amazon (may be 16-bit FLAC, or lossy for Atmos/AAC-only titles).
-   Set `AudioFormat(codec="flac", bitrate=0, sampleRate=0, bits=0)` and let the
-   post-download quality probe set authoritative values; if `/api/track` states
+   Set `AudioFormat(codec = "flac", bitrateKbps = 0, sampleRateHz = 0,
+   bitsPerSample = 0)` and let the post-download quality probe set authoritative
+   values; if `/api/track` states
    a format/tier, use it to pre-reject lossy before downloading so the
    `minQuality=LOSSLESS` gate isn't wasted on a 56 MB fetch.
 6. **Cancellation hygiene.** `AmzSource.resolve` / `AmzStreamResolver.resolve`
@@ -197,8 +225,9 @@ layout. Each unit has one purpose and a small, testable interface.
 
 ## Verify-on-device (do early in implementation — they decide details)
 
-1. **Does `/api/stream` honor HTTP Range?** Decides Approach A vs B for
-   streaming.
+1. **Does `/api/stream` honor HTTP Range?** Not v1-critical (v1 streaming is
+   cache-to-local, Approach B). Only informs whether the future Approach A
+   direct-streaming optimization is feasible.
 2. **What does a stale/invalid `x-captcha-token` return?** (401 vs 403 vs 200+
    error body) — sets the interceptor's re-mint trigger.
 3. **Does `/api/track` expose duration and/or the available format/tier?** —
@@ -210,9 +239,10 @@ layout. Each unit has one purpose and a small, testable interface.
 - Token TTL is unknown; the re-mint-on-stale design tolerates any TTL, but a
   very short TTL would mean frequent PoW solves (cost=1000 PBKDF2 is ~hundreds
   of ms). Acceptable; single-flight bounds the cost.
-- Streaming auth plumbing (Approach A) depends on the streaming media-source
-  factory being able to carry an authed `OkHttpDataSource`; if it cannot,
-  Approach B is used for streaming with no change to the download path.
+- v1 streaming uses cache-to-local (Approach B), which reuses the download
+  fetch seam and needs no `StreamUrl`/factory changes. The direct-streaming
+  optimization (Approach A) is deferred and would require new `StreamUrl` +
+  data-source-factory plumbing.
 - Amazon US catalog gaps differ from Qobuz — expected and desirable (that is the
   independence), handled by failover.
 
