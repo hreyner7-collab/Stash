@@ -72,9 +72,9 @@ layout. Each unit has one purpose and a small, testable interface.
 
 | Component | Responsibility | Mirrors |
 |---|---|---|
-| `AmzCaptchaClient` | `GET /api/captcha/challenge` → `AltchaSolver.solve()` → `POST /api/captcha/verify` → returns token string. Single-flight (Mutex) so concurrent callers share one solve. | `NativeSquidCaptchaSolver` (reuses `AltchaSolver` unchanged) |
-| `AmzCaptchaInterceptor` | OkHttp interceptor scoped to `amz.squid.wtf`; attaches `x-captcha-token`; on a stale-token response, re-mints once via `AmzCaptchaClient` and retries. Holds the token `@Volatile`. | `SquidWtfCaptchaInterceptor` |
-| `AmzApiClient` | `search()`, `track(asin)`, `streamUrl(asin)`; uses a derived OkHttp client carrying `AmzCaptchaInterceptor` (shared pool, like `QobuzApiClient`). | `QobuzApiClient` |
+| `AmzCaptchaClient` | `GET /api/captcha/challenge` → `AltchaSolver.solve()` → `POST /api/captcha/verify` → returns token string. Uses the BARE shared client (no interceptor) so minting never recurses. | `NativeSquidCaptchaSolver` (reuses `AltchaSolver` unchanged) |
+| `AmzCaptchaInterceptor` | OkHttp interceptor scoped to `amz.squid.wtf` (bypasses `/api/captcha/*`); attaches `x-captcha-token`; single-flight (`Mutex`) mint; on a stale-token response, re-mints once and retries. Holds the token `@Volatile`. Registered on the SHARED client via a `Set<Interceptor>` multibinding (see Requirement 3) so the API client, the download fetch, and the streaming data source all get auth from one seam. | `SquidWtfCaptchaInterceptor` |
+| `AmzApiClient` | `search()`, `track(asin)`, `streamUrl(asin)`; uses the shared OkHttp client (the multibound `AmzCaptchaInterceptor` attaches/re-mints the token). | `QobuzApiClient` |
 | `AmzApiModels` | `@Serializable` DTOs for search/track responses + lenient `Json`. | `QobuzApiModels` |
 | `AmzMatcher` | Scores search candidates against the `TrackQuery` (artist+title); picks the best ASIN; confirms via `/api/track` (ISRC match when available). | `MatchScorer` logic |
 | `AmzSource : LosslessSource` | `id="amz"`, `displayName="Amazon Music (amz.squid.wtf)"`; the resolve flow; returns `SourceResult`. | `QobuzSource` |
