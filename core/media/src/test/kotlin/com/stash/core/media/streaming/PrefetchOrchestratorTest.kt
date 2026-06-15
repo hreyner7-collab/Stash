@@ -53,7 +53,7 @@ class PrefetchOrchestratorTest {
         )
         coEvery { trackDao.getById(5L) } returns track
         coEvery {
-            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = true, allowAntra = true)
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = true)
         } returns null
 
         orchestrator().onPlaybackProgress(
@@ -65,7 +65,7 @@ class PrefetchOrchestratorTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) {
-            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = true, allowAntra = true)
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = true)
         }
     }
 
@@ -129,6 +129,6 @@ class PrefetchOrchestratorTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { streamResolver.resolve(any()) }
-        coVerify(exactly = 0) { streamResolver.resolve(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { streamResolver.resolve(any(), any(), any()) }
     }
 }
