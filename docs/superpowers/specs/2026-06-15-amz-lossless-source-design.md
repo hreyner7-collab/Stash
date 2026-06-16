@@ -1,8 +1,33 @@
 # AmzSource — amz.squid.wtf Amazon Music lossless source — Design
 
 **Date:** 2026-06-15
-**Status:** Design (approved in brainstorm; pending spec review)
+**Status:** Implemented (all code tasks committed; on-device E2E pending)
 **Author:** brainstorm session
+
+## Verification results (live recon 2026-06-15)
+
+Ran the full flow against `amz.squid.wtf` from a residential network (minted a
+real token via the PBKDF2 PoW → search → track → stream). Answers the Phase-0
+recon questions:
+
+- **Captcha PoW (PBKDF2) confirmed live** — challenge→solve→verify returned a
+  token; `AmzAltchaSolver` solves the live challenge (counter ~436), not just the
+  HAR vector. search/track/stream all returned 200 with the token.
+- **`/api/stream` does NOT honor HTTP Range** — a `Range: bytes=0-1023` request
+  returned `200` (full body, `Content-Length` ~32 MB), no `Accept-Ranges` /
+  `Content-Range`. So progressive start + in-buffer seek work, but a far-ahead
+  seek re-fetches from the start. This is the documented server ceiling; the
+  client design is unchanged (no disk cache, OkHttpDataSource progressive).
+- **`/api/track` exposes NO duration and NO format/tier field** — metadata keys:
+  album, album_artist, album_asin, artist, asin, composer, copyright, cover,
+  cover_candidates, cover_cdn, date, disc_*, genre, is_explicit, isrc, label,
+  lyrics, title, track_*, year. Confirms the matcher cannot use duration and we
+  cannot pre-gate on format → `AudioFormat(flac,0,0,0)` + post-download probe,
+  as designed.
+- **Stale/invalid `x-captcha-token` returns HTTP 403 (not 401)** — the
+  interceptor's `STALE_CODE` was corrected to 403 (commit after recon). Safe:
+  amz streams via its own routing branch, not `RefreshingDataSource` (whose
+  403/410 trigger is YouTube-only).
 
 ## Summary
 
