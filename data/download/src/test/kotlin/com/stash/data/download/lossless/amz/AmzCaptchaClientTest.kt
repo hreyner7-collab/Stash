@@ -18,7 +18,8 @@ class AmzCaptchaClientTest {
 
     @Before fun setUp() {
         server = MockWebServer().also { it.start() }
-        client = AmzCaptchaClient(OkHttpClient()).apply { baseUrl = server.url("/api").toString() }
+        val okHttp = OkHttpClient()
+        client = AmzCaptchaClient(dagger.Lazy { okHttp }).apply { baseUrl = server.url("/api").toString() }
     }
     @After fun tearDown() = server.shutdown()
 

@@ -1,6 +1,7 @@
 package com.stash.data.download.lossless.amz
 
 import android.util.Log
+import dagger.Lazy
 import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -38,7 +39,16 @@ import okhttp3.RequestBody.Companion.toRequestBody
  */
 @Singleton
 class AmzCaptchaClient @Inject constructor(
-    private val bareClient: OkHttpClient,
+    // dagger.Lazy (NOT a direct OkHttpClient) breaks a DI init cycle: the shared
+    // OkHttpClient is built from the Set<Interceptor> multibinding, which
+    // constructs AmzCaptchaInterceptor → AmzCaptchaClient. Injecting the client
+    // directly would make AmzCaptchaClient depend on the very client being
+    // constructed (Dagger rejects this at hiltJavaCompile). Lazy.get() defers
+    // resolution to mint() time, by which point the singleton is fully built.
+    // It IS the interceptor-bearing shared client, but the host-scoped
+    // interceptor bypasses /api/captcha so these mint calls carry no token and
+    // never recurse.
+    private val clientLazy: Lazy<OkHttpClient>,
 ) {
     internal var baseUrl: String = "https://amz.squid.wtf/api"
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -75,11 +85,11 @@ class AmzCaptchaClient @Inject constructor(
         }
     }
 
-    private fun get(url: String): String? = bareClient.newCall(
+    private fun get(url: String): String? = clientLazy.get().newCall(
         Request.Builder().url(url).header("User-Agent", UA).header("Referer", REFERER).get().build()
     ).execute().use { if (it.isSuccessful) it.body?.string() else null }
 
-    private fun post(url: String, body: String): String? = bareClient.newCall(
+    private fun post(url: String, body: String): String? = clientLazy.get().newCall(
         Request.Builder().url(url).header("User-Agent", UA).header("Referer", REFERER)
             .post(body.toRequestBody(JSON_MT)).build()
     ).execute().use { if (it.isSuccessful) it.body?.string() else null }
