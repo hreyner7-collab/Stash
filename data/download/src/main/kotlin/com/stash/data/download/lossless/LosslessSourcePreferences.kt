@@ -296,10 +296,16 @@ class LosslessSourcePreferences @Inject constructor(
          * 2. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br
          *    (added in v0.9.10; sibling Qobuz-DL proxy, different operator,
          *    no captcha gate — outages uncorrelated with squid.wtf)
+         * 3. arcod — Qobuz Hi-Res FLAC via arcod.xyz, an independent third
+         *    Qobuz-DL operator (per-user Supabase session, job-based render).
+         *    Ranked LAST among lossless — the final lossless attempt before
+         *    the chain falls through to the YouTube/yt-dlp fallback — because
+         *    it runs on one operator-paid account and is rate-limited hard.
          */
         val DEFAULT_PRIORITY: List<String> = listOf(
             "squid_qobuz",
             "kennyy_qobuz",
+            "arcod",
         )
     }
 }

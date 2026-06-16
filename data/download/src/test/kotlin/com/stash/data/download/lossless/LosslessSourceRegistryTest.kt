@@ -69,4 +69,22 @@ class LosslessSourceRegistryTest {
         coVerify(exactly = 0) { kennyy.resolve(any()) }
         coVerify(exactly = 0) { squid.resolve(any()) }
     }
+
+    @Test
+    fun `arcod is ordered last among lossless under default priority`() = runTest {
+        coEvery { prefs.priorityOrderNow() } returns LosslessSourcePreferences.DEFAULT_PRIORITY
+
+        // Register sources out of order to prove the priority list (not the
+        // Set's iteration order) drives ranking.
+        val arcod = fakeSource("arcod", flacResult("arcod"))
+        val squid = fakeSource("squid_qobuz", flacResult("squid_qobuz"))
+        val kennyy = fakeSource("kennyy_qobuz", flacResult("kennyy_qobuz"))
+
+        val registry = LosslessSourceRegistry(linkedSetOf(arcod, kennyy, squid), prefs, healthGate)
+
+        val orderedIds = registry.orderedSources().map { it.id }
+        assertThat(orderedIds).containsExactly("squid_qobuz", "kennyy_qobuz", "arcod").inOrder()
+        // arcod is the final lossless source the chain tries before YouTube.
+        assertThat(orderedIds.last()).isEqualTo("arcod")
+    }
 }
