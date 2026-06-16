@@ -101,6 +101,21 @@ class AggregatorRateLimiter @Inject constructor() {
             circuitBreakAfter = 5,
             circuitBreakDurationMs = 30 * 60_000L, // 30 min
         )
+
+        // ARCOD (Qobuz-DL proxy via arcod.xyz) runs one operator-paid Qobuz
+        // account behind a Supabase-gated job queue, so it is even more
+        // bandwidth-fragile than kennyy. Stay deliberately conservative:
+        // 1 token / 2s (~30/min ceiling), burst 2. ARCOD's 429 is a genuine
+        // over-rate signal (account/IP cap), NOT an expected concurrency reply,
+        // so leave rateLimitTripsBreaker at its default (true) — sustained 429s
+        // mean we're structurally over budget and should cool down hard.
+        configs["arcod"] = Config(
+            tokensPerSecond = 1.0 / 2.0,   // 1 token / 2 seconds
+            burstCapacity = 2.0,
+            backoff429Ms = 60_000L,        // 1 min pause on 429
+            circuitBreakAfter = 5,
+            circuitBreakDurationMs = 10 * 60_000L, // 10 min
+        )
     }
 
     companion object {
