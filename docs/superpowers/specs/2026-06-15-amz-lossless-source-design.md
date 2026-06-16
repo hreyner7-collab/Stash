@@ -72,7 +72,8 @@ layout. Each unit has one purpose and a small, testable interface.
 
 | Component | Responsibility | Mirrors |
 |---|---|---|
-| `AmzCaptchaClient` | `GET /api/captcha/challenge` → `AltchaSolver.solve()` → `POST /api/captcha/verify` → returns token string. Uses the BARE shared client (no interceptor) so minting never recurses. | `NativeSquidCaptchaSolver` (reuses `AltchaSolver` unchanged) |
+| `AmzCaptchaClient` | `GET /api/captcha/challenge` → `AmzAltchaSolver.solve()` → `POST /api/captcha/verify` → returns token string. Uses the BARE shared client (no interceptor) so minting never recurses. | `NativeSquidCaptchaSolver` (pattern only) |
+| `AmzAltchaSolver` | The PoW. **Real PBKDF2-HMAC-SHA256** (amz's `algorithm` = `"PBKDF2/SHA-256"`): `PBKDF2(nonceBytes‖uint32_BE(counter), salt, iterations=cost, dkLen=keyLength)`, matched on `keyPrefix`. **NOT** squid's iterated-truncated-SHA256 — verified against a live HAR vector (counter=563), test-locked. | none (squid's `AltchaSolver` does a different derivation and does not work for amz) |
 | `AmzCaptchaInterceptor` | OkHttp interceptor scoped to `amz.squid.wtf` (bypasses `/api/captcha/*`); attaches `x-captcha-token`; single-flight (`Mutex`) mint; on a stale-token response, re-mints once and retries. Holds the token `@Volatile`. Registered on the SHARED client via a `Set<Interceptor>` multibinding (see Requirement 3) so the API client, the download fetch, and the streaming data source all get auth from one seam. | `SquidWtfCaptchaInterceptor` |
 | `AmzApiClient` | `search()`, `track(asin)`, `streamUrl(asin)`; uses the shared OkHttp client (the multibound `AmzCaptchaInterceptor` attaches/re-mints the token). | `QobuzApiClient` |
 | `AmzApiModels` | `@Serializable` DTOs for search/track responses + lenient `Json`. | `QobuzApiModels` |

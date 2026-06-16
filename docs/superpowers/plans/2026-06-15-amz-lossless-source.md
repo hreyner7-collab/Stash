@@ -72,7 +72,7 @@ Stale-token status: <fill in>
 
 ## Phase 1 — Captcha client
 
-amz reuses the existing `AltchaSolver` (same PBKDF2/SHA-256 PoW). The ONLY new logic is the amz-specific challenge/verify round-trip, which (per spec Requirement 1) must echo amz's `parameters` block **verbatim** — amz omits `expiresAt`, so we must NOT reuse `NativeSquidCaptchaSolver`'s fixed-field payload builder.
+> **CORRECTION (during implementation, 2026-06-15): amz does NOT use squid's `AltchaSolver`.** amz's challenge `algorithm` is literally `"PBKDF2/SHA-256"` — real PBKDF2-HMAC-SHA256, not squid's iterated-truncated-SHA256 chain. Reusing `AltchaSolver` never matches the `keyPrefix` and hangs the solve to the 1M cap. The implemented solution is a dedicated **`AmzAltchaSolver`** (`PBKDF2(nonceBytes‖uint32_BE(counter), salt, iterations=cost, dkLen=keyLength)`, matched on `keyPrefix`), reverse-engineered from a live HAR vector and locked by `AmzAltchaSolverTest` (counter=563). Done + committed (`d009f23d`). The challenge/verify round-trip logic below still applies: echo amz's `parameters` block **verbatim** (amz omits `expiresAt`), do NOT reuse `NativeSquidCaptchaSolver`'s fixed-field builder.
 
 ### Task 1.1: `AmzCaptchaClient` — challenge → solve → verify → token
 
