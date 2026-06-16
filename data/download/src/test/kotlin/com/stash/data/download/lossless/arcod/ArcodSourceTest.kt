@@ -108,7 +108,7 @@ class ArcodSourceTest {
 
     // ── resolve failure modes ────────────────────────────────────────────
 
-    @Test fun `no match returns null and reports failure`() = runTest {
+    @Test fun `no match returns null WITHOUT reporting failure`() = runTest {
         stubConnectedAndReady()
         // Items that don't match the query at all → matcher returns null.
         coEvery { client.search(any()) } returns listOf(
@@ -116,24 +116,27 @@ class ArcodSourceTest {
         )
 
         assertThat(source().resolve(query())).isNull()
-        coVerify { rateLimiter.reportFailure(ArcodSource.SOURCE_ID) }
+        // A catalog miss must NOT count toward the circuit breaker — ARCOD is
+        // 3rd-string and sees miss-prone tracks; otherwise 5 misses self-disable
+        // it for tracks it CAN serve.
+        coVerify(exactly = 0) { rateLimiter.reportFailure(any()) }
         coVerify(exactly = 0) { client.createJob(any()) }
     }
 
-    @Test fun `empty search results return null and report failure`() = runTest {
+    @Test fun `empty search results return null WITHOUT reporting failure`() = runTest {
         stubConnectedAndReady()
         coEvery { client.search(any()) } returns emptyList()
 
         assertThat(source().resolve(query())).isNull()
-        coVerify { rateLimiter.reportFailure(ArcodSource.SOURCE_ID) }
+        coVerify(exactly = 0) { rateLimiter.reportFailure(any()) }
     }
 
-    @Test fun `null album id on matched item returns null and reports failure`() = runTest {
+    @Test fun `null album id on matched item returns null WITHOUT reporting failure`() = runTest {
         stubConnectedAndReady()
         coEvery { client.search(any()) } returns listOf(matchableItem(albumId = null))
 
         assertThat(source().resolve(query())).isNull()
-        coVerify { rateLimiter.reportFailure(ArcodSource.SOURCE_ID) }
+        coVerify(exactly = 0) { rateLimiter.reportFailure(any()) }
         coVerify(exactly = 0) { client.createJob(any()) }
     }
 

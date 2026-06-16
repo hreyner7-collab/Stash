@@ -1,6 +1,7 @@
 package com.stash.feature.settings.components
 
 import android.annotation.SuppressLint
+import android.util.Log
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -75,7 +76,20 @@ fun ArcodConnectScreen(
             delay(POLL_INTERVAL_MS)
             val wv = webViewRef ?: continue
             val raw = wv.readLocalStorage(SUPABASE_AUTH_TOKEN_KEY)
-            val session = raw?.let(::parseSupabaseSession) ?: continue
+            // Unwrap evaluateJavascript's JS-string-literal quoting/escaping
+            // into the raw inner localStorage value, then hand it to the
+            // testable parser (which also handles supabase-js's base64- form).
+            val inner = unwrapJsStringLiteral(raw)
+            if (inner != null) {
+                // Token-free shape log so Task-13 on-device debugging can see
+                // WHAT we harvested (length + whether it's the base64- form)
+                // without ever leaking the token itself.
+                Log.d(
+                    TAG,
+                    "harvest shape: len=${inner.length} base64Prefixed=${inner.startsWith("base64-")}",
+                )
+            }
+            val session = parseSupabaseSession(inner) ?: continue
             captured = true
             statusText = "Connected — saving and closing."
             onConnected(session.accessToken, session.refreshToken, session.expiresAtMs)
@@ -184,56 +198,89 @@ private fun buildArcodWebView(context: android.content.Context): WebView =
     }
 
 /**
- * The localStorage value comes back from [WebView.evaluateJavascript] as a
- * JS string literal: a double-quoted, backslash-escaped rendering of the
- * Supabase session JSON (or the bare token "null" when the key is absent).
+ * Unwraps the value [WebView.evaluateJavascript] hands back. The result is a
+ * JS string literal: double-quoted and backslash-escaped (or the bare token
+ * `null` when the key is absent). Strips the outer quotes and unescapes so the
+ * caller is left with the raw inner localStorage value.
  *
- * We don't need a full JSON parser for three well-known fields, and pulling
- * kotlinx-serialization-json onto this module just for this isn't worth it —
- * so we unescape the literal, then regex the three values out of the inner
- * JSON. Returns null if the key is absent or any field is missing.
+ * Unescape order matters: `\\` → `\` must run BEFORE `\"` → `"`, otherwise a
+ * literal backslash-then-quote sequence is mis-decoded.
  */
-private fun parseSupabaseSession(evalResult: String): ArcodHarvestedSession? {
-    if (evalResult.isBlank() || evalResult == "null") return null
-
-    // evaluateJavascript double-quotes + escapes the value. Strip the outer
-    // quotes and unescape so we're left with the raw inner JSON.
-    val inner = evalResult
+private fun unwrapJsStringLiteral(evalResult: String?): String? {
+    if (evalResult == null || evalResult == "null" || evalResult.isBlank()) return null
+    return evalResult
         .removeSurrounding("\"")
-        .replace("\\\"", "\"")
         .replace("\\\\", "\\")
+        .replace("\\\"", "\"")
         .replace("\\n", "\n")
         .replace("\\/", "/")
-    if (inner == "null" || inner.isBlank()) return null
+}
 
-    val accessToken = ACCESS_TOKEN_RE.find(inner)?.groupValues?.get(1)
-        ?: return null
-    val refreshToken = REFRESH_TOKEN_RE.find(inner)?.groupValues?.get(1)
-        ?: return null
-    val expiresAtSeconds = EXPIRES_AT_RE.find(inner)?.groupValues?.get(1)
+/** Harvested Supabase session — access/refresh tokens + expiry in epoch ms. */
+internal data class ArcodSupabaseSession(
+    val accessToken: String,
+    val refreshToken: String,
+    val expiresAtMs: Long,
+)
+
+/**
+ * Parses the raw localStorage value for `sb-<ref>-auth-token` into a session,
+ * or null. The input is the RAW string value already unwrapped from
+ * evaluateJavascript's JS-string quoting (see [unwrapJsStringLiteral]).
+ *
+ * Handles two storage shapes:
+ *  - **Plain JSON** — older supabase-js wrote the session JSON directly.
+ *  - **`base64-<base64url JSON>`** — modern supabase-js (auth-js v2) may store
+ *    the value with a `base64-` prefix wrapping base64url-encoded JSON. The
+ *    old regex-only parse silently found nothing in this form, so connect
+ *    never fired.
+ *
+ * We don't pull a full JSON parser in for three well-known fields — once we
+ * have the JSON string we regex the three values out. Returns null if the
+ * value is absent/blank or any of the three fields is missing.
+ */
+internal fun parseSupabaseSession(rawLocalStorageValue: String?): ArcodSupabaseSession? {
+    val raw = rawLocalStorageValue?.takeIf {
+        it.isNotBlank() && it != "null"
+    } ?: return null
+
+    val json = if (raw.startsWith(BASE64_PREFIX)) {
+        // base64url-decode the payload after the prefix. java.util.Base64 works
+        // on both host JVM (unit tests) and device (minSdk 26+); android.util
+        // .Base64 isn't available off-device.
+        try {
+            val payload = raw.substring(BASE64_PREFIX.length)
+            String(java.util.Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+    } else {
+        raw
+    }
+
+    val accessToken = ACCESS_TOKEN_RE.find(json)?.groupValues?.get(1) ?: return null
+    val refreshToken = REFRESH_TOKEN_RE.find(json)?.groupValues?.get(1) ?: return null
+    val expiresAtSeconds = EXPIRES_AT_RE.find(json)?.groupValues?.get(1)
         ?.toLongOrNull() ?: return null
 
-    return ArcodHarvestedSession(
+    return ArcodSupabaseSession(
         accessToken = accessToken,
         refreshToken = refreshToken,
         expiresAtMs = expiresAtSeconds * 1000L,
     )
 }
 
-private data class ArcodHarvestedSession(
-    val accessToken: String,
-    val refreshToken: String,
-    val expiresAtMs: Long,
-)
+private const val BASE64_PREFIX = "base64-"
 
-// `"field":"value"` — capture the (unescaped) string value.
-private val ACCESS_TOKEN_RE = Regex("\"access_token\"\\s*:\\s*\"([^\"]*)\"")
-private val REFRESH_TOKEN_RE = Regex("\"refresh_token\"\\s*:\\s*\"([^\"]*)\"")
+// `"field":"value"` — capture the string value.
+private val ACCESS_TOKEN_RE = Regex("\"access_token\"\\s*:\\s*\"([^\"]+)\"")
+private val REFRESH_TOKEN_RE = Regex("\"refresh_token\"\\s*:\\s*\"([^\"]+)\"")
 
 // `"expires_at":1234567890` — capture the integer epoch-seconds value.
 private val EXPIRES_AT_RE = Regex("\"expires_at\"\\s*:\\s*(\\d+)")
 
 private const val ARCOD_URL = "https://arcod.xyz/"
+private const val TAG = "ArcodConnect"
 private const val SUPABASE_AUTH_TOKEN_KEY = "sb-fnlghyzwyoklfqyhqlav-auth-token"
 private const val POLL_INTERVAL_MS = 1_000L
 private const val MOBILE_CHROME_UA =

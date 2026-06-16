@@ -59,9 +59,14 @@ class ArcodSource @Inject constructor(
             val items = client.search("${query.artist} ${query.title}".trim())
 
             // 2. Score and pick the best candidate (real ArcodMatcher).
+            // A catalog no-match is NOT a source failure: ARCOD is the
+            // 3rd-string source (only reached when kennyy+squid both miss), so
+            // it sees miss-prone tracks. Counting misses toward the breaker
+            // would self-disable ARCOD for tracks it CAN serve. Mirror
+            // QobuzSource: silent `return null`, reserve reportFailure for
+            // genuine API/network failures.
             val match = ArcodMatcher.best(query, items) ?: run {
                 Log.d(TAG, "no_match artist='${query.artist}' title='${query.title}'")
-                rateLimiter.reportFailure(id)
                 return null
             }
             val item = match.item
@@ -71,8 +76,9 @@ class ArcodSource @Inject constructor(
             val album = item.album
             val albumId = album?.id
             if (album == null || albumId == null) {
+                // Like a no-match: the catalog row simply can't be enqueued.
+                // Not a source failure — don't count it toward the breaker.
                 Log.d(TAG, "no_album_id for track ${item.id} '${item.title}'")
-                rateLimiter.reportFailure(id)
                 return null
             }
 
