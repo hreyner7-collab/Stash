@@ -167,6 +167,23 @@ class SettingsViewModel @Inject constructor(
         streamingPreference.setForceYouTubeFallback(v)
     }
 
+    /**
+     * Test-only "Stream via amz" toggle. When on, BOTH the streaming and
+     * lossless-download registries route through the amz (Amazon Music)
+     * source only — used to exercise the amz source on demand.
+     */
+    val forceAmzOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceAmzOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-amz-only test toggle flip. */
+    fun setForceAmzOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceAmzOnly(v)
+    }
+
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
 

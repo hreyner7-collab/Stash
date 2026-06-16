@@ -38,7 +38,11 @@ import javax.inject.Singleton
  * id. Subsequent plays of the same track hit the cache and bypass the
  * registry entirely until the URL's `etsp` expires.
  *
- * Test toggle (off for normal use):
+ * Test toggles (off for normal use):
+ *  - [StreamingPreference.isForceAmzOnly]: [resolve] routes through amz
+ *    ONLY — kennyy/squid/youtube removed from play so a track either streams
+ *    via amz or fails visibly. Takes precedence over force-YouTube. Used to
+ *    exercise the amz source on demand.
  *  - [StreamingPreference.isForceYouTubeFallback]: [resolve] skips Kennyy
  *    and Squid entirely and routes every track through the YouTube resolver
  *    only — reproduces the lossless-down fallback path on demand.
@@ -74,7 +78,12 @@ class StreamSourceRegistry @Inject constructor(
         allowYtDlp: Boolean = true,
     ): StreamUrl? {
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
-            if (streamingPreference.isForceYouTubeFallback()) {
+            if (streamingPreference.isForceAmzOnly()) {
+                // Test toggle (outage drill): amz ONLY — kennyy/squid/youtube
+                // removed from play so a track either streams via amz or fails
+                // visibly. Ignores allowYouTube/allowYtDlp — it's amz or nothing.
+                add("amz" to amz::resolve)
+            } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
                 // background-fill keeps resolving nothing (matching a genuine

@@ -28,6 +28,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_passes_allowYtDlp_to_youtube_resolver() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -46,6 +47,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_defaults_allowYtDlp_true() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -63,6 +65,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_falls_to_youtube_when_qobuz_misses() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -85,6 +88,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_amz_consulted_after_qobuz_before_youtube() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -112,6 +116,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_forceYt_branch_does_not_consult_amz() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns true
         // kennyy/qobuz/amz are skipped in the forceYt branch — intentionally unstubbed.
         coEvery { youtube.resolve(any(), any()) } returns null
@@ -130,6 +135,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_forceYt_branch_passes_allowYtDlp_to_youtube() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns true
         // kennyy/qobuz are skipped in the forceYt branch — intentionally unstubbed.
         coEvery { youtube.resolve(any(), any()) } returns null
@@ -138,6 +144,51 @@ class StreamSourceRegistryTest {
         registry().resolve(track, allowYouTube = true, allowYtDlp = false)
 
         coVerify { youtube.resolve(track, allowYtDlp = false) }
+    }
+
+    /**
+     * The force-amz-only test toggle routes through amz ONLY — kennyy,
+     * squid, and youtube are never consulted, and an amz hit is returned.
+     */
+    @Test
+    fun `forceAmzOnly routes through amz only`() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns true
+        // kennyy/qobuz/youtube are skipped in the amz-only branch — unstubbed.
+        coEvery { amz.resolve(any()) } returns StreamUrl(
+            url = "https://amz.squid.wtf/api/stream?asin=B00X",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "flac",
+            origin = AmzStreamResolver.ORIGIN,
+        )
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
+
+        assertThat(result).isNotNull()
+        assertThat(result!!.origin).isEqualTo("amz")
+        coVerify { amz.resolve(track) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
+    /**
+     * Under force-amz-only an amz miss returns null and youtube is NOT
+     * consulted (even though allowYouTube is true) — it's amz or nothing.
+     */
+    @Test
+    fun `forceAmzOnly amz miss returns null and does not consult youtube`() = runTest {
+        coEvery { streamingPreference.isForceAmzOnly() } returns true
+        coEvery { amz.resolve(any()) } returns null
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
+
+        assertThat(result).isNull()
+        coVerify { amz.resolve(track) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
     }
 
     private fun stubTrack(): TrackEntity = TrackEntity(
