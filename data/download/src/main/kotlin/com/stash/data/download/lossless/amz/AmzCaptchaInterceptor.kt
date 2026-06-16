@@ -52,6 +52,10 @@ class AmzCaptchaInterceptor @Inject constructor(
     private companion object {
         const val HOST = "amz.squid.wtf"
         const val HEADER = "x-captcha-token"
-        const val STALE_CODE = 401 // confirmed default; on-device recon may change to 403 later
+        // Verified by live recon 2026-06-15: amz returns 403 (NOT 401) for a
+        // stale/invalid x-captcha-token. amz has its own player routing branch
+        // (not RefreshingDataSource, whose 403/410 trigger is YouTube-only), so
+        // treating 403 as the re-mint trigger here causes no collision.
+        const val STALE_CODE = 403
     }
 }

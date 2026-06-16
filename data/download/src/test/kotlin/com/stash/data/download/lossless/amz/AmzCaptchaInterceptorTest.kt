@@ -111,15 +111,16 @@ class AmzCaptchaInterceptorTest {
     }
 
     @Test
-    fun `stale 401 triggers one re-mint and one retry with fresh token`() {
+    fun `stale 403 triggers one re-mint and one retry with fresh token`() {
         val tokens = ArrayDeque(listOf("tok-1", "tok-2"))
         coEvery { captchaClient.mint() } answers { tokens.removeFirst() }
         val interceptor = AmzCaptchaInterceptor(captchaClient)
-        val chain = FakeChain(req("https://amz.squid.wtf/api/search"), ArrayDeque(listOf(401, 200)))
+        // amz returns 403 (verified live) for a stale/invalid token.
+        val chain = FakeChain(req("https://amz.squid.wtf/api/search"), ArrayDeque(listOf(403, 200)))
 
         val resp = interceptor.intercept(chain)
 
-        // exactly two round-trips: original (401) + one retry (200), no loop.
+        // exactly two round-trips: original (403) + one retry (200), no loop.
         assertThat(chain.proceeded).hasSize(2)
         assertThat(chain.proceeded[0].header("x-captcha-token")).isEqualTo("tok-1")
         assertThat(chain.proceeded[1].header("x-captcha-token")).isEqualTo("tok-2")
