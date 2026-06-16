@@ -70,27 +70,42 @@ responsibility.
 
 | Component | Responsibility | Mirrors |
 |---|---|---|
-| `ArcodConnectScreen` (WebView) | Opens `arcod.xyz`; user does Google login; on success harvests the Supabase session from **localStorage** (`sb-…-auth-token`) → access/refresh/expires. | antra's `AntraConnectScreen` (cookie harvest → localStorage harvest) |
-| `ArcodCredentialStore` (DataStore) | Persists `accessToken`, `refreshToken`, `expiresAtMs`; `isConnected` = non-blank access token; `markStale()` clears on refresh failure. | `AntraCredentialStore` |
+> **Mirrors column note:** the antra components (`AntraConnectScreen`,
+> `AntraCredentialStore`, `AntraClient`, `AntraSource`, `AntraStreamResolver`) were
+> **deleted from the tree in v0.9.53** — they are **git-history references**
+> (recoverable via `git show <pre-removal-sha>:<path>`), not extant files to copy.
+> The patterns are sound and reconstructable; just don't expect the files to exist.
+
+| Component | Responsibility | Pattern source |
+|---|---|---|
+| `ArcodConnectScreen` (WebView) | Opens `arcod.xyz`; user does Google login; on success harvests the Supabase session from **localStorage** (`sb-…-auth-token`) → access/refresh/expires. Requires `WebSettings.domStorageEnabled = true` (localStorage is OFF by default in Android WebView) — harvest via `evaluateJavascript("localStorage.getItem('sb-…-auth-token')")`. | antra `AntraConnectScreen` (history) — cookie harvest → localStorage harvest |
+| `ArcodCredentialStore` (DataStore) | Persists `accessToken`, `refreshToken`, `expiresAtMs`; `isConnected` = non-blank access token; `markStale()` clears on refresh failure. | antra `AntraCredentialStore` (history) |
 | `ArcodTokenRefresher` | `POST supabase…/token?grant_type=refresh_token` (apikey + refresh_token) → new tokens; persists them. Single-flight. | new (Supabase-specific) |
-| `ArcodAuthInterceptor` | Host-scoped (`arcod.xyz` + `api.arcod.xyz`); attaches `Authorization: Bearer <access_token>` (refreshing first if expired via `ArcodTokenRefresher`); on a 401 re-mints once and retries. Registered on the SHARED client via the `Set<Interceptor>` multibinding. Bypasses `dl.arcod.xyz` (open) and `get-music` is open anyway. | `AmzCaptchaInterceptor` (token-attach + single-flight + retry-on-stale) |
-| `ArcodApiModels` | `@Serializable` DTOs: search (`get-music`), job create/status (`downloads`), url. | `AmzApiModels` |
-| `ArcodClient` | `search(query)`, `createJob(track)`, `pollStatus(jobId)` (until `completed`/`error`, bounded), `downloadUrl(jobId)` (from completed status or POST /url). | `AntraClient`/`AmzApiClient` |
-| `ArcodMatcher` | Pure scorer over `get-music` track items (artist+title; ISRC + duration confirm). Returns the best track (id + album.id + metadata). | `AmzMatcher` |
-| `ArcodSource : LosslessSource` | `id="arcod"`; resolve = gate → search → match → createJob → poll → `SourceResult(downloadUrl, format flac/0/0/0, …)`. | `AntraSource`/`AmzSource` |
+| `ArcodAuthInterceptor` | Host-scoped (`arcod.xyz` + `api.arcod.xyz` only); attaches `Authorization: Bearer <access_token>` (refreshing first if expired via `ArcodTokenRefresher`); on a 401 re-mints once and retries. **NOT installed on the shared client.** Added ONLY to a **derived** OkHttpClient built inside `ArcodClient` (`sharedClient.newBuilder().addInterceptor(arcodAuth).build()`) — exactly how `QobuzApiClient`/`KennyyApiClient` scope their host interceptors, which keeps the Bearer token off every other app HTTP call and avoids a `:core:network` change/cycle. (The host check is belt-and-suspenders since only arcod calls use this client.) | `QobuzApiClient`'s derived-client + a single-flight token interceptor |
+| `ArcodApiModels` | `@Serializable` DTOs: search (`get-music`), job create/status (`downloads`), url. | `QobuzApiModels` |
+| `ArcodClient` | Builds the derived (interceptor-bearing) client off the shared `OkHttpClient`; `search(query)` (open — no interceptor needed but harmless), `createJob(track)`, `pollStatus(jobId)` (until `completed`/`error`, bounded), `downloadUrl(jobId)` (from completed status or POST /url). | `QobuzApiClient` |
+| `ArcodMatcher` | Pure scorer over `get-music` track items (artist+title; ISRC + duration confirm). Returns the best track (id + album.id + metadata). | the (amz, history) matcher / `MatchScorer` |
+| `ArcodSource : LosslessSource` | `id="arcod"`; resolve = gate → search → match → createJob → poll → `SourceResult(downloadUrl, format flac/0/0/0, …)`. | `QobuzSource` |
 | `ArcodStreamResolver` | `resolve(track)` → same job flow → `StreamUrl(url=dl, origin="arcod")`. Plays via the **default** media-source factory (open + Range URL, like kennyy/squid) — NO custom data source, NO routing branch. | `QobuzStreamResolver` |
-| `ArcodModule` / `ArcodInterceptorModule` (Hilt) | `@Binds @IntoSet ArcodSource` into `Set<LosslessSource>`; `@IntoSet ArcodAuthInterceptor` into `Set<Interceptor>`. | antra/amz DI |
+| `ArcodModule` (Hilt) | `@Binds @IntoSet ArcodSource` into `Set<LosslessSource>`. (NO interceptor multibinding — the auth interceptor lives on `ArcodClient`'s derived client.) | `QobuzModule` |
 
 **Wiring:**
-- Download: `"arcod"` appended last in `LosslessSourcePreferences.DEFAULT_PRIORITY`
-  (after `squid_qobuz`, `kennyy_qobuz`).
+- Download: `"arcod"` appended to `LosslessSourcePreferences.DEFAULT_PRIORITY`
+  (currently the literal list is `["squid_qobuz", "kennyy_qobuz"]` → becomes
+  `["squid_qobuz", "kennyy_qobuz", "arcod"]`, i.e. last among lossless).
 - Streaming: `ArcodStreamResolver` added to `StreamSourceRegistry`'s **normal**
-  branch after `squid`, before `youtube` (NOT in the forceYt branch).
-- `StashMediaSourceFactory` needs **no change** — `origin == "arcod"` falls to the
-  default factory, which streams the open Range-supporting `dl.arcod.xyz` URL.
+  branch after `squid`, before `youtube` (NOT in the forceYt branch) — a
+  constructor param + one `add("arcod" to …)` line.
+- `StashMediaSourceFactory` needs **no change** — verified: `StashPlaybackService`'s
+  `streamingTrackId` predicate gates the refresh chain on `origin == "youtube"`
+  only, so an `"arcod"` origin falls to the default `DefaultMediaSourceFactory`,
+  which streams the open Range-supporting `dl.arcod.xyz` URL.
+- **No `:core:network` change** — the auth interceptor rides `ArcodClient`'s
+  derived client (see components table), not the shared client.
 - Gated by the existing `LosslessSourceHealthGate` + `AggregatorRateLimiter`
-  (new conservative `configs["arcod"]`).
-- Settings: a "Connect ARCOD" row (mirrors the removed antra row) → `ArcodConnectScreen`.
+  (new conservative `configs["arcod"]` in the init block, like `kennyy_qobuz`).
+- Settings: a "Connect ARCOD" row (reconstructs the removed antra row's pattern)
+  → `ArcodConnectScreen`.
 
 ## Data flow
 
