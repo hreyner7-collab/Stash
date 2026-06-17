@@ -92,8 +92,9 @@ class ArcodMatcherTest {
     }
 
     @Test
-    fun `candidate whose duration differs by more than 5s is rejected`() {
-        // Query is 4:00; the same-title/artist candidate is a 12:00 live cut.
+    fun `dramatically different duration (live cut) sinks below the bar`() {
+        // Query is 4:00; the same-title/artist candidate is a 12:00 live cut
+        // (>20% drift → 0.3 factor → 1.0*1.0*0.3 = 0.3 < 0.5).
         val query = TrackQuery(
             artist = "Daft Punk",
             title = "Get Lucky",
@@ -104,6 +105,27 @@ class ArcodMatcherTest {
         )
 
         assertNull(ArcodMatcher.best(query, items))
+    }
+
+    @Test
+    fun `moderate cross-source duration drift is still accepted`() {
+        // Regression (on-device 2026-06-16): a synced track's YouTube/Spotify
+        // duration routinely differs from the Qobuz master by 10-20s. With the
+        // old 5s absolute hard-guard this rejected exact artist+title matches
+        // → no_match → yt-dlp fallthrough. 18s on a 4:00 track = 7.5% drift →
+        // 0.85 factor → 1.0*1.0*0.85 = 0.85 ≥ 0.5 → accepted.
+        val query = TrackQuery(
+            artist = "The Smashing Pumpkins",
+            title = "1979",
+            durationMs = 240_000L,
+        )
+        val items = listOf(
+            item(id = 1, title = "1979", performer = "The Smashing Pumpkins", duration = 258),
+        )
+
+        val match = ArcodMatcher.best(query, items)
+        assertNotNull(match)
+        assertEquals(1L, match!!.item.id)
     }
 
     @Test
@@ -123,7 +145,7 @@ class ArcodMatcherTest {
     }
 
     @Test
-    fun `duration guard skips bad candidate but still returns a good one`() {
+    fun `dramatically-off candidate is skipped but a good one still wins`() {
         val query = TrackQuery(
             artist = "Daft Punk",
             title = "Get Lucky",
