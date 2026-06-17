@@ -90,10 +90,10 @@ class ArcodSource @Inject constructor(
             // 4. Enqueue the FLAC render job.
             val request = ArcodJobRequest(
                 albumId = albumId,
-                trackId = item.id,
+                trackId = item.id.toString(),
                 albumTitle = album.title ?: "",
                 artistName = item.performer?.name ?: album.artist?.name ?: query.artist,
-                artistId = album.artist?.id ?: item.performer?.id ?: 0L,
+                artistId = (album.artist?.id ?: item.performer?.id ?: 0L).toString(),
                 coverUrl = album.image?.large ?: "",
                 releaseDate = album.releaseDate ?: "",
                 tracksCount = album.tracksCount ?: 1,

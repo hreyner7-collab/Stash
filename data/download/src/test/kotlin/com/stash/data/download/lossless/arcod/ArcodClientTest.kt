@@ -123,10 +123,10 @@ class ArcodClientTest {
     private companion object {
         val SAMPLE_REQUEST = ArcodJobRequest(
             albumId = "0093624804567",
-            trackId = 8767428L,
+            trackId = "8767428",
             albumTitle = "Blood In My Eye",
             artistName = "Ja Rule",
-            artistId = 12345L,
+            artistId = "12345",
             coverUrl = "https://img.arcod.xyz/large.jpg",
             releaseDate = "2003-11-04",
             tracksCount = 13,

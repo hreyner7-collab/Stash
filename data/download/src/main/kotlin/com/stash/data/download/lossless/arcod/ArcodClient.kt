@@ -1,5 +1,6 @@
 package com.stash.data.download.lossless.arcod
 
+import android.util.Log
 import java.net.URLEncoder
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -105,7 +106,10 @@ class ArcodClient @Inject constructor(
             val job = try {
                 httpClient.newCall(request).execute().use { response ->
                     if (response.code == 429) throw ArcodRateLimitedException()
-                    if (!response.isSuccessful) return@use null
+                    if (!response.isSuccessful) {
+                        Log.d(TAG, "poll $jobId http ${response.code} (not successful)")
+                        return@use null
+                    }
                     val body = response.body?.string().orEmpty()
                     ArcodJson.decodeFromString<ArcodJob>(body)
                 }
@@ -114,12 +118,16 @@ class ArcodClient @Inject constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                Log.d(TAG, "poll $jobId parse/io error: ${e.javaClass.simpleName} ${e.message}")
                 null
             }
 
             if (job != null) {
                 if (job.status == "completed") return@withContext job
-                if (job.status == "error" || job.error != null) return@withContext null
+                if (job.status == "error" || job.error != null) {
+                    Log.d(TAG, "poll $jobId terminal status='${job.status}' error='${job.error}'")
+                    return@withContext null
+                }
             }
 
             if (System.currentTimeMillis() >= deadline) return@withContext null
@@ -142,6 +150,7 @@ class ArcodClient @Inject constructor(
             .header("Referer", "https://arcod.xyz/")
 
     private companion object {
+        const val TAG = "ArcodClient"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +

@@ -336,23 +336,24 @@ class AggregatorRateLimiterTest {
     }
 
     @Test
-    fun `arcod 429 trips the breaker after the configured threshold`() = runTest {
-        // arcod's 429 is genuine over-rate (account/IP cap), so it counts toward
-        // the breaker (rateLimitTripsBreaker defaults true). circuitBreakAfter = 5,
-        // circuitBreakDurationMs = 10 min. Wait out the 60s 429 backoff between
-        // each report so the holdout past the backoff is the breaker, not backoff.
+    fun `arcod 429s never trip the breaker - they are an hourly-cap slow-down`() = runTest {
+        // ARCOD's 429 means the operator's per-hour render cap is hit ("slow
+        // down"), NOT that the source is unhealthy — so arcod is configured with
+        // rateLimitTripsBreaker = false. A burst of 429s must apply backoff but
+        // must NOT open the breaker, otherwise ARCOD goes dark for the 10-min
+        // breaker window and every download/stream silently falls to yt-dlp
+        // (on-device regression 2026-06-16).
         val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
-        repeat(5) {
+        repeat(10) {
             limiter.reportRateLimited("arcod")
             advanceTimeBy(60_001)
         }
-        // 5 rate-limits trip the breaker for 10 min — still blocked well past
-        // the last 60s backoff.
-        assertTrue(limiter.stateOf("arcod").isCircuitBroken)
-        assertFalse(limiter.acquire("arcod"))
-
-        // Recovers after the 10-minute breaker duration.
-        advanceTimeBy(10 * 60_000L + 1)
+        // Even after 10 rate-limits, the circuit stays closed; once the last 60s
+        // backoff elapses the source is immediately usable again.
+        assertFalse(
+            "arcod 429s must not open the breaker",
+            limiter.stateOf("arcod").isCircuitBroken,
+        )
         assertTrue(limiter.acquire("arcod"))
     }
 

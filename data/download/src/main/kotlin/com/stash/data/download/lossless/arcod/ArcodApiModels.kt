@@ -108,11 +108,18 @@ data class ArcodUrlResponse(
  */
 @Serializable
 data class ArcodJobRequest(
+    // ARCOD's job API takes the Qobuz identifiers as JSON *strings* (the
+    // arcod.xyz web client sends e.g. "albumId":"0075679982193" — an opaque,
+    // leading-zero string — and "trackId":"45238386"). Sending them as bare
+    // JSON numbers makes ARCOD reject the job with
+    // `Invalid argument: track_id (accepted type are number)` — verified
+    // on-device 2026-06-16. Keep these as String to match the web client byte
+    // shape exactly.
     val albumId: String,
-    val trackId: Long,
+    val trackId: String,
     val albumTitle: String,
     val artistName: String,
-    val artistId: Long,
+    val artistId: String,
     val coverUrl: String,
     val releaseDate: String,
     val tracksCount: Int = 1,

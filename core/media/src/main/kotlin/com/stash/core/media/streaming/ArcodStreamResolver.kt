@@ -61,10 +61,10 @@ class ArcodStreamResolver @Inject constructor(
             }
             val request = ArcodJobRequest(
                 albumId = albumId,
-                trackId = item.id,
+                trackId = item.id.toString(),
                 albumTitle = item.album?.title ?: "",
                 artistName = item.performer?.name ?: item.album?.artist?.name ?: query.artist,
-                artistId = item.album?.artist?.id ?: item.performer?.id ?: 0L,
+                artistId = (item.album?.artist?.id ?: item.performer?.id ?: 0L).toString(),
                 coverUrl = item.album?.image?.large ?: "",
                 releaseDate = item.album?.releaseDate ?: "",
                 tracksCount = item.album?.tracksCount ?: 1,

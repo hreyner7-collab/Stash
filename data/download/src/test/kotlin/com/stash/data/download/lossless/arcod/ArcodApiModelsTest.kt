@@ -125,10 +125,10 @@ class ArcodApiModelsTest {
         val body = ArcodJson.encodeToString(
             ArcodJobRequest(
                 albumId = "0093624804567",
-                trackId = 8767428L,
+                trackId = "8767428",
                 albumTitle = "Blood In My Eye",
                 artistName = "Ja Rule",
-                artistId = 12345L,
+                artistId = "12345",
                 coverUrl = "https://img.arcod.xyz/large.jpg",
                 releaseDate = "2003-11-04",
                 tracksCount = 13,
@@ -137,11 +137,15 @@ class ArcodApiModelsTest {
 
         assertTrue(body.contains("\"quality\":27"))
         assertTrue(body.contains("\"format\":\"FLAC\""))
-        assertTrue(body.contains("\"trackId\":8767428"))
+        // Regression guard (on-device 2026-06-16): ARCOD rejects the job
+        // ("Invalid argument: track_id (accepted type are number)") unless the
+        // IDs are JSON *strings*, exactly as the arcod.xyz web client sends.
+        assertTrue("trackId must serialize quoted", body.contains("\"trackId\":\"8767428\""))
+        assertTrue("artistId must serialize quoted", body.contains("\"artistId\":\"12345\""))
         assertTrue(body.contains("\"albumId\":\"0093624804567\""))
         // Round-trips back to an equal object.
         val decoded = ArcodJson.decodeFromString<ArcodJobRequest>(body)
-        assertEquals(8767428L, decoded.trackId)
+        assertEquals("8767428", decoded.trackId)
         assertEquals("FLAC", decoded.format)
         assertFalse(decoded.embedLyrics)
     }
