@@ -110,6 +110,9 @@ class AmzSource @Inject constructor(
                 confidence = confidence,
                 sourceTrackId = meta.asin,
                 coverArtUrl = meta.coverCdn ?: meta.cover,
+                // amz serves encrypted CMAF; the downloader decrypts with this
+                // per-track AES-128 key after fetching (null → nothing to do).
+                decryptionKey = track.decryptionKey,
             )
             Log.d(TAG, "resolved '${query.title}' asin=${meta.asin} confidence=$confidence")
             result
