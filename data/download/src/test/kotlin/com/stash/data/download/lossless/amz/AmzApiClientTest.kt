@@ -50,16 +50,41 @@ class AmzApiClientTest {
     @Test fun `track returns parsed metadata`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(TRACK_JSON))
 
-        val meta = client.track("B07K7VJXVG")
+        val track = client.track("B07K7VJXVG")
 
-        assertThat(meta).isNotNull()
-        assertThat(meta!!.asin).isEqualTo("B07K7VJXVG")
-        assertThat(meta.isrc).isEqualTo("USUM71807761")
-        assertThat(meta.isExplicit).isTrue()
+        assertThat(track).isNotNull()
+        assertThat(track!!.meta.asin).isEqualTo("B07K7VJXVG")
+        assertThat(track.meta.isrc).isEqualTo("USUM71807761")
+        assertThat(track.meta.isExplicit).isTrue()
 
         val request = server.takeRequest()
         assertThat(request.path).endsWith("/track")
         assertThat(request.body.readUtf8()).contains("\"asin\":\"B07K7VJXVG\"")
+    }
+
+    @Test fun `track parses drm key and resolves relative stream url to absolute`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(TRACK_JSON_DRM))
+
+        val track = client.track("B07K7VJXVG")
+
+        assertThat(track).isNotNull()
+        assertThat(track!!.decryptionKey).isEqualTo("8164fe2db5ebd498c8265b3e873462c1")
+        assertThat(track.codec).isEqualTo("flac")
+        // stream.url is site-relative; the client resolves it against the API
+        // origin (the MockWebServer base) into an absolute URL.
+        assertThat(track.streamUrl).isEqualTo(
+            server.url("/api/stream?asin=B07K7VJXVG&tier=ultrahd").toString(),
+        )
+    }
+
+    @Test fun `track leaves drm and stream null when response omits them`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(TRACK_JSON))
+
+        val track = client.track("B07K7VJXVG")
+
+        assertThat(track).isNotNull()
+        assertThat(track!!.decryptionKey).isNull()
+        assertThat(track.streamUrl).isNull()
     }
 
     @Test fun `search returns empty list on non-2xx`() = runTest {
@@ -101,6 +126,17 @@ class AmzApiClientTest {
         "cover":"https://m.media-amazon.com/images/I/714yVKHQM-L.SX1200_QL90.jpg",
         "cover_cdn":"https://m.media-amazon.com/images/I/714yVKHQM-L.SX1200_QL90.jpg",
         "isrc":"USUM71807761","is_explicit":true,"lyrics":{"synced":"[00:00.00]intro"}}}
+        """
+
+        // Captured /api/track shape WITH the drm + stream objects (the fields
+        // the original models dropped). drm.key is the per-track AES-128 hex
+        // key; stream.url is a site-relative encrypted-CMAF path.
+        private const val TRACK_JSON_DRM = """
+        {"metadata":{"asin":"B07K7VJXVG","title":"Ghost Town","artist":"Kanye West",
+        "album":"ye","isrc":"USUM71807761","is_explicit":true},
+        "drm":{"key":"8164fe2db5ebd498c8265b3e873462c1"},
+        "stream":{"url":"/api/stream?asin=B07K7VJXVG&tier=ultrahd","codec":"flac",
+        "sampleRate":48000,"bitrate":1411000,"representationId":"audio_ultrahd"}}
         """
     }
 }

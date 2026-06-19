@@ -48,6 +48,18 @@ class AmzSourceTest {
         isrc = isrc,
     )
 
+    /** Wraps [meta] in an [AmzTrack] carrying a DRM key + encrypted stream URL. */
+    private fun amzTrack(
+        asin: String = "B00ABCDEFG",
+        isrc: String? = "USQX91300108",
+        streamUrl: String? = "https://amz/stream?asin=B00ABCDEFG",
+    ) = AmzTrack(
+        meta = meta(asin, isrc),
+        decryptionKey = "8164fe2db5ebd498c8265b3e873462c1",
+        streamUrl = streamUrl,
+        codec = "flac",
+    )
+
     private fun enabledAndAcquired() {
         coEvery { rateLimiter.stateOf(AmzSource.SOURCE_ID) } returns
             RateLimitState(2.0, 0L, isCircuitBroken = false, msUntilUnblock = 0L, recentFailures = 0)
@@ -118,8 +130,7 @@ class AmzSourceTest {
     fun `happy path with ISRC match yields 0_95 confidence and a result`() = runTest {
         enabledAndAcquired()
         coEvery { client.search(any(), any()) } returns listOf(candidate())
-        coEvery { client.track("B00ABCDEFG") } returns meta(isrc = "USQX91300108")
-        coEvery { client.streamUrl("B00ABCDEFG") } returns "https://amz/stream?asin=B00ABCDEFG"
+        coEvery { client.track("B00ABCDEFG") } returns amzTrack(isrc = "USQX91300108")
 
         val result = source().resolve(query)
 
@@ -143,8 +154,7 @@ class AmzSourceTest {
         enabledAndAcquired()
         val noIsrcQuery = TrackQuery(artist = "Daft Punk", title = "Get Lucky", isrc = null)
         coEvery { client.search(any(), any()) } returns listOf(candidate())
-        coEvery { client.track("B00ABCDEFG") } returns meta(isrc = null)
-        coEvery { client.streamUrl("B00ABCDEFG") } returns "https://amz/stream?asin=B00ABCDEFG"
+        coEvery { client.track("B00ABCDEFG") } returns amzTrack(isrc = null)
 
         val result = source().resolve(noIsrcQuery)
 
@@ -159,8 +169,7 @@ class AmzSourceTest {
     fun `ISRC mismatch is not rejected and keeps matcher confidence`() = runTest {
         enabledAndAcquired()
         coEvery { client.search(any(), any()) } returns listOf(candidate())
-        coEvery { client.track("B00ABCDEFG") } returns meta(isrc = "GBUM71029604") // different master
-        coEvery { client.streamUrl("B00ABCDEFG") } returns "https://amz/stream?asin=B00ABCDEFG"
+        coEvery { client.track("B00ABCDEFG") } returns amzTrack(isrc = "GBUM71029604") // different master
 
         val result = source().resolve(query)
 

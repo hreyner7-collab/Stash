@@ -4,9 +4,9 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.data.download.lossless.amz.AmzApiClient
 import com.stash.data.download.lossless.amz.AmzSearchItem
+import com.stash.data.download.lossless.amz.AmzTrack
 import com.stash.data.download.lossless.amz.AmzTrackMeta
 import io.mockk.coEvery
-import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
@@ -43,11 +43,22 @@ class AmzStreamResolverTest {
         cover = cover,
     )
 
+    private fun amzTrack(
+        asin: String = "B00ASIN001",
+        coverCdn: String? = "https://cdn.example/cover_cdn.jpg",
+        cover: String? = "https://amazon.example/cover.jpg",
+        streamUrl: String? = "https://amz.squid.wtf/api/stream?asin=B00ASIN001",
+    ): AmzTrack = AmzTrack(
+        meta = trackMeta(asin, coverCdn, cover),
+        decryptionKey = "8164fe2db5ebd498c8265b3e873462c1",
+        streamUrl = streamUrl,
+        codec = "flac",
+    )
+
     @Test
     fun resolve_returnsStreamUrl_onHappyPath() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns trackMeta()
-        every { client.streamUrl("B00ASIN001") } returns "https://amz.squid.wtf/api/stream?asin=B00ASIN001"
+        coEvery { client.track("B00ASIN001") } returns amzTrack()
         val resolver = AmzStreamResolver(client)
 
         val result = resolver.resolve(stubTrack())
@@ -63,8 +74,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_fallsBackToCover_whenCoverCdnNull() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns trackMeta(coverCdn = null)
-        every { client.streamUrl("B00ASIN001") } returns "https://amz.squid.wtf/api/stream?asin=B00ASIN001"
+        coEvery { client.track("B00ASIN001") } returns amzTrack(coverCdn = null)
         val resolver = AmzStreamResolver(client)
 
         val result = resolver.resolve(stubTrack())

@@ -59,13 +59,14 @@ class AmzStreamResolver @Inject constructor(
                 Log.d(TAG, "no_match id=${track.id}")
                 return null
             }
-            val meta = client.track(match.item.asin) ?: run {
+            val amz = client.track(match.item.asin) ?: run {
                 Log.d(TAG, "no_meta id=${track.id} asin=${match.item.asin}")
                 return null
             }
+            val meta = amz.meta
             Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN asin=${meta.asin}")
             StreamUrl(
-                url = client.streamUrl(meta.asin),
+                url = amz.streamUrl ?: client.streamUrl(meta.asin),
                 // amz /api/stream URL is stable; auth is the x-captcha-token
                 // header (interceptor-refreshed), not a signed-URL expiry.
                 expiresAtMs = Long.MAX_VALUE,

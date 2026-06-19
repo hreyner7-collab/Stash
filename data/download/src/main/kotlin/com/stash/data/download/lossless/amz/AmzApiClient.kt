@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -74,23 +75,47 @@ class AmzApiClient @Inject constructor(
         }
 
     /**
-     * Resolve a track ASIN to its full metadata. Returns null on any
-     * non-429 failure (HTTP error, parse failure, empty metadata).
+     * Resolve a track ASIN to its [AmzTrack]: full metadata plus the DRM
+     * decryption key and encrypted-CMAF stream URL needed to fetch and decrypt
+     * the audio (`ffmpeg -decryption_key`). Returns null on any non-429 failure
+     * (HTTP error, parse failure, empty metadata). [AmzTrack.decryptionKey] /
+     * [AmzTrack.streamUrl] may be null if the response omits them.
      *
      * @throws AmzRateLimitedException on HTTP 429.
      */
-    suspend fun track(asin: String): AmzTrackMeta? = withContext(Dispatchers.IO) {
+    suspend fun track(asin: String): AmzTrack? = withContext(Dispatchers.IO) {
         val body = buildString {
             append("{\"asin\":")
             append(jsonString(asin))
             append(",\"tier\":\"best\",\"country\":\"US\"}")
         }
         val raw = post("$baseUrl/track", body) ?: return@withContext null
-        runCatching { json.decodeFromString<AmzTrackResponse>(raw).metadata }
-            .getOrElse { e ->
-                Log.w(TAG, "track parse failed", e)
-                null
-            }
+        runCatching {
+            val resp = json.decodeFromString<AmzTrackResponse>(raw)
+            val meta = resp.metadata ?: return@runCatching null
+            AmzTrack(
+                meta = meta,
+                decryptionKey = resp.drm?.key?.takeIf { it.isNotBlank() },
+                streamUrl = resp.stream?.url?.let { resolveStreamUrl(it) },
+                codec = resp.stream?.codec,
+            )
+        }.getOrElse { e ->
+            Log.w(TAG, "track parse failed", e)
+            null
+        }
+    }
+
+    /**
+     * Resolve a (usually site-relative) `stream.url` against the API origin
+     * into an absolute URL. Relative paths like `/api/stream?asin=…` resolve
+     * against [baseUrl]'s host; an already-absolute URL passes through.
+     * Returns null if [raw] is blank or unresolvable.
+     */
+    private fun resolveStreamUrl(raw: String): String? {
+        if (raw.isBlank()) return null
+        return runCatching { baseUrl.toHttpUrl().resolve(raw)?.toString() }
+            .getOrNull()
+            ?: raw.takeIf { it.startsWith("http", ignoreCase = true) }
     }
 
     /**

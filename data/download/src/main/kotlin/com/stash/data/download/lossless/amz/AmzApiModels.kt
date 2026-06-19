@@ -47,6 +47,49 @@ data class AmzSearchAlbum(
 @Serializable
 data class AmzTrackResponse(
     val metadata: AmzTrackMeta? = null,
+    val drm: AmzDrm? = null,
+    val stream: AmzStream? = null,
+)
+
+/**
+ * Per-track DRM material. amz serves CENC AES-CTR-encrypted CMAF, but hands
+ * the client the symmetric AES-128 [key] (32 hex chars) in the SAME
+ * `/api/track` response — decryption is plain `ffmpeg -decryption_key`, NOT
+ * Widevine/EME. Dropping this object (the original `ignoreUnknownKeys` bug) is
+ * what left us saving the encrypted box with no way to decrypt it.
+ */
+@Serializable
+data class AmzDrm(
+    val key: String? = null,
+)
+
+/**
+ * Encrypted-CMAF stream descriptor from `/api/track`. [url] is typically a
+ * site-relative path (`/api/stream?asin=…&tier=…`) resolved against the API
+ * origin by [AmzApiClient]. The numeric fields are advisory (the canonical
+ * values come from the post-decrypt audio probe).
+ */
+@Serializable
+data class AmzStream(
+    val url: String? = null,
+    val codec: String? = null,
+    val sampleRate: Int? = null,
+    val bitrate: Int? = null,
+    val representationId: String? = null,
+)
+
+/**
+ * Resolved result of `POST /api/track`: the track [meta] plus the
+ * [decryptionKey] and encrypted-CMAF [streamUrl] required to fetch and decrypt
+ * the audio. Both may be null for a malformed/old response shape, in which
+ * case the caller degrades (no decrypt possible). [streamUrl] is absolute
+ * (resolved against the API origin).
+ */
+data class AmzTrack(
+    val meta: AmzTrackMeta,
+    val decryptionKey: String?,
+    val streamUrl: String?,
+    val codec: String?,
 )
 
 /**

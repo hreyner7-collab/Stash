@@ -70,12 +70,13 @@ class AmzSource @Inject constructor(
                 return null
             }
 
-            val meta = client.track(match.item.asin)
-            if (meta == null) {
+            val track = client.track(match.item.asin)
+            if (track == null) {
                 Log.d(TAG, "track() returned no metadata for asin=${match.item.asin}")
                 rateLimiter.reportFailure(id)
                 return null
             }
+            val meta = track.meta
 
             // ISRC confirmation BOOSTS confidence when both sides agree, but a
             // mismatch is NOT a rejection — Amazon may legitimately carry a
@@ -93,7 +94,9 @@ class AmzSource @Inject constructor(
             rateLimiter.reportSuccess(id)
             val result = SourceResult(
                 sourceId = id,
-                downloadUrl = client.streamUrl(meta.asin),
+                // Encrypted-CMAF URL from /api/track (the authoritative stream
+                // descriptor); fall back to the built URL only if absent.
+                downloadUrl = track.streamUrl ?: client.streamUrl(meta.asin),
                 // Captcha token rides the shared-client interceptor (Requirement 3).
                 downloadHeaders = emptyMap(),
                 // Requirement 5: FLAC codec, no assumed bit-depth/sample-rate —
