@@ -49,6 +49,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -198,7 +199,7 @@ class PlayerRepositoryImpl @Inject constructor(
             emit(controller?.currentPosition ?: 0L)
             delay(POSITION_UPDATE_INTERVAL_MS)
         }
-    }
+    }.flowOn(Dispatchers.Main)
 
     /** Cached [MediaController] instance; null until [ensureController] succeeds.
      * Internal as a test seam: gate/queue tests inject a mock controller here. */

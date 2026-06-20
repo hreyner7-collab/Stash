@@ -31,6 +31,7 @@ import javax.inject.Singleton
 class QobuzStreamResolver @Inject constructor(
     private val source: QobuzSource,
     private val healthGate: LosslessSourceHealthGate,
+    private val qualityPolicy: StreamQualityPolicy,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         if (healthGate.isDegraded(QobuzSource.SOURCE_ID)) {
@@ -52,7 +53,8 @@ class QobuzStreamResolver @Inject constructor(
             isrc = track.isrc?.takeIf { it.isNotBlank() },
             durationMs = track.durationMs,
         )
-        val result = source.resolveImmediate(query) ?: run {
+        val requestedQuality = qualityPolicy.streamingTier().qobuzCode
+        val result = source.resolveImmediate(query, requestedQuality) ?: run {
             Log.d(TAG, "no_result id=${track.id}")
             return null
         }

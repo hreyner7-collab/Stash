@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
@@ -127,10 +128,10 @@ fun SettingsAudioQualityScreen(
                             onSolveCaptcha = onNavigateToSquidWtfCaptcha,
                         )
 
-                        // -- Lossless quality picker --------------------------
+                        // -- Download quality picker --------------------------
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Lossless quality",
+                            text = "Download quality",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
@@ -146,6 +147,81 @@ fun SettingsAudioQualityScreen(
                                     title = tier.displayLabel,
                                     subtitle = tier.sizeHint,
                                     onClick = { viewModel.onLosslessQualityTierChanged(tier) },
+                                )
+                            }
+                        }
+
+                        // -- Streaming quality block --------------------------
+                        // Per-network tier for *streaming* playback (distinct
+                        // from the download tier above). Save Data is the master
+                        // override: when on, both pickers are dimmed + inert and
+                        // policy forces CD on every network.
+                        Spacer(modifier = Modifier.height(14.dp))
+                        SettingsSectionLabel("Streaming")
+                        GlassCard {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                val saveData = uiState.streamingSaveData
+                                val pickerAlpha = if (saveData) 0.4f else 1f
+
+                                Text(
+                                    text = "On Wi-Fi",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Column(
+                                    modifier = Modifier
+                                        .alpha(pickerAlpha)
+                                        .selectableGroup(),
+                                ) {
+                                    listOf(
+                                        LosslessQualityTier.MAX,
+                                        LosslessQualityTier.HI_RES,
+                                        LosslessQualityTier.CD,
+                                    ).forEach { tier ->
+                                        SettingsPickerRow(
+                                            selected = uiState.streamingWifiTier == tier,
+                                            title = tier.displayLabel,
+                                            subtitle = tier.sizeHint,
+                                            onClick = {
+                                                if (!saveData) viewModel.onStreamingWifiTierChanged(tier)
+                                            },
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "On cellular",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Column(
+                                    modifier = Modifier
+                                        .alpha(pickerAlpha)
+                                        .selectableGroup(),
+                                ) {
+                                    listOf(
+                                        LosslessQualityTier.MAX,
+                                        LosslessQualityTier.HI_RES,
+                                        LosslessQualityTier.CD,
+                                    ).forEach { tier ->
+                                        SettingsPickerRow(
+                                            selected = uiState.streamingCellularTier == tier,
+                                            title = tier.displayLabel,
+                                            subtitle = tier.sizeHint,
+                                            onClick = {
+                                                if (!saveData) viewModel.onStreamingCellularTierChanged(tier)
+                                            },
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                SettingsToggleRow(
+                                    title = "Save Data",
+                                    subtitle = "Force CD quality on every network to minimize data.",
+                                    checked = uiState.streamingSaveData,
+                                    onCheckedChange = viewModel::onStreamingSaveDataChanged,
                                 )
                             }
                         }
