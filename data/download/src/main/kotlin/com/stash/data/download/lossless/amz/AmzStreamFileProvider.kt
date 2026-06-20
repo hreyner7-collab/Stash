@@ -7,8 +7,11 @@ import com.stash.data.download.lossless.LosslessUrlDownloader
 import com.stash.data.download.lossless.SourceResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Decrypt-to-cache seam for amz streaming. amz serves CENC-encrypted CMAF that
@@ -41,11 +44,26 @@ class AmzStreamFileProvider @Inject constructor(
         get() = File(context.cacheDir, CACHE_SUBDIR)
 
     /**
+     * Per-asin locks so concurrent resolves of the SAME track serialize. Without
+     * this, the foreground play and the next-up prefetch can both miss the cache
+     * and fetch into the same `<asin>.flac.enc` temp / decrypt to the same
+     * `<asin>.flac` at once, corrupting the file (observed: a truncated FLAC +
+     * orphaned `.enc`). The second caller waits, then cache-hits. Different asins
+     * never block each other.
+     */
+    private val asinLocks = ConcurrentHashMap<String, Mutex>()
+
+    /**
      * Return a local, decrypted FLAC [File] for [asin], fetching+decrypting the
      * encrypted CMAF at [encryptedStreamUrl] with [key] on a cache miss. Returns
      * null if the fetch/decrypt fails (caller falls through to the next source).
      */
-    suspend fun resolveLocalFile(asin: String, encryptedStreamUrl: String, key: String): File? {
+    suspend fun resolveLocalFile(asin: String, encryptedStreamUrl: String, key: String): File? =
+        asinLocks.getOrPut(asin) { Mutex() }.withLock {
+            resolveLocked(asin, encryptedStreamUrl, key)
+        }
+
+    private suspend fun resolveLocked(asin: String, encryptedStreamUrl: String, key: String): File? {
         val dir = cacheDir.apply { mkdirs() }
         val target = File(dir, "$asin.flac")
         if (target.exists() && target.length() > 0) {

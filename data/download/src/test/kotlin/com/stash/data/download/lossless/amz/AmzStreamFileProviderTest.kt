@@ -10,6 +10,8 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import java.io.File
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Rule
@@ -83,6 +85,40 @@ class AmzStreamFileProviderTest {
 
         assertThat(file!!.readText()).isEqualTo("FRESH")
         coVerify(exactly = 1) { downloader.download(any(), any(), any()) }
+    }
+
+    @Test fun `concurrent resolves of the same asin download only once`() = runTest {
+        var downloads = 0
+        coEvery { downloader.download(any(), any(), any()) } coAnswers {
+            downloads++
+            delay(50) // hold the lock so the second call overlaps
+            secondArg<File>().writeText("DECRYPTED")
+            Result.success(secondArg<File>())
+        }
+
+        val p = provider()
+        val a = async { p.resolveLocalFile("B001", encUrl, key) }
+        val b = async { p.resolveLocalFile("B001", encUrl, key) }
+        val fileA = a.await()
+        val fileB = b.await()
+
+        // The second concurrent caller must wait on the first and then cache-hit,
+        // not re-fetch into the same temp (which corrupts the file).
+        assertThat(downloads).isEqualTo(1)
+        assertThat(fileA!!.readText()).isEqualTo("DECRYPTED")
+        assertThat(fileB!!.readText()).isEqualTo("DECRYPTED")
+    }
+
+    @Test fun `different asins resolve in parallel (no cross-blocking)`() = runTest {
+        coEvery { downloader.download(any(), any(), any()) } answers {
+            secondArg<File>().writeText("OK")
+            Result.success(secondArg<File>())
+        }
+
+        val p = provider()
+        assertThat(p.resolveLocalFile("AAA", encUrl, key)).isNotNull()
+        assertThat(p.resolveLocalFile("BBB", encUrl, key)).isNotNull()
+        coVerify(exactly = 2) { downloader.download(any(), any(), any()) }
     }
 
     @Test fun `download failure returns null`() = runTest {
