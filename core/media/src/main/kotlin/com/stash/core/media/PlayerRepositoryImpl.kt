@@ -315,6 +315,16 @@ class PlayerRepositoryImpl @Inject constructor(
     override val userMessages: kotlinx.coroutines.flow.SharedFlow<String> =
         _userMessages.asSharedFlow()
 
+    /**
+     * Track ids with a next-up prefetch resolve currently in flight. Dedups
+     * the three prefetchNextTrack call sites so a single advance can't fan out
+     * concurrent identical resolves (quota-burns a job-based source like
+     * arcod). A [java.util.concurrent.ConcurrentHashMap]-backed set so adds are
+     * atomic across the resolves running on the scope's dispatcher.
+     */
+    private val prefetchInFlight: MutableSet<Long> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     private val cascadeGuard = StreamErrorCascadeGuard()
     private val _streamingHaltedEvents = MutableSharedFlow<StreamingHaltedEvent>(
         replay = 1,
@@ -336,12 +346,95 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun skipNext() {
         cascadeGuard.onUserTransport()
-        ensureController()?.seekToNextMediaItem()
+        val controller = ensureController() ?: return
+        upgradeSlotIfLossy(controller, controller.nextMediaItemIndex)
+        controller.seekToNextMediaItem()
     }
 
     override suspend fun skipPrevious() {
         cascadeGuard.onUserTransport()
-        ensureController()?.seekToPreviousMediaItem()
+        val controller = ensureController() ?: return
+        upgradeSlotIfLossy(controller, controller.previousMediaItemIndex)
+        controller.seekToPreviousMediaItem()
+    }
+
+    /**
+     * A skip should behave like a tap: land the user on the best available
+     * quality, not on whatever provisional item the speculative background
+     * fill happened to leave in the timeline slot.
+     *
+     * The queue-wide fill resolves with `allowYtDlp = false` and deliberately
+     * skips the slow, quota-capped lossless sources (arcod), so during a
+     * kennyy/squid outage the slot the user skips to is often a lossy YouTube
+     * URL. Only the single prefetched next-up gets upgraded to lossless;
+     * skipping past it (or any sideways jump) would otherwise play AAC even
+     * though arcod has the track.
+     *
+     * So before advancing, if the target slot is a stream-resolved LOSSY item
+     * (origin == youtube — local files and already-lossless slots carry a
+     * different/no origin), foreground-resolve it (`allowYtDlp = true`, which
+     * lets arcod run) and swap the slot's URL in place. The brief resolve
+     * shows the same buffering spinner as a tap. A miss (resolver returns null
+     * or still youtube) leaves the slot untouched — the user still advances,
+     * just to the provisional item, exactly as before.
+     *
+     * No-op (instant advance) when the slot is absent, local, or already
+     * lossless — the common case once a track has been tapped/prefetched.
+     */
+    private suspend fun upgradeSlotIfLossy(controller: MediaController, slotIndex: Int) {
+        if (slotIndex < 0 || slotIndex >= controller.mediaItemCount) return
+        val current = controller.getMediaItemAt(slotIndex)
+        val extras = current.mediaMetadata.extras ?: return
+        val origin = extras.getString(EXTRA_STREAM_ORIGIN) ?: return
+        // Only provisional lossy (youtube) slots need upgrading. Lossless
+        // origins (arcod/kennyy/squid/amz) are already best-available.
+        if (origin != YouTubeStreamResolver.ORIGIN) return
+        val trackId = extras.getLong(EXTRA_TRACK_ID, -1L)
+        if (trackId <= 0L) return
+
+        if (!streamingPreference.current()) return
+        val entity = trackDao.getById(trackId) ?: return
+
+        // Hold the tap spinner across the resolve so the skip feels identical
+        // to tapping a track.
+        val myEpoch = ++setQueueEpoch
+        tapResolveEpoch = myEpoch
+        _playerState.value = _playerState.value.copy(isBuffering = true)
+        try {
+            // Full-fat resolve (allowYtDlp = true) so the lossless sources —
+            // arcod in particular — get a chance the speculative fill denied them.
+            val resolved = runCatching {
+                streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
+            }.getOrNull()
+            if (resolved != null && resolved.origin != YouTubeStreamResolver.ORIGIN) {
+                streamUrlCache.put(trackId, resolved)
+                // Swap the slot in place. Re-read the index — nothing else
+                // mutates the timeline on this (main) dispatcher during the
+                // suspending resolve, but guard against a shrunk timeline.
+                if (slotIndex < controller.mediaItemCount) {
+                    val slot = controller.getMediaItemAt(slotIndex)
+                    val newExtras = Bundle(slot.mediaMetadata.extras ?: Bundle()).apply {
+                        // Flip the quality metadata so Now Playing shows the
+                        // real FLAC tier instead of the stale "via YT" badge.
+                        resolved.codec?.let { putString(EXTRA_STREAM_CODEC, it) }
+                        resolved.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
+                        resolved.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
+                        resolved.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
+                        resolved.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
+                    }
+                    val swapped = slot.buildUpon()
+                        .setUri(resolved.url)
+                        .setMediaMetadata(
+                            slot.mediaMetadata.buildUpon().setExtras(newExtras).build(),
+                        )
+                        .build()
+                    controller.replaceMediaItem(slotIndex, swapped)
+                }
+            }
+        } finally {
+            tapResolveEpoch = -1L
+            _playerState.value = _playerState.value.copy(isBuffering = false)
+        }
     }
 
     override suspend fun seekTo(positionMs: Long) {
@@ -684,6 +777,16 @@ class PlayerRepositoryImpl @Inject constructor(
         val nowMs = System.currentTimeMillis()
         if (cached != null && cached.expiresAtMs > nowMs + PREFETCH_FRESH_THRESHOLD_MS) return
 
+        // In-flight dedup. Three call sites fire prefetchNextTrack (the
+        // currentIndex watcher + the two explicit kicks in setQueue/fill), and
+        // the fresh-cache check above can't dedup CONCURRENT resolves of the
+        // same next-up (none has cached yet). Without this guard a single
+        // advance fans out up to 3 identical resolves — for a slow, job-based,
+        // 50/hr-capped source like arcod that's 3 render jobs and 3× the quota
+        // burn (verified on-device 2026-06-21). Claim the id; a racing call for
+        // the same next-up returns immediately and lets the winner cache it.
+        if (!prefetchInFlight.add(next.id)) return
+
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
         val entity = trackDao.getById(next.id) ?: next.toEntity()
@@ -693,12 +796,15 @@ class PlayerRepositoryImpl @Inject constructor(
             // Qobuz-proxy outage even if it falls through to the YouTube path.
             streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
         } catch (ce: CancellationException) {
+            prefetchInFlight.remove(next.id)
             throw ce
         } catch (e: Exception) {
+            prefetchInFlight.remove(next.id)
             Log.w(TAG, "prefetch-next failed for id=${next.id}: ${e.message}")
             Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=throw:${e.javaClass.simpleName}")
             return
         }
+        prefetchInFlight.remove(next.id)
         if (resolved == null) {
             Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=null")
             return
