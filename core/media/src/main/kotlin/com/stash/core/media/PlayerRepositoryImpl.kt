@@ -263,6 +263,23 @@ class PlayerRepositoryImpl @Inject constructor(
     private var queueBuildJob: Job? = null
 
     /**
+     * The in-flight skip navigation (optimistic advance + resolve). A new skip
+     * cancels the prior one so rapid Next/Prev taps don't each run a full
+     * resolve to completion (which burns a job-based source's quota) — only the
+     * settled target resolves and plays.
+     */
+    private var skipNavJob: Job? = null
+
+    /**
+     * The logical-queue index the user is optimistically navigating toward via
+     * rapid skips, before any of them has resolved+landed. Lets each tap
+     * advance one more track from the PENDING target rather than from the
+     * (not-yet-changed) currently-playing track. Cleared once a navigation
+     * lands or a fresh queue is set. internal as a test seam.
+     */
+    internal var pendingNavIndex: Int? = null
+
+    /**
      * Monotonic counter incremented on every [setQueue] entry. Used as
      * a race guard for slow resolves: when a foreground resolve finally
      * returns, we check that no newer setQueue has been called in the
@@ -356,26 +373,59 @@ class PlayerRepositoryImpl @Inject constructor(
         // streaming track — route the LOGICAL next through skipToQueueIndex,
         // which resolves it (with a buffering spinner) and plays it. Either way
         // the user moves forward.
-        if (controller.hasNextMediaItem()) {
+        if (controller.hasNextMediaItem() && pendingNavIndex == null) {
+            // The next track is already materialized in the timeline — advance
+            // instantly (this also respects Media3 shuffle order).
             controller.seekToNextMediaItem()
         } else {
-            val nextLogical = currentLogicalIndex(controller) + 1
-            if (nextLogical in 1 until currentQueueTracks.size) {
-                skipToQueueIndex(nextLogical)
-            }
+            // Timeline frontier (the background fill couldn't pre-resolve the
+            // next streaming track) OR a rapid-skip chain is already in flight:
+            // advance one more from the pending target, optimistically.
+            val base = pendingNavIndex ?: currentLogicalIndex(controller)
+            val target = base + 1
+            if (target in 1 until currentQueueTracks.size) navigateToLogical(target)
         }
     }
 
     override suspend fun skipPrevious() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        if (controller.hasPreviousMediaItem()) {
+        if (controller.hasPreviousMediaItem() && pendingNavIndex == null) {
             controller.seekToPreviousMediaItem()
         } else {
-            val prevLogical = currentLogicalIndex(controller) - 1
-            if (prevLogical in 0 until currentQueueTracks.size) {
-                skipToQueueIndex(prevLogical)
-            }
+            val base = pendingNavIndex ?: currentLogicalIndex(controller)
+            val target = base - 1
+            if (target in 0 until currentQueueTracks.size) navigateToLogical(target)
+        }
+    }
+
+    /**
+     * Optimistic, debounced navigation to a logical-queue index — the engine
+     * behind a skip when the target isn't already playable in the timeline.
+     *
+     * Cancels any prior in-flight skip resolve (so rapid taps don't each run a
+     * full, quota-spending resolve — only the settled target does), records the
+     * [pendingNavIndex] so the next tap advances one further, then re-anchors
+     * the queue at [targetIndex] via [setQueueInternal] with `optimisticDisplay`
+     * on: Now Playing flips to the target with a spinner and the current track
+     * pauses immediately, so the skip feels instant even while the (possibly
+     * slow) resolve runs in the background. Once it lands, [pendingNavIndex]
+     * clears.
+     */
+    private fun navigateToLogical(targetIndex: Int) {
+        if (targetIndex !in currentQueueTracks.indices) return
+        pendingNavIndex = targetIndex
+        skipNavJob?.cancel()
+        skipNavJob = scope.launch {
+            setQueueInternal(
+                currentQueueTracks,
+                targetIndex,
+                startPositionMs = 0L,
+                optimisticDisplay = true,
+            )
+            // Landed (resolve applied) — unless a newer skip superseded us, in
+            // which case it owns pendingNavIndex now.
+            if (pendingNavIndex == targetIndex) pendingNavIndex = null
         }
     }
 
@@ -409,11 +459,25 @@ class PlayerRepositoryImpl @Inject constructor(
      * argument matchers — stays unchanged. [resumeLastQueue] uses this to
      * continue from the saved position.
      */
-    private suspend fun setQueueInternal(tracks: List<Track>, startIndex: Int, startPositionMs: Long) {
+    private suspend fun setQueueInternal(
+        tracks: List<Track>,
+        startIndex: Int,
+        startPositionMs: Long,
+        optimisticDisplay: Boolean = false,
+    ) {
         // Any prior background fill belongs to a previous queue; kill it
         // so its addMediaItem calls can't pollute the new one.
         queueBuildJob?.cancel()
         queueBuildJob = null
+
+        // A real new-queue tap (NOT a skip navigation) ends any in-flight skip
+        // chain and resets its pending target. The skip path itself runs with
+        // optimisticDisplay = true, so it never cancels its own job here.
+        if (!optimisticDisplay) {
+            skipNavJob?.cancel()
+            skipNavJob = null
+            pendingNavIndex = null
+        }
 
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
@@ -439,16 +503,20 @@ class PlayerRepositoryImpl @Inject constructor(
         val myEpoch = ++setQueueEpoch
         val tappedTrack = tracks[safeStart]
 
-        // Optimistic loading state — ONLY when nothing is loaded. With an
-        // idle player the mini player is hidden, so showing the tapped track
-        // + spinner is the only feedback that the tap registered (a yt-dlp
-        // resolve takes ~11 s, antra 60-120 s). But when a track IS loaded,
-        // swapping the display to the tapped track turns the play/pause
-        // button into a disabled spinner for the whole resolve — hijacking
-        // control of still-playing audio. In that case the display stays on
-        // the current track until the resolved track actually starts
-        // (setMediaItems below).
-        if (controller.currentMediaItem == null) {
+        // Optimistic loading state. With an idle player the mini player is
+        // hidden, so showing the tapped track + spinner is the only feedback
+        // that the tap registered (a yt-dlp resolve takes ~11 s; arcod/amz can
+        // be 30-50 s on a slow link). When a track IS loaded, an arbitrary tap
+        // does NOT swap the display (that would turn the play/pause button into
+        // a disabled spinner mid-song, hijacking still-playing audio).
+        //
+        // [optimisticDisplay] = true overrides that for an explicit forward/back
+        // NAVIGATION (skip): the user asked to leave the current track, so we
+        // immediately pause it, swap Now Playing to the target, and show the
+        // spinner while it resolves — the skip feels instant even when the
+        // resolve is slow. See [navigateToLogical].
+        if (controller.currentMediaItem == null || optimisticDisplay) {
+            if (optimisticDisplay) controller.pause()
             _playerState.value = _playerState.value.copy(
                 currentTrack = tappedTrack,
                 isPlaying = false,

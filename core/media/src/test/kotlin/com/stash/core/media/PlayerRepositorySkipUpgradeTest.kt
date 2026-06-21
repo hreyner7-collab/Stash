@@ -5,6 +5,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
 import androidx.test.core.app.ApplicationProvider
+import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
@@ -90,5 +91,22 @@ class PlayerRepositorySkipUpgradeTest {
         repo.skipPrevious()
 
         verify { controller.seekToPreviousMediaItem() }
+    }
+
+    @Test
+    fun `rapid skipNext at the frontier advances the pending target without seeking`() = runTest {
+        // Timeline can't advance (frontier). Each tap must move ONE further
+        // from the pending target — not re-target the same next track — and
+        // must never fall back to a no-op seek.
+        every { controller.hasNextMediaItem() } returns false
+        repo.currentQueueTracks = (10L..13L).map { Track(id = it, title = "t$it", artist = "a") }
+        every { controller.currentMediaItem } returns currentItem(10) // logical index 0
+
+        repo.skipNext()
+        assertThat(repo.pendingNavIndex).isEqualTo(1)
+        repo.skipNext()
+        assertThat(repo.pendingNavIndex).isEqualTo(2)
+
+        verify(exactly = 0) { controller.seekToNextMediaItem() }
     }
 }
