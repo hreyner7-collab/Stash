@@ -246,7 +246,9 @@ class PlayerRepositoryImpl @Inject constructor(
      * the playing track isn't in this list.
      */
     @Volatile
-    private var currentQueueTracks: List<Track> = emptyList()
+    // internal (not private) as a test seam — skip tests drive the logical
+    // queue directly to exercise the timeline-frontier routing.
+    internal var currentQueueTracks: List<Track> = emptyList()
 
     /** Serializes auto-grow operations so multiple state updates can't fan out. */
     private val growMutex = Mutex()
@@ -347,94 +349,49 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun skipNext() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        upgradeSlotIfLossy(controller, controller.nextMediaItemIndex)
-        controller.seekToNextMediaItem()
+        // Skip must ALWAYS advance — never a no-op. If the timeline can advance
+        // (the next item is materialized), seek to it instantly; this also
+        // respects Media3's shuffle order. If it can't — the timeline frontier
+        // was reached because the background fill couldn't pre-resolve the next
+        // streaming track — route the LOGICAL next through skipToQueueIndex,
+        // which resolves it (with a buffering spinner) and plays it. Either way
+        // the user moves forward.
+        if (controller.hasNextMediaItem()) {
+            controller.seekToNextMediaItem()
+        } else {
+            val nextLogical = currentLogicalIndex(controller) + 1
+            if (nextLogical in 1 until currentQueueTracks.size) {
+                skipToQueueIndex(nextLogical)
+            }
+        }
     }
 
     override suspend fun skipPrevious() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        upgradeSlotIfLossy(controller, controller.previousMediaItemIndex)
-        controller.seekToPreviousMediaItem()
+        if (controller.hasPreviousMediaItem()) {
+            controller.seekToPreviousMediaItem()
+        } else {
+            val prevLogical = currentLogicalIndex(controller) - 1
+            if (prevLogical in 0 until currentQueueTracks.size) {
+                skipToQueueIndex(prevLogical)
+            }
+        }
     }
 
     /**
-     * A skip should behave like a tap: land the user on the best available
-     * quality, not on whatever provisional item the speculative background
-     * fill happened to leave in the timeline slot.
-     *
-     * The queue-wide fill resolves with `allowYtDlp = false` and deliberately
-     * skips the slow, quota-capped lossless sources (arcod), so during a
-     * kennyy/squid outage the slot the user skips to is often a lossy YouTube
-     * URL. Only the single prefetched next-up gets upgraded to lossless;
-     * skipping past it (or any sideways jump) would otherwise play AAC even
-     * though arcod has the track.
-     *
-     * So before advancing, if the target slot is a stream-resolved LOSSY item
-     * (origin == youtube — local files and already-lossless slots carry a
-     * different/no origin), foreground-resolve it (`allowYtDlp = true`, which
-     * lets arcod run) and swap the slot's URL in place. The brief resolve
-     * shows the same buffering spinner as a tap. A miss (resolver returns null
-     * or still youtube) leaves the slot untouched — the user still advances,
-     * just to the provisional item, exactly as before.
-     *
-     * No-op (instant advance) when the slot is absent, local, or already
-     * lossless — the common case once a track has been tapped/prefetched.
+     * The current track's position in the LOGICAL queue ([currentQueueTracks]),
+     * matched by [EXTRA_TRACK_ID] identity rather than the timeline index — the
+     * two diverge whenever the background fill dropped unresolved entries from
+     * the timeline. Returns -1 when the current item carries no track id (can't
+     * locate it). Used by skip to find the logical neighbour when the timeline
+     * itself can't advance.
      */
-    private suspend fun upgradeSlotIfLossy(controller: MediaController, slotIndex: Int) {
-        if (slotIndex < 0 || slotIndex >= controller.mediaItemCount) return
-        val current = controller.getMediaItemAt(slotIndex)
-        val extras = current.mediaMetadata.extras ?: return
-        val origin = extras.getString(EXTRA_STREAM_ORIGIN) ?: return
-        // Only provisional lossy (youtube) slots need upgrading. Lossless
-        // origins (arcod/kennyy/squid/amz) are already best-available.
-        if (origin != YouTubeStreamResolver.ORIGIN) return
-        val trackId = extras.getLong(EXTRA_TRACK_ID, -1L)
-        if (trackId <= 0L) return
-
-        if (!streamingPreference.current()) return
-        val entity = trackDao.getById(trackId) ?: return
-
-        // Hold the tap spinner across the resolve so the skip feels identical
-        // to tapping a track.
-        val myEpoch = ++setQueueEpoch
-        tapResolveEpoch = myEpoch
-        _playerState.value = _playerState.value.copy(isBuffering = true)
-        try {
-            // Full-fat resolve (allowYtDlp = true) so the lossless sources —
-            // arcod in particular — get a chance the speculative fill denied them.
-            val resolved = runCatching {
-                streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
-            }.getOrNull()
-            if (resolved != null && resolved.origin != YouTubeStreamResolver.ORIGIN) {
-                streamUrlCache.put(trackId, resolved)
-                // Swap the slot in place. Re-read the index — nothing else
-                // mutates the timeline on this (main) dispatcher during the
-                // suspending resolve, but guard against a shrunk timeline.
-                if (slotIndex < controller.mediaItemCount) {
-                    val slot = controller.getMediaItemAt(slotIndex)
-                    val newExtras = Bundle(slot.mediaMetadata.extras ?: Bundle()).apply {
-                        // Flip the quality metadata so Now Playing shows the
-                        // real FLAC tier instead of the stale "via YT" badge.
-                        resolved.codec?.let { putString(EXTRA_STREAM_CODEC, it) }
-                        resolved.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
-                        resolved.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
-                        resolved.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
-                        resolved.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
-                    }
-                    val swapped = slot.buildUpon()
-                        .setUri(resolved.url)
-                        .setMediaMetadata(
-                            slot.mediaMetadata.buildUpon().setExtras(newExtras).build(),
-                        )
-                        .build()
-                    controller.replaceMediaItem(slotIndex, swapped)
-                }
-            }
-        } finally {
-            tapResolveEpoch = -1L
-            _playerState.value = _playerState.value.copy(isBuffering = false)
-        }
+    private fun currentLogicalIndex(controller: MediaController): Int {
+        val currentId = controller.currentMediaItem
+            ?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return -1
+        if (currentId <= 0L) return -1
+        return currentQueueTracks.indexOfFirst { it.id == currentId }
     }
 
     override suspend fun seekTo(positionMs: Long) {
