@@ -182,7 +182,13 @@ class PlayerRepositoryImpl @Inject constructor(
             playerState
                 .map { it.currentIndex }
                 .distinctUntilChanged()
-                .collect { idx -> prefetchNextTrack(idx) }
+                .collect { idx ->
+                    // Quality layer: upgrade the immediate next-up via the full
+                    // chain (arcod/amz FLAC). Stability layer: keep the rolling
+                    // fast-lane buffer topped up so the timeline never runs dry.
+                    prefetchNextTrack(idx)
+                    topUpBuffer()
+                }
         }
     }
 
@@ -795,6 +801,56 @@ class PlayerRepositoryImpl @Inject constructor(
      * MediaItem stays in place and [RefreshingDataSourceFactory] handles
      * any 403 at playback time, exactly as before this prefetch existed.
      */
+    /** Guards [topUpBuffer] so overlapping advances don't double-append. */
+    private val bufferTopUpInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Stability layer: keep [BACKGROUND_FILL_LOOKAHEAD] tracks resolved ahead of
+     * the current one in the timeline, topped up on every advance via the FAST
+     * lane (`allowYtDlp = false` → kennyy/squid/youtube; the slow, quota-capped
+     * arcod/amz are foreground-only and stay out of the speculative buffer).
+     * youtube backfills quickly and almost always resolves, so the timeline
+     * never runs dry between advances — playback stays seamless even while the
+     * Qobuz proxies are down. Bounded by [bufferTopUpSlice] so it never resolves
+     * the whole queue. Cheap when the buffer is already full (early return).
+     */
+    private fun topUpBuffer() {
+        if (!bufferTopUpInFlight.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                val controller = controllerDeferred ?: return@launch
+                if (!streamingPreference.current()) return@launch
+                val tracks = currentQueueTracks
+                val count = controller.mediaItemCount
+                if (count == 0) return@launch
+                val currentId = controller.currentMediaItem
+                    ?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return@launch
+                val lastId = controller.getMediaItemAt(count - 1)
+                    .mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return@launch
+                val currentLogical = tracks.indexOfFirst { it.id == currentId }
+                val lastLogical = tracks.indexOfFirst { it.id == lastId }
+                val aheadInTimeline = count - 1 - controller.currentMediaItemIndex
+                val existingIds = (0 until count).mapNotNullTo(HashSet()) {
+                    controller.getMediaItemAt(it).mediaMetadata?.extras
+                        ?.getLong(EXTRA_TRACK_ID, -1L)?.takeIf { id -> id > 0L }
+                }
+                val slice = bufferTopUpSlice(tracks, currentLogical, lastLogical, aheadInTimeline, existingIds)
+                if (slice.isEmpty()) return@launch
+                val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
+                fillQueueAppend(
+                    controller, slice, semaphore, streamingOn = true,
+                    allowYouTube = true, allowYtDlp = false,
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                Log.w(TAG, "topUpBuffer failed: ${e.message}")
+            } finally {
+                bufferTopUpInFlight.set(false)
+            }
+        }
+    }
+
     private suspend fun prefetchNextTrack(currentIndex: Int) {
         val controller = controllerDeferred ?: return
         val tracks = currentQueueTracks
@@ -2030,17 +2086,24 @@ class PlayerRepositoryImpl @Inject constructor(
 }
 
 /**
- * How many tracks AHEAD of the tapped track the background fill resolves into
- * the player timeline up front. The rolling single-next-up prefetch
- * ([PlayerRepositoryImpl.prefetchNextTrack], re-fired on every advance) is what
- * actually keeps auto-advance seamless — this small lookahead only pre-warms a
- * couple of skip-next slots. Kept tiny on purpose: a streaming queue must not
- * resolve the user's whole library up front (a 1000+ track Liked-Songs queue
- * resolving everything is a huge data/CPU waste, and for amz — which fetches +
- * decrypts a whole FLAC per resolve — it tried to download the entire library
- * on one tap and starved the next-up prefetch so playback couldn't advance).
+ * Target depth of the rolling buffer: how many tracks AHEAD of the current one
+ * stay resolved in the player timeline. The initial background fill seeds this
+ * many, and [PlayerRepositoryImpl.topUpBuffer] re-tops it up on every advance
+ * (via the fast lane — youtube backfills quickly, so the timeline never runs
+ * dry). This is the STABILITY layer: a deep, cheap cushion so a single slow or
+ * failing next-up resolve can't end playback. The single-next-up
+ * [PlayerRepositoryImpl.prefetchNextTrack] is the separate QUALITY layer (it
+ * upgrades the immediate next track to arcod/amz FLAC via the full chain).
+ *
+ * Bounded on purpose: a streaming queue must NEVER resolve the whole library up
+ * front (a 1000+ track Liked-Songs queue resolving everything is a huge
+ * data/CPU waste, and for amz — which fetches + decrypts a whole FLAC per
+ * resolve — it tried to download the entire library on one tap). Kept too small
+ * (was 3) it went the other way: the timeline ran dry between advances and
+ * playback stopped after a few tracks. 10 is the balance — a real cushion, a
+ * reasonable amount of background loading.
  */
-internal const val BACKGROUND_FILL_LOOKAHEAD = 3
+internal const val BACKGROUND_FILL_LOOKAHEAD = 10
 
 /** How many tracks BEHIND the tapped track the fill pre-warms (for skip-back). */
 internal const val BACKGROUND_FILL_LOOKBEHIND = 1
@@ -2066,4 +2129,34 @@ internal fun computeFillWindow(tracks: List<Track>, safeStart: Int): FillWindow 
     val backward = if (bwdStart < safeStart) tracks.subList(bwdStart, safeStart) else emptyList()
 
     return FillWindow(forward, backward)
+}
+
+/**
+ * Pure decision for the rolling buffer top-up: which logical tracks to resolve
+ * and append so the timeline keeps [BACKGROUND_FILL_LOOKAHEAD] tracks ahead of
+ * the current one. Returns the slice to append (in order), or empty when the
+ * buffer is already deep enough or the queue has no more tracks.
+ *
+ * @param currentLogical index of the currently-playing track in [tracks].
+ * @param lastLogical index of the timeline's last (frontier) item in [tracks].
+ * @param aheadInTimeline how many materialized items sit after the current one.
+ * @param existingIds track ids already in the timeline (never re-appended).
+ *
+ * Starts at `max(lastLogical+1, currentLogical+2)` so it never touches the
+ * immediate next-up — that slot belongs to the full-chain quality prefetch, and
+ * skipping it avoids a duplicate-insert race with it.
+ */
+internal fun bufferTopUpSlice(
+    tracks: List<Track>,
+    currentLogical: Int,
+    lastLogical: Int,
+    aheadInTimeline: Int,
+    existingIds: Set<Long>,
+): List<Track> {
+    if (currentLogical < 0 || lastLogical < 0) return emptyList()
+    if (aheadInTimeline >= BACKGROUND_FILL_LOOKAHEAD) return emptyList()
+    val from = maxOf(lastLogical + 1, currentLogical + 2)
+    val to = minOf(currentLogical + 1 + BACKGROUND_FILL_LOOKAHEAD, tracks.size)
+    if (from >= to) return emptyList()
+    return tracks.subList(from, to).filter { it.id !in existingIds && !it.isUnavailableForDisplay }
 }
