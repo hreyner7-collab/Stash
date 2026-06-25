@@ -89,8 +89,8 @@ provided it takes precedence over `leadingIcon`.
 **Apply in `SettingsAudioQualityScreen`:** the ARCOD connect `SettingsNavRow` passes
 the ARCOD logo as its leading mark in **both** states (`Connect ARCOD` /
 `ARCOD — connected`). When `uiState.arcodConnected`, append a small **green dot**
-(`StashSuccess #10B981`) after the title as a connected cue. Title/subtitle/onClick
-unchanged. No Ko-fi/Discord here.
+(theme-aware `StashTheme.extendedColors.success` — `#10B981` in dark) after the
+title as a connected cue. Title/subtitle/onClick unchanged. No Ko-fi/Discord here.
 
 ## Files
 
