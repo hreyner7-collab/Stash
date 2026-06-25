@@ -268,6 +268,16 @@ fun HomeScreen(
             )
         }
 
+        // ── Powered-by-ARCOD strip (subordinate to the supporter pill) ────
+        item {
+            PartnerStrip(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 12.dp),
+            )
+        }
+
         // ── Last.fm connect nudge ────────────────────────────────────
         // Shown only when we have creds wired AND the user has local
         // plays accumulating locally AND the user hasn't dismissed the
