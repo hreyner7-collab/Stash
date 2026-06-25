@@ -9,9 +9,8 @@ package com.stash.feature.home
 object ArcodPartner {
     const val NAME = "ARCOD"
     const val TAGLINE = "Lossless FLAC source · part of Stash's backbone"
-    // TODO(input): real operator URLs. Blank = chip hidden until provided.
-    const val KOFI_URL = ""
-    const val DISCORD_URL = ""
+    const val KOFI_URL = "https://ko-fi.com/arcod"
+    const val DISCORD_URL = "https://discord.com/invite/hgC6ZegbKD"
 }
 
 enum class PartnerLinkKind { KOFI, DISCORD }
