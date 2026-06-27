@@ -29,12 +29,9 @@ import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.kennyy.KennyySource
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.backfill.MetadataBackfillState
-import com.stash.data.lyrics.backfill.LyricsBackfillState
-import com.stash.feature.home.banner.LyricsBackfillBannerState
 import com.stash.feature.home.banner.MetadataBackfillBannerState
 import com.stash.feature.home.banner.WaitingForLosslessBannerState
 import com.stash.feature.home.banner.bannerStateFor
-import com.stash.feature.home.banner.lyricsBackfillBannerStateFor
 import com.stash.feature.home.banner.metadataBackfillBannerStateFor
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
@@ -102,7 +99,6 @@ class HomeViewModel @Inject constructor(
     private val downloadNetworkPreference: DownloadNetworkPreference,
     private val streamingPreference: StreamingPreference,
     private val metadataBackfillState: MetadataBackfillState,
-    private val lyricsBackfillState: LyricsBackfillState,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -352,26 +348,15 @@ class HomeViewModel @Inject constructor(
         metadataBackfillState.snapshot.map { metadataBackfillBannerStateFor(it) }
 
     /**
-     * v0.9.36: drives [HomeUiState.lyricsBackfillBanner]. Pure-mapped
-     * from [LyricsBackfillState.snapshot]. Independent of
-     * [metadataBackfillBannerFlow]; both can fire concurrently on a
-     * v0.9.34→v0.9.36 upgrade — the screen renders them stacked.
-     */
-    private val lyricsBackfillBannerFlow: Flow<LyricsBackfillBannerState> =
-        lyricsBackfillState.snapshot.map { lyricsBackfillBannerStateFor(it) }
-
-    /**
-     * Bundles the three Home-banner flows ([bannerStateFlow] +
-     * [metadataBackfillBannerFlow] + [lyricsBackfillBannerFlow]) into a
-     * single emission so the top-level [uiState] combine stays at its
-     * non-vararg-friendly arg count. Mirrors the [authStateFlow]
-     * precedent.
+     * Bundles the Home-banner flows ([bannerStateFlow] +
+     * [metadataBackfillBannerFlow]) into a single emission so the top-level
+     * [uiState] combine stays at its non-vararg-friendly arg count. Mirrors
+     * the [authStateFlow] precedent.
      */
     private val bannersInfoFlow: Flow<BannersInfo> = combine(
         bannerStateFlow,
         metadataBackfillBannerFlow,
-        lyricsBackfillBannerFlow,
-    ) { lossless, backfill, lyrics -> BannersInfo(lossless, backfill, lyrics) }
+    ) { lossless, backfill -> BannersInfo(lossless, backfill) }
 
     /**
      * Bundles the two prompt-banner flows so the top-level combine
@@ -399,7 +384,6 @@ class HomeViewModel @Inject constructor(
     ) { musicData, prompts, playlistSortOrder, tipJar, banners ->
         val bannerState = banners.waitingForLossless
         val metadataBackfillBanner = banners.metadataBackfill
-        val lyricsBackfillBanner = banners.lyricsBackfill
         // Stash Mixes — recipe-driven, generated locally. Separate from
         // sync-imported Daily Mixes so the UI can label them distinctly.
         val stashMixes = musicData.playlists.filter {
@@ -448,7 +432,6 @@ class HomeViewModel @Inject constructor(
             tipJar = tipJar,
             waitingForLosslessBanner = bannerState,
             metadataBackfillBanner = metadataBackfillBanner,
-            lyricsBackfillBanner = lyricsBackfillBanner,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -508,18 +491,6 @@ class HomeViewModel @Inject constructor(
      */
     fun onMetadataBackfillFinishedAcknowledged() {
         viewModelScope.launch { metadataBackfillState.markFinishedAcknowledged() }
-    }
-
-    /**
-     * v0.9.36: counterpart to [onMetadataBackfillFinishedAcknowledged]
-     * for the lyrics-backfill banner. Called by the banner's
-     * `LaunchedEffect` after the 2-second "Done" pulse expires; flips
-     * [LyricsBackfillState] back to IDLE so the snapshot Flow emits a
-     * [LyricsBackfillBannerState.Hidden] mapping and the banner
-     * disappears from Home.
-     */
-    fun onLyricsBackfillFinishedAcknowledged() {
-        viewModelScope.launch { lyricsBackfillState.markFinishedAcknowledged() }
     }
 
     /**
@@ -1002,13 +973,10 @@ private data class PromptsInfo(
 )
 
 /**
- * Internal holder bundling the three Home-banner flows so the top-level
- * combine can treat them as one positional arg (mirrors [AuthInfo]).
- * v0.9.36 added [lyricsBackfill] alongside the existing waiting-for-
- * lossless + metadata-backfill banners.
+ * Internal holder bundling the Home-banner flows so the top-level combine
+ * can treat them as one positional arg (mirrors [AuthInfo]).
  */
 private data class BannersInfo(
     val waitingForLossless: WaitingForLosslessBannerState,
     val metadataBackfill: MetadataBackfillBannerState,
-    val lyricsBackfill: LyricsBackfillBannerState,
 )

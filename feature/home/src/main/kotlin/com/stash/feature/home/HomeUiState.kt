@@ -2,7 +2,6 @@ package com.stash.feature.home
 
 import com.stash.core.model.Playlist
 import com.stash.core.model.Track
-import com.stash.feature.home.banner.LyricsBackfillBannerState
 import com.stash.feature.home.banner.MetadataBackfillBannerState
 import com.stash.feature.home.banner.WaitingForLosslessBannerState
 
@@ -115,17 +114,6 @@ data class HomeUiState(
      */
     val metadataBackfillBanner: MetadataBackfillBannerState =
         MetadataBackfillBannerState.Hidden,
-
-    /**
-     * v0.9.36: state of the "Fetching lyrics" banner. Hidden in the
-     * steady state — only renders while
-     * [com.stash.data.lyrics.worker.LyricsBackfillWorker] is actively
-     * processing rows, and for a 2-second "Done" pulse after
-     * completion. Independent of [metadataBackfillBanner]; both can
-     * be visible simultaneously on a v0.9.34→v0.9.36 upgrade.
-     */
-    val lyricsBackfillBanner: LyricsBackfillBannerState =
-        LyricsBackfillBannerState.Hidden,
 ) {
     /** Total liked songs across both sources. */
     val totalLikedCount: Int get() = spotifyLikedCount + youtubeLikedCount

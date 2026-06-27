@@ -178,7 +178,6 @@ class HomeViewModelPlaybackTest {
             downloadNetworkPreference = mock(),
             streamingPreference = streamingPreference,
             metadataBackfillState = mock(),
-            lyricsBackfillState = mock(),
             context = mock(),
         )
     }
