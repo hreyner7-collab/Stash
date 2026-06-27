@@ -173,6 +173,15 @@ class StashPlaybackService : MediaLibraryService() {
          * worst-case arm jitter to a quarter-second.
          */
         private const val CROSSFADE_POLL_INTERVAL_MS = 250L
+
+        /** Lead time before the fade window to prime the spare (decoupled from fire). */
+        private const val PREPARE_LEAD_MS = 8_000L
+
+        /** Slack left on the outgoing when the fade ends, so it doesn't hit its natural end. */
+        private const val HANDOFF_MARGIN_MS = 500L
+
+        /** Below this much usable fade, skip the crossfade (hard cut). */
+        private const val MIN_FADE_MS = 800L
     }
 
     private var mediaSession: MediaLibrarySession? = null
@@ -193,17 +202,26 @@ class StashPlaybackService : MediaLibraryService() {
     private var prefetchPollJob: Job? = null
 
     /**
-     * Drives the auto-advance crossfade. Built in [onCreate] once player A
-     * exists; null until then. Player B is built lazily on first fade.
+     * Two-player crossfade engine (role-swap). Owns players A and B; whichever
+     * is master is wired to [mediaSession]. Built in [onCreate].
      */
-    private var crossfadeController: CrossfadeController? = null
+    private var crossfadeEngine: CrossfadeEngine? = null
 
     /**
-     * Dedicated ~250 ms poll feeding [crossfadeController]. Separate from
-     * [prefetchPollJob] (which ticks every 5 s — too coarse to catch a 1–12 s
-     * fade-arm window). Cheap no-op when crossfade is off.
+     * Dedicated ~250 ms poll driving crossfade prepare + fire decisions.
+     * Separate from [prefetchPollJob] (5 s — too coarse for a 1–12 s seam).
      */
     private var crossfadePollJob: Job? = null
+
+    /** Cached crossfade prefs (off by default); collected in [onCreate]. */
+    @Volatile private var crossfadeEnabled = false
+    @Volatile private var crossfadeDurationMs = 6000L
+
+    /** mediaId the spare is currently primed for, so we don't re-prepare it. */
+    @Volatile private var crossfadePreparedId: String? = null
+
+    /** The player [playerListener] is currently attached to (moves on swap). */
+    private var listenedPlayer: Player? = null
 
     /**
      * Forces playback to start when a real *play* request restores a queue
@@ -216,6 +234,71 @@ class StashPlaybackService : MediaLibraryService() {
      * reboot. See [ResumePlayGate].
      */
     private val resumePlayGate = ResumePlayGate()
+
+    /**
+     * The per-track / transport listener. Extracted to a field (not inline) so
+     * it can be moved from the old master to the new one when the crossfade
+     * engine swaps players. Always references the CURRENT master via
+     * [crossfadeEngine].masterPlayer rather than a captured instance.
+     */
+    @OptIn(UnstableApi::class)
+    private val playerListener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // A user skip (SEEK) or queue change (PLAYLIST_CHANGED) aborts a
+            // pending/in-flight crossfade and hard-cuts. The engine's own
+            // role-swap does NOT surface here — we move this listener to the new
+            // master instead of advancing the old one.
+            when (reason) {
+                Player.MEDIA_ITEM_TRANSITION_REASON_SEEK,
+                Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED -> {
+                    crossfadeEngine?.cancelTransition()
+                    crossfadePreparedId = null
+                }
+            }
+            updateCustomLayout()
+            onTrackTransitionForLoudness(mediaItem)
+            prefetchOrchestrator.resetSession()
+            val master = crossfadeEngine?.masterPlayer
+            if (master?.isPlaying == true) {
+                startPrefetchPoll(master)
+                startCrossfadePoll(master)
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            // During a transition the engine owns both players' play/pause state
+            // (pauseAtEndOfMediaItems, the spare) — ignore the churn it makes.
+            if (crossfadeEngine?.isTransitioning() == true) return
+            val master = crossfadeEngine?.masterPlayer
+            if (isPlaying && master != null) {
+                startPrefetchPoll(master)
+                startCrossfadePoll(master)
+            } else {
+                prefetchPollJob?.cancel(); prefetchPollJob = null
+                crossfadePollJob?.cancel(); crossfadePollJob = null
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            crossfadeEngine?.cancelTransition()
+            crossfadePreparedId = null
+        }
+
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            val master = crossfadeEngine?.masterPlayer ?: return
+            when (resumePlayGate.onTimelineChanged(
+                timeline.windowCount,
+                master.playbackState == Player.STATE_IDLE,
+            )) {
+                ResumePlayGate.Action.PREPARE_THEN_PLAY -> { master.prepare(); master.play() }
+                ResumePlayGate.Action.PLAY -> master.play()
+                ResumePlayGate.Action.NONE -> Unit
+            }
+        }
+
+        override fun onRepeatModeChanged(repeatMode: Int) = updateCustomLayout()
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = updateCustomLayout()
+    }
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -265,30 +348,18 @@ class StashPlaybackService : MediaLibraryService() {
             amzHttpClient = okHttpClient,
         )
 
-        // Player A — the sole MediaSession/queue owner. Holds audio focus,
-        // becoming-noisy and wake-lock. Player B (built lazily by the crossfade
-        // controller) reuses this same builder with handleAudioFocus = false.
-        val player = buildExoPlayer(
-            handleAudioFocus = true,
-            mediaSourceFactory = mediaSourceFactory,
-            audioAttributes = audioAttributes,
-        )
-
-        // Set the pre-generated session ID on the player (A only)
-        player.audioSessionId = audioSessionId
-
-        crossfadeController = CrossfadeController(
-            playerA = player,
-            buildPlayerB = {
-                buildExoPlayer(
-                    handleAudioFocus = false,
-                    mediaSourceFactory = mediaSourceFactory,
-                    audioAttributes = audioAttributes,
-                )
-            },
-            crossfadePreference = crossfadePreference,
+        // Two-player crossfade engine (role-swap). Both players build with
+        // handleAudioFocus = false; the engine manages audio focus manually so
+        // a single request covers whichever player is master across swaps.
+        val engine = CrossfadeEngine(
+            context = this,
+            buildPlayer = { buildExoPlayer(mediaSourceFactory, audioAttributes) },
             scope = serviceScope,
         )
+        engine.initialize()
+        crossfadeEngine = engine
+        val player = engine.masterPlayer
+        player.audioSessionId = audioSessionId
 
         // Set session activity so tapping the media notification opens the app.
         // The intent targets the app's launcher activity via the package's launch intent.
@@ -308,116 +379,37 @@ class StashPlaybackService : MediaLibraryService() {
 
         mediaSession = session
 
-        // Per-track wiring on every transition:
-        //   1. Heart-button notification icon (filled vs. outlined) so the
-        //      lockscreen reflects the new track's Stash-Liked state. The
-        //      per-track observe loop inside [refreshLikeButton] keeps the
-        //      icon in sync if the user toggles like from elsewhere
-        //      (Now Playing, Library, etc.) while audio is playing.
-        //   2. Loudness normalisation: pull the new track's measured LUFS /
-        //      true-peak from the DB and push the computed per-track gain
-        //      to [LoudnessController]. The DSP layer reads the controller
-        //      state and ramps to the new target via LoudnessGainProcessor.
-        player.addListener(object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                // A user skip (SEEK) or queue change (PLAYLIST_CHANGED) cancels an
-                // in-flight fade and hard-cuts; the controller's own fade-advance
-                // seek is exempt (consumeSelfSeek). Natural auto-advance (AUTO) and
-                // repeat (REPEAT) never cancel.
-                crossfadeController?.let { controller ->
-                    when (reason) {
-                        Player.MEDIA_ITEM_TRANSITION_REASON_SEEK ->
-                            if (!controller.consumeSelfSeek()) controller.cancelFade()
-                        Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED ->
-                            controller.cancelFade()
-                    }
-                }
-                updateCustomLayout()
-                onTrackTransitionForLoudness(mediaItem)
-                // Every transition gives the orchestrator a fresh
-                // "attempted" budget so the new "next" track can be
-                // prefetched even if the previous next-id was the same
-                // track id we already burned an attempt on (e.g.
-                // REPEAT_ONE loops, manual skip-back).
-                prefetchOrchestrator.resetSession()
-                // Restart the polls against the new current item.
-                if (player.isPlaying) {
-                    startPrefetchPoll(player)
-                    startCrossfadePoll(player)
-                }
-            }
+        // Per-track wiring (heart icon, loudness, prefetch) + transport/resume
+        // handling lives in [playerListener], attached to the current master
+        // and moved to the new master whenever the crossfade engine swaps.
+        player.addListener(playerListener)
+        listenedPlayer = player
 
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    startPrefetchPoll(player)
-                    startCrossfadePoll(player)
-                    crossfadeController?.onResume()
-                } else {
-                    prefetchPollJob?.cancel()
-                    prefetchPollJob = null
-                    crossfadePollJob?.cancel()
-                    crossfadePollJob = null
-                    crossfadeController?.onPause()
-                }
-            }
+        // Cache crossfade prefs for the poll's prepare/fire decisions.
+        serviceScope.launch { crossfadePreference.enabled.collect { crossfadeEnabled = it } }
+        serviceScope.launch { crossfadePreference.durationMs.collect { crossfadeDurationMs = it } }
 
-            override fun onPlayerError(error: PlaybackException) {
-                // A errored (e.g. an unresolved next URL that slipped past the
-                // arm guard) — abandon any fade so B doesn't linger and A
-                // returns to full volume for the normal error-recovery path.
-                crossfadeController?.cancelFade()
-            }
-
-            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-                // When a play-triggered resumption lands its restored queue
-                // on the (previously empty) player, force playback to start.
-                // The gate keeps this scoped to resumption only — normal
-                // in-app setQueue never arms it, and boot-time notification
-                // population (isForPlayback = false) leaves it closed so the
-                // device doesn't auto-play after a reboot. Idempotent with
-                // Media3's own post-resumption play().
-                when (resumePlayGate.onTimelineChanged(
-                    timeline.windowCount,
-                    player.playbackState == Player.STATE_IDLE,
-                )) {
-                    ResumePlayGate.Action.PREPARE_THEN_PLAY -> {
-                        player.prepare()
-                        player.play()
-                    }
-                    ResumePlayGate.Action.PLAY -> player.play()
-                    ResumePlayGate.Action.NONE -> Unit
-                }
-            }
-
-            override fun onRepeatModeChanged(repeatMode: Int) {
-                updateCustomLayout()
-            }
-
-            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                updateCustomLayout()
-            }
-        })
         updateCustomLayout()
     }
 
     /**
      * Builds an [ExoPlayer] with Stash's renderer/EQ chain, media-source
-     * factory and load control. Player A passes `handleAudioFocus = true` and
-     * additionally owns becoming-noisy + wake-lock; the crossfade partner B
-     * passes `false` and owns neither (only A drives the session).
+     * factory and load control. Used for BOTH crossfade players. Audio focus is
+     * `false` (the [CrossfadeEngine] manages focus manually so it follows the
+     * master across swaps); becoming-noisy + wake stay on so whichever player is
+     * master pauses on unplug and holds the wake lock.
      */
     @OptIn(UnstableApi::class)
     private fun buildExoPlayer(
-        handleAudioFocus: Boolean,
         mediaSourceFactory: StashMediaSourceFactory,
         audioAttributes: AudioAttributes,
     ): ExoPlayer {
         // Each player gets its OWN LoadControl. Media3 forbids two players
         // sharing a LoadControl unless they also share a playback thread —
-        // crossfade player B runs on its own thread, so a shared instance
-        // throws IllegalStateException on B.prepare(). Optimised buffer for
-        // local music: large buffers kill storage-I/O micro-stutters; low
-        // playback thresholds keep start-up snappy.
+        // the spare runs on its own thread, so a shared instance throws
+        // IllegalStateException on prepare(). Optimised buffer for local music:
+        // large buffers kill storage-I/O micro-stutters; low playback
+        // thresholds keep start-up snappy.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs = */ 30_000,
@@ -426,43 +418,94 @@ class StashPlaybackService : MediaLibraryService() {
                 /* bufferForPlaybackAfterRebufferMs = */ 2_000,
             )
             .build()
-        val builder = ExoPlayer.Builder(this)
+        return ExoPlayer.Builder(this)
             .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
-            .setAudioAttributes(audioAttributes, handleAudioFocus)
-        if (handleAudioFocus) {
-            builder.setHandleAudioBecomingNoisy(true).setWakeMode(C.WAKE_MODE_LOCAL)
-        }
-        return builder.build()
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
     }
 
     /**
-     * ~250 ms poll feeding [CrossfadeController.onProgress] so the fade can arm
-     * within the 1–12 s window before track end. Modeled on [startPrefetchPoll]
-     * but finer-grained; runs only while playing and no-ops cheaply when
-     * crossfade is disabled.
+     * ~250 ms poll driving the crossfade. Each tick [evaluateCrossfade] primes
+     * the spare early and fires the fade at the seam. Runs only while the master
+     * is playing; the swap callback restarts it against the new master.
      */
     @OptIn(UnstableApi::class)
     private fun startCrossfadePoll(player: Player) {
         crossfadePollJob?.cancel()
-        val controller = crossfadeController ?: return
-        android.util.Log.i("Crossfade", "startCrossfadePoll isPlaying=${player.isPlaying}")
         crossfadePollJob = serviceScope.launch {
             while (isActive && player.isPlaying) {
-                val nextIndex = player.nextMediaItemIndex
-                val hasResolvedNext = nextIndex != C.INDEX_UNSET &&
-                    runCatching { player.getMediaItemAt(nextIndex) }
-                        .getOrNull()
-                        ?.let(::isNextResolved) == true
-                controller.onProgress(
-                    positionMs = player.currentPosition,
-                    durationMs = player.duration,
-                    hasResolvedNext = hasResolvedNext,
-                    repeatMode = player.repeatMode,
-                )
+                evaluateCrossfade(player)
                 delay(CROSSFADE_POLL_INTERVAL_MS)
             }
+        }
+    }
+
+    /**
+     * One crossfade poll tick. Two phases, both no-ops unless crossfade is on
+     * and conditions hold:
+     *  - **prepare**: well before the seam (`fade + lead`), prime the spare on
+     *    the resolved next item so its readiness is never raced at fire time.
+     *  - **fire**: inside the fade window, once the spare is buffered, run the
+     *    equal-power fade + role-swap via [CrossfadeEngine.performTransition].
+     */
+    @OptIn(UnstableApi::class)
+    private fun evaluateCrossfade(player: Player) {
+        val engine = crossfadeEngine ?: return
+        if (!crossfadeEnabled || engine.isTransitioning()) return
+        if (player.repeatMode == Player.REPEAT_MODE_ONE) return
+        val duration = player.duration
+        if (duration <= 0) return
+        val fade = crossfadeDurationMs
+        if (duration <= 2 * fade) return // skip very short tracks
+        val nextIndex = player.nextMediaItemIndex
+        if (nextIndex == C.INDEX_UNSET) return
+        val nextItem = runCatching { player.getMediaItemAt(nextIndex) }.getOrNull() ?: return
+        if (!isNextResolved(nextItem)) return
+        val nextId = nextItem.mediaId
+        val remaining = duration - player.currentPosition
+
+        // Phase 1 — prime the spare early (decoupled from the fade).
+        if (remaining <= fade + PREPARE_LEAD_MS && !engine.isPreparedFor(nextId)) {
+            android.util.Log.i("Crossfade", "prepare next=$nextId remaining=$remaining")
+            engine.prepareNext(nextItem)
+            crossfadePreparedId = nextId
+        }
+
+        // Phase 2 — fire at the seam once the spare is buffered.
+        if (remaining <= fade && engine.isPreparedFor(nextId) && engine.isNextReady()) {
+            val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
+            if (fadeMs >= MIN_FADE_MS) {
+                android.util.Log.i("Crossfade", "fire fadeMs=$fadeMs remaining=$remaining next=$nextId")
+                crossfadePollJob?.cancel() // swap restarts the poll on the new master
+                engine.performTransition(fadeMs) { newMaster -> onCrossfadeSwap(newMaster) }
+            }
+        }
+    }
+
+    /**
+     * Promotes the incoming player to master after a crossfade: re-points the
+     * MediaSession, moves [playerListener], re-runs per-track wiring for the new
+     * current item, and restarts the polls. Invoked on the main thread by the
+     * engine at the end of the fade.
+     */
+    @OptIn(UnstableApi::class)
+    private fun onCrossfadeSwap(newMaster: ExoPlayer) {
+        android.util.Log.i("Crossfade", "swap -> ${newMaster.currentMediaItem?.mediaId} pos=${newMaster.currentPosition}")
+        mediaSession?.player = newMaster
+        listenedPlayer?.removeListener(playerListener)
+        newMaster.addListener(playerListener)
+        listenedPlayer = newMaster
+        crossfadePreparedId = null
+        onTrackTransitionForLoudness(newMaster.currentMediaItem)
+        updateCustomLayout()
+        prefetchOrchestrator.resetSession()
+        if (newMaster.isPlaying) {
+            startPrefetchPoll(newMaster)
+            startCrossfadePoll(newMaster)
         }
     }
 
@@ -709,13 +752,13 @@ class StashPlaybackService : MediaLibraryService() {
         likeObserverJob?.cancel()
         prefetchPollJob?.cancel()
         crossfadePollJob?.cancel()
-        crossfadeController?.release()
-        crossfadeController = null
+        listenedPlayer?.removeListener(playerListener)
+        listenedPlayer = null
         serviceScope.cancel()
-        mediaSession?.run {
-            player.release()
-            release()
-        }
+        // Release the session before the players; the engine owns BOTH players.
+        mediaSession?.release()
+        crossfadeEngine?.release()
+        crossfadeEngine = null
         mediaSession = null
         super.onDestroy()
     }
