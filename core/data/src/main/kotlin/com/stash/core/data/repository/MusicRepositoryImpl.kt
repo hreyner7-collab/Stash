@@ -46,6 +46,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val localFileOps: com.stash.core.data.files.LocalFileOps,
+    private val syncPreferencesManager: com.stash.core.data.sync.SyncPreferencesManager,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -844,6 +845,15 @@ class MusicRepositoryImpl @Inject constructor(
     // ── Cleanup ──────────────────────────────────────────────────────────
 
     override suspend fun cleanOrphanedMixTracks(): Int {
+        // ACCUMULATE = never auto-delete. While any source accumulates, the
+        // library is append-only — a deselected playlist, a rotated mix, or a
+        // disconnected source must not delete a downloaded track or its files.
+        // This single gate covers BOTH callers (DiffWorker per-sync + the startup
+        // sweep). See SyncMode / the refresh-accumulate design.
+        if (syncPreferencesManager.anyAccumulate()) {
+            android.util.Log.d("StashCleanup", "Skipped orphan sweep — accumulate mode active")
+            return 0
+        }
         val rawOrphans = trackDao.getOrphanedDownloadedTracks()
         if (rawOrphans.isEmpty()) return 0
 

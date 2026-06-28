@@ -24,7 +24,9 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -208,6 +210,7 @@ fun SyncScreen(
                         SpotifyExpandedContent(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onSpotifySyncModeChanged,
+                            onRequestRefresh = viewModel::onRequestSpotifyRefresh,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
                         )
                     },
@@ -243,6 +246,7 @@ fun SyncScreen(
                         YouTubeExpandedContent(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onYoutubeSyncModeChanged,
+                            onRequestRefresh = viewModel::onRequestYoutubeRefresh,
                             onStudioOnlyChanged = viewModel::onYoutubeLikedStudioOnlyChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
                         )
@@ -309,6 +313,32 @@ fun SyncScreen(
 
         // Bottom spacing so content isn't hidden behind nav bar
         item { Spacer(Modifier.height(80.dp)) }
+    }
+
+    // Refresh-confirm dialog. Sibling to the LazyColumn (NOT inside an
+    // item {}) so it stays composed regardless of scroll position; an
+    // AlertDialog hosts its own window, so it has no effect on layout.
+    if (uiState.pendingRefreshSource != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::cancelRefreshMode,
+            title = { Text("Switch to Refresh?") },
+            text = {
+                Text(
+                    "Refresh pulls fresh tracks each sync — your auto-generated " +
+                        "daily mixes, weekly discovery, and other rotating playlists. " +
+                        "Tracks that rotate out are removed from the mix and their " +
+                        "downloads deleted to keep your library lean. Cleanup runs once " +
+                        "all sources are set to Refresh — while any source still " +
+                        "accumulates, nothing is deleted. Tracks you added manually are kept."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmRefreshMode) { Text("Switch to Refresh") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelRefreshMode) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -560,6 +590,7 @@ private fun FailedDownloadsCard(
 private fun SyncModeChipRow(
     mode: SyncMode,
     onChange: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     accent: Color,
 ) {
     Text(
@@ -574,7 +605,7 @@ private fun SyncModeChipRow(
     ) {
         FilterChip(
             selected = mode == SyncMode.REFRESH,
-            onClick = { onChange(SyncMode.REFRESH) },
+            onClick = { onRequestRefresh() },
             label = { Text("Refresh") },
         )
         FilterChip(
@@ -705,6 +736,7 @@ private fun SpotifySummaryPills(uiState: SyncUiState) {
 private fun SpotifyExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
 ) {
     val purple = MaterialTheme.colorScheme.primary
@@ -721,6 +753,7 @@ private fun SpotifyExpandedContent(
         SyncModeChipRow(
             mode = uiState.spotifySyncMode,
             onChange = onSyncModeChanged,
+            onRequestRefresh = onRequestRefresh,
             accent = purple,
         )
         Spacer(modifier = Modifier.height(8.dp))
@@ -921,6 +954,7 @@ private fun YouTubeSummaryPills(uiState: SyncUiState) {
 private fun YouTubeExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
+    onRequestRefresh: () -> Unit,
     onStudioOnlyChanged: (Boolean) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
 ) {
@@ -940,6 +974,7 @@ private fun YouTubeExpandedContent(
         SyncModeChipRow(
             mode = uiState.youtubeSyncMode,
             onChange = onSyncModeChanged,
+            onRequestRefresh = onRequestRefresh,
             accent = accent,
         )
         Spacer(modifier = Modifier.height(8.dp))

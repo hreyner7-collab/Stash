@@ -9,6 +9,8 @@ import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
+import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.sync.SyncPreferencesManager
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
 import io.mockk.coEvery
@@ -105,6 +107,9 @@ class MusicRepositoryDownloadsMixTest {
         syncHistoryDao: SyncHistoryDao = mockk(relaxed = true),
         downloadQueueDao: DownloadQueueDao = mockk(relaxed = true),
         discoveryQueueDao: DiscoveryQueueDao = mockk(relaxed = true),
+        // Default: a relaxed mock returns false for the anyAccumulate() Boolean
+        // suspend fun, so the gate is open for pre-existing tests with no stub.
+        syncPreferencesManager: SyncPreferencesManager = mockk(relaxed = true),
     ): MusicRepositoryImpl = MusicRepositoryImpl(
         context = context,
         trackDao = trackDao,
@@ -118,5 +123,54 @@ class MusicRepositoryDownloadsMixTest {
         downloadNetworkPreference = mockk(relaxed = true),
         streamingPreference = mockk(relaxed = true),
         localFileOps = mockk(relaxed = true),
+        syncPreferencesManager = syncPreferencesManager,
     )
+
+    private fun downloadedTrack(id: Long, filePath: String = "/music/$id.flac") = TrackEntity(
+        id = id,
+        title = "T$id",
+        artist = "A$id",
+        durationMs = 1000L,
+        source = MusicSource.SPOTIFY,
+        isDownloaded = true,
+        filePath = filePath,
+        canonicalTitle = "t$id",
+        canonicalArtist = "a$id",
+    )
+
+    @Test
+    fun `cleanOrphanedMixTracks deletes nothing when any source accumulates`() = runTest {
+        val trackDao = mockk<TrackDao>(relaxed = true)
+        val prefs = mockk<SyncPreferencesManager>(relaxed = true)
+        coEvery { prefs.anyAccumulate() } returns true
+        coEvery { trackDao.getOrphanedDownloadedTracks() } returns listOf(downloadedTrack(1L))
+        val repo = buildRepo(trackDao = trackDao, syncPreferencesManager = prefs)
+
+        val cleaned = repo.cleanOrphanedMixTracks()
+
+        assertEquals(0, cleaned)
+        coVerify(exactly = 0) { trackDao.delete(any()) }
+        // Gate short-circuits BEFORE the DAO read.
+        coVerify(exactly = 0) { trackDao.getOrphanedDownloadedTracks() }
+    }
+
+    @Test
+    fun `cleanOrphanedMixTracks deletes orphans when all sources refresh`() = runTest {
+        val trackDao = mockk<TrackDao>(relaxed = true)
+        val discoveryQueueDao = mockk<DiscoveryQueueDao>(relaxed = true)
+        val prefs = mockk<SyncPreferencesManager>(relaxed = true)
+        coEvery { prefs.anyAccumulate() } returns false
+        coEvery { trackDao.getOrphanedDownloadedTracks() } returns listOf(downloadedTrack(1L))
+        coEvery { discoveryQueueDao.getActiveTrackIds() } returns emptyList()
+        val repo = buildRepo(
+            trackDao = trackDao,
+            discoveryQueueDao = discoveryQueueDao,
+            syncPreferencesManager = prefs,
+        )
+
+        val cleaned = repo.cleanOrphanedMixTracks()
+
+        assertEquals(1, cleaned)
+        coVerify(exactly = 1) { trackDao.delete(any()) }
+    }
 }

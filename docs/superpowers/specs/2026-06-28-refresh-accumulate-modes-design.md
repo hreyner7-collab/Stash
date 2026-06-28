@@ -1,8 +1,30 @@
 # Refresh / Accumulate Mix Modes — Fix & Design
 
 **Date:** 2026-06-28
-**Status:** Designed (brainstorm approved; not yet built)
+**Status:** IMPLEMENTED + on-device verified (branch `fix/refresh-accumulate-modes`)
 **Author:** brainstorm session
+
+## Verification Results (2026-06-28, Pixel 6 Pro)
+
+Built (`:app:assembleDebug` green) + installed (library DB backed up first). Unit
+suites: `SyncPreferencesManagerTest` 7/7, `MusicRepositoryDownloadsMixTest` gate
+tests 2/2, `SyncViewModelTest` 6/6. (One pre-existing unrelated failure,
+`linkTrackToDownloadsMix seeds then adds track`, confirmed red at the parent
+commit 39bdd605 — not from this branch.)
+
+On-device, 3 of 4 behaviors confirmed (the 4th — destructive Refresh cleanup —
+deliberately skipped to avoid deleting from the real library; it's covered by the
+`deletes orphans when all sources refresh` unit test):
+1. **Accumulate is the active mode** — the expanded source card shows the
+   Accumulate chip selected ("New tracks stack on top of old ones").
+2. **Refresh shows the warning + Cancel keeps Accumulate** — tapping Refresh on an
+   Accumulate source opened the "Switch to Refresh?" dialog with the genericized
+   copy (no Spotify-only product names); Cancel left `spotify_sync_mode` /
+   `youtube_sync_mode` = ACCUMULATE unchanged.
+3. **Accumulate never deletes during a real sync** — ran a full sync (Sync 17, 23
+   playlists); logcat showed `D/StashCleanup: Skipped orphan sweep — accumulate
+   mode active` (logged at both call sites — per-sync + startup), and no tracks
+   were deleted. This is the core guarantee, proven end-to-end.
 
 ## Summary
 
