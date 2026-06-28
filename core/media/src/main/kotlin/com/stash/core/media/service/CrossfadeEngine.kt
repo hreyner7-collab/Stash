@@ -97,39 +97,6 @@ class CrossfadeEngine(
         playerA = buildPlayer()
         playerB = buildPlayer()
         playerA.addListener(masterFocusListener)
-        // TEMP: trace the spare's actual HTTP load activity to root-cause why it
-        // can't buffer streamed next-tracks.
-        playerB.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
-            override fun onLoadStarted(
-                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
-                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
-                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
-            ) {
-                android.util.Log.i("Crossfade", "B loadStarted uri=${loadEventInfo.uri}")
-            }
-            override fun onLoadCompleted(
-                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
-                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
-                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
-            ) {
-                android.util.Log.i("Crossfade", "B loadCompleted bytes=${loadEventInfo.bytesLoaded} ms=${loadEventInfo.loadDurationMs} uri=${loadEventInfo.uri}")
-            }
-            override fun onLoadError(
-                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
-                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
-                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
-                error: java.io.IOException,
-                wasCanceled: Boolean,
-            ) {
-                android.util.Log.e("Crossfade", "B loadError canceled=$wasCanceled bytes=${loadEventInfo.bytesLoaded} uri=${loadEventInfo.uri} err=$error")
-            }
-            override fun onPlayerError(
-                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
-                error: androidx.media3.common.PlaybackException,
-            ) {
-                android.util.Log.e("Crossfade", "B playerError code=${error.errorCodeName} msg=${error.message}")
-            }
-        })
     }
 
     private fun requestFocus() {

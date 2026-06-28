@@ -477,7 +477,6 @@ class StashPlaybackService : MediaLibraryService() {
         // of seconds to buffer (not just the few seconds before the seam). This
         // is what makes streaming crossfade reliable.
         if (remaining <= PREPARE_AT_MS && !engine.isPreparedFor(nextId)) {
-            android.util.Log.i("Crossfade", "prepare next=$nextId remaining=$remaining")
             engine.prepareNext(nextItem)
             crossfadePreparedId = nextId
         }
@@ -485,16 +484,9 @@ class StashPlaybackService : MediaLibraryService() {
         // Phase 2 — fire only when the spare has buffered at least the fade
         // length ahead, so it can't stall mid-fade (a barely-READY spare
         // glitches on cold streams).
-        if (remaining <= fade) {
-            android.util.Log.i(
-                "Crossfade",
-                "fireCheck remaining=$remaining nextId=$nextId preparedFor=${engine.isPreparedFor(nextId)} bufferedMs=${engine.spareBufferedMs()} need=$fade spareState=${engine.spareState()}",
-            )
-        }
         if (remaining <= fade && engine.isPreparedFor(nextId) && engine.spareBufferedMs() >= fade) {
             val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
             if (fadeMs >= MIN_FADE_MS) {
-                android.util.Log.i("Crossfade", "fire fadeMs=$fadeMs remaining=$remaining next=$nextId bufferedMs=${engine.spareBufferedMs()}")
                 crossfadePollJob?.cancel() // swap restarts the poll on the new master
                 engine.performTransition(fadeMs) { newMaster -> onCrossfadeSwap(newMaster) }
             }
@@ -509,7 +501,6 @@ class StashPlaybackService : MediaLibraryService() {
      */
     @OptIn(UnstableApi::class)
     private fun onCrossfadeSwap(newMaster: ExoPlayer) {
-        android.util.Log.i("Crossfade", "swap -> ${newMaster.currentMediaItem?.mediaId} pos=${newMaster.currentPosition}")
         mediaSession?.player = newMaster
         listenedPlayer?.removeListener(playerListener)
         newMaster.addListener(playerListener)
