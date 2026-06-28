@@ -278,28 +278,6 @@ fun HomeScreen(
             )
         }
 
-        // ── Last.fm connect nudge ────────────────────────────────────
-        // Shown only when we have creds wired AND the user has local
-        // plays accumulating locally AND the user hasn't dismissed the
-        // banner. Taps route into Settings; the X dismisses permanently.
-        uiState.lastFmPrompt?.let { prompt ->
-            item {
-                Spacer(Modifier.height(6.dp))
-                LastFmConnectBanner(
-                    pendingCount = prompt.pendingCount,
-                    onConnect = {
-                        // v0.9.13: queue the Settings focus target THEN navigate.
-                        // The Settings VM reads + clears the focus on entry and
-                        // scrolls the Last.fm card into view.
-                        viewModel.requestSettingsLastFmFocus()
-                        onNavigateToSettings()
-                    },
-                    onDismiss = viewModel::dismissLastFmBanner,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-        }
-
         // ── Lossless connect nudge ───────────────────────────────────
         // Shown when the user has lossless toggled OFF and hasn't
         // dismissed. Tap routes to Settings; X dismisses forever.
@@ -318,35 +296,6 @@ fun HomeScreen(
             }
         }
 
-        // ── Tracks waiting for lossless (FLAC-only deferred set) ─────
-        // v0.9.17: surfaces WAITING_FOR_LOSSLESS rows with one-tap
-        // recovery. State picker is in the ViewModel; this only renders
-        // when [WaitingForLosslessBannerState] is non-Hidden. All four
-        // action callbacks route through existing nav surfaces — no new
-        // nav graph entries.
-        if (uiState.waitingForLosslessBanner !is com.stash.feature.home.banner.WaitingForLosslessBannerState.Hidden) {
-            item {
-                Spacer(Modifier.height(6.dp))
-                com.stash.feature.home.banner.WaitingForLosslessBanner(
-                    state = uiState.waitingForLosslessBanner,
-                    onSolveCaptcha = {
-                        // The captcha WebView is reachable via Settings →
-                        // Audio Quality card. Mirror LosslessConnectBanner's
-                        // path: queue the focus target then navigate.
-                        viewModel.requestSettingsLosslessFocus()
-                        onNavigateToSettings()
-                    },
-                    onConnect = {
-                        viewModel.requestSettingsLosslessFocus()
-                        onNavigateToSettings()
-                    },
-                    onRetry = viewModel::onRetryDeferredRequested,
-                    onDismiss = viewModel::dismissWaitingForLosslessBanner,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-        }
-
         // ── Re-tagging library (metadata backfill progress) ──────────
         // v0.9.35: surfaces MetadataBackfillWorker progress on upgrade
         // so users know why disk IO / yt-dlp activity is happening. The
@@ -359,24 +308,6 @@ fun HomeScreen(
                 com.stash.feature.home.banner.MetadataBackfillBanner(
                     state = uiState.metadataBackfillBanner,
                     onFinishedAcknowledged = viewModel::onMetadataBackfillFinishedAcknowledged,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-        }
-
-        // ── Fetching lyrics (lyrics backfill progress) ────────────────
-        // v0.9.36: surfaces LyricsBackfillWorker progress on upgrade so
-        // users know why background network activity is happening. The
-        // banner renders Hidden in the steady state (post-backfill); the
-        // 2-second "Done" pulse self-acks via LaunchedEffect inside the
-        // composable. Independent of the metadata backfill above; both
-        // may be visible simultaneously on a v0.9.34→v0.9.36 jump.
-        if (uiState.lyricsBackfillBanner !is com.stash.feature.home.banner.LyricsBackfillBannerState.Hidden) {
-            item {
-                Spacer(Modifier.height(6.dp))
-                com.stash.feature.home.banner.LyricsBackfillBanner(
-                    state = uiState.lyricsBackfillBanner,
-                    onFinishedAcknowledged = viewModel::onLyricsBackfillFinishedAcknowledged,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
@@ -1678,80 +1609,14 @@ private fun HomeBottomSheetActionRow(
     }
 }
 
-// ── Last.fm connect banner ───────────────────────────────────────────────
-
-/**
- * Surfaces a nudge when the user has local listening history but hasn't
- * connected Last.fm — all those plays are sitting in the scrobble queue
- * with no session to send them to. Tapping the banner jumps to Settings,
- * where the existing connect flow handles the web-auth handshake.
- */
-@Composable
-private fun LastFmConnectBanner(
-    pendingCount: Int,
-    onConnect: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val accent = MaterialTheme.colorScheme.tertiary
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = accent.copy(alpha = 0.10f),
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onConnect)
-                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Connect Last.fm",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = "$pendingCount ${if (pendingCount == 1) "play" else "plays"} waiting to scrobble",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "Connect →",
-                style = MaterialTheme.typography.labelSmall,
-                color = accent,
-            )
-            // Dismiss-forever X. Stops the click from also triggering
-            // onConnect by putting it on its own clickable region.
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onDismiss),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Dismiss Last.fm banner",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-    }
-}
+// ── Lossless connect banner ──────────────────────────────────────────────
 
 /**
  * "Try lossless audio" Home banner. Shows when the user has
  * lossless turned off (explicit save, since v0.9.8 fresh installs
  * default to ON) and hasn't dismissed. Tapping routes to Settings,
  * where the existing Audio Quality card hosts the toggle + captcha
- * setup flow. Mirrors [LastFmConnectBanner]'s visual treatment so
- * both Home prompts feel consistent.
+ * setup flow.
  */
 @Composable
 private fun LosslessConnectBanner(

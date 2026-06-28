@@ -67,8 +67,7 @@ class NowPlayingViewModel @Inject constructor(
     // v0.9.36 Task 12 — lyrics sheet observes the lyrics row and may
     // enqueue a priority on-open fetch. WorkManager is sourced via
     // `WorkManager.getInstance(appContext)` to match the rest of the
-    // codebase (see LyricsBackfillScheduler for the same shape — it's
-    // not Hilt-injectable in this project).
+    // codebase (it's not Hilt-injectable in this project).
     private val lyricsRepository: LyricsRepository,
     @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
@@ -655,8 +654,7 @@ class NowPlayingViewModel @Inject constructor(
      *
      * `OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST` keeps the
      * worker valid in low-quota windows — it'll just run as a normal
-     * job instead of an expedited one. Matches the LyricsBackfillScheduler
-     * convention.
+     * job instead of an expedited one.
      */
     private fun enqueuePriorityFetch(trackId: Long) {
         WorkManager.getInstance(appContext).enqueueUniqueWork(
