@@ -44,7 +44,7 @@ class AmzCaptchaInterceptor @Inject constructor(
         val path = req.url.encodedPath
         if (!path.startsWith("/api/") || path.startsWith("/api/captcha")) return chain.proceed(req)
 
-        val current = token ?: mintBlocking(force = false)
+        val current = token ?: mintOrReuse(staleToken = null)
         if (current == null) return chain.proceed(req) // let it fail; source fails over
         val resp = chain.proceed(
             req.newBuilder().amzWebHeaders(current, captchaClient.sessionCookie).build(),
@@ -52,16 +52,31 @@ class AmzCaptchaInterceptor @Inject constructor(
         if (resp.code != STALE_CODE) return resp
 
         resp.close()
-        val fresh = mintBlocking(force = true) ?: return chain.proceed(req)
+        // Dedup the re-mint against the token that just 403'd: a token expiry
+        // hits every in-flight call at once (8-way sync fan-out), and the server
+        // rate-limits captcha verify at ~9 attempts — so one mint PER 403 burns
+        // the budget and the token can never recover. Sharing one mint keeps it
+        // to ~1 mint per expiry, well under the limit.
+        val fresh = mintOrReuse(staleToken = current) ?: return chain.proceed(req)
         // Re-read the cookie: a re-mint may have rotated amz_web_sess.
         return chain.proceed(
             req.newBuilder().amzWebHeaders(fresh, captchaClient.sessionCookie).build(),
         )
     }
 
-    private fun mintBlocking(force: Boolean): String? = runBlocking {
+    /**
+     * Mint a token under [mintMutex], unless another caller already replaced the
+     * token we hold while we waited for the lock — then reuse theirs (single-flight).
+     *
+     * [staleToken] is the token this caller wants to replace: `null` for the
+     * initial mint (no token yet), or the token that just returned 403 on the
+     * re-mint path. If the cached [token] differs from [staleToken] by reference,
+     * a concurrent caller already minted a newer one, so we skip our own mint.
+     * This collapses a herd of concurrent 403s into a single shared re-mint.
+     */
+    private fun mintOrReuse(staleToken: String?): String? = runBlocking {
         mintMutex.withLock {
-            if (!force) token?.let { return@withLock it } // another caller already minted
+            token?.let { if (it !== staleToken) return@withLock it }
             captchaClient.mint()?.also { token = it }
         }
     }

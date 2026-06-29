@@ -215,4 +215,40 @@ class AmzCaptchaInterceptorTest {
         assertThat(c2.proceeded[0].header("x-captcha-token")).isEqualTo("tok-shared")
         coVerify(exactly = 1) { captchaClient.mint() }
     }
+
+    @Test
+    fun `concurrent stale-403s share ONE re-mint, not one per caller (herd guard)`() = runBlocking {
+        // Regression for the sync-collapse bug: when the cached token expires,
+        // every in-flight amz call gets 403 at once. Each 403 must NOT trigger
+        // its own full mint — the server rate-limits captcha verify at ~9
+        // attempts, so an 8-wide re-mint herd exhausts the budget and the token
+        // can never recover. One token expiry → exactly ONE re-mint, shared.
+        val mintCount = AtomicInteger(0)
+        coEvery { captchaClient.mint() } coAnswers {
+            when (mintCount.incrementAndGet()) {
+                1 -> "tok-stale"           // initial mint (primes the cache)
+                else -> {
+                    delay(50)              // hold the mutex so the 2nd 403 caller races the re-mint
+                    "tok-fresh"
+                }
+            }
+        }
+        val interceptor = AmzCaptchaInterceptor(captchaClient)
+
+        // Prime the cache so both concurrent callers start from the SAME stale token.
+        interceptor.intercept(FakeChain(req("https://amz.squid.wtf/api/search"), ArrayDeque(listOf(200))))
+
+        // Two callers concurrently hit 403 on the stale token, then 200 on retry.
+        val c1 = FakeChain(req("https://amz.squid.wtf/api/search"), ArrayDeque(listOf(403, 200)))
+        val c2 = FakeChain(req("https://amz.squid.wtf/api/search"), ArrayDeque(listOf(403, 200)))
+        val j1 = launch(Dispatchers.IO) { interceptor.intercept(c1) }
+        val j2 = launch(Dispatchers.IO) { interceptor.intercept(c2) }
+        j1.join(); j2.join()
+
+        // 1 initial + exactly 1 shared re-mint (buggy code mints once PER 403 → 3).
+        coVerify(exactly = 2) { captchaClient.mint() }
+        // Both retries carry the single fresh token.
+        assertThat(c1.proceeded[1].header("x-captcha-token")).isEqualTo("tok-fresh")
+        assertThat(c2.proceeded[1].header("x-captcha-token")).isEqualTo("tok-fresh")
+    }
 }
