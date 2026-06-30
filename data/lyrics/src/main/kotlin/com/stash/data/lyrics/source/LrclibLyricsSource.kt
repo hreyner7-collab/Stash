@@ -2,6 +2,7 @@ package com.stash.data.lyrics.source
 
 import com.stash.core.common.AppVersionProvider
 import com.stash.data.lyrics.di.LrclibBaseUrl
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -13,7 +14,7 @@ import javax.inject.Singleton
 
 @Singleton
 class LrclibLyricsSource @Inject constructor(
-    private val okHttpClient: OkHttpClient,
+    okHttpClient: OkHttpClient,
     private val appVersion: AppVersionProvider,
     // Qualified so Hilt can resolve the SingletonComponent String binding
     // without colliding with other module-level @Provides String. Default
@@ -26,17 +27,24 @@ class LrclibLyricsSource @Inject constructor(
     override val id: String = "lrclib"
     override val displayName: String = "LRCLIB"
 
+    // lrclib.net can be slow (seconds per call). Bound each call so a hung
+    // request can't stall the lyrics sheet near the shared client's 30s ceiling;
+    // shares the pool/dispatcher/TLS.
+    private val client: OkHttpClient = okHttpClient.newBuilder()
+        .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
     override suspend fun resolve(query: LyricsQuery): LyricsResult? = withContext(Dispatchers.IO) {
-        // 1. Duration ladder
+        // One exact get (artist + title + duration, NO album), then a fuzzy search
+        // fallback. We dropped the old 11-rung duration ladder: with lrclib at
+        // seconds-per-call it cost ~60s on a miss, and `/api/search` already
+        // tolerates ±5s duration drift, so a single get + search (≤2 calls) gets
+        // the same hit rate far faster. Album is omitted because album_name
+        // strictness 404s the get on any mismatch (the streamed-track common case).
         query.durationMs?.let { ms ->
-            val baseSec = (ms / 1000).toInt()
-            for (delta in DURATION_LADDER) {
-                val sec = baseSec + delta
-                if (sec <= 0) continue
-                tryGet(query, sec)?.let { return@withContext it }
-            }
+            val sec = (ms / 1000).toInt()
+            if (sec > 0) tryGet(query, sec)?.let { return@withContext it }
         }
-        // 2. Search fallback
         return@withContext trySearch(query)
     }
 
@@ -44,12 +52,11 @@ class LrclibLyricsSource @Inject constructor(
         val url = "${baseUrl.trimEnd('/')}/api/get".toHttpUrl().newBuilder()
             .addQueryParameter("track_name", query.title)
             .addQueryParameter("artist_name", query.artist)
-            .also { if (!query.album.isNullOrBlank()) it.addQueryParameter("album_name", query.album) }
             .addQueryParameter("duration", durationSec.toString())
             .build()
         val req = Request.Builder().url(url).header("User-Agent", userAgent()).get().build()
         return runCatching {
-            okHttpClient.newCall(req).execute().use { response ->
+            client.newCall(req).execute().use { response ->
                 if (!response.isSuccessful) return@runCatching null
                 val body = response.body?.string() ?: return@runCatching null
                 val dto = JSON.decodeFromString<LrclibGetResponse>(body)
@@ -71,7 +78,7 @@ class LrclibLyricsSource @Inject constructor(
             .build()
         val req = Request.Builder().url(url).header("User-Agent", userAgent()).get().build()
         return runCatching {
-            okHttpClient.newCall(req).execute().use { response ->
+            client.newCall(req).execute().use { response ->
                 if (!response.isSuccessful) return@runCatching null
                 val body = response.body?.string() ?: return@runCatching null
                 val list = JSON.decodeFromString<List<LrclibGetResponse>>(body)
@@ -114,8 +121,9 @@ class LrclibLyricsSource @Inject constructor(
     companion object {
         const val DEFAULT_BASE_URL = "https://lrclib.net/"
 
-        // Closer-to-exact first. Index 0 is the exact rung.
-        private val DURATION_LADDER: IntArray = intArrayOf(0, -1, +1, -2, +2, -3, +3, -4, +4, -5, +5)
+        // Per-call ceiling. lrclib was observed at 4-14s/call; 20s bounds a true
+        // hang without cutting a legitimately slow response.
+        private const val CALL_TIMEOUT_SECONDS = 20L
 
         private val JSON = Json { ignoreUnknownKeys = true }
     }

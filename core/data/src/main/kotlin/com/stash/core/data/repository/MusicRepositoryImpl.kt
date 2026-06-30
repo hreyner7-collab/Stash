@@ -47,6 +47,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val localFileOps: com.stash.core.data.files.LocalFileOps,
     private val syncPreferencesManager: com.stash.core.data.sync.SyncPreferencesManager,
+    private val singleTrackDownloadEnqueuer: com.stash.core.data.sync.SingleTrackDownloadEnqueuer,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -468,23 +469,33 @@ class MusicRepositoryImpl @Inject constructor(
         val entity = trackDao.getById(trackId) ?: return false
         if (entity.isDownloaded) return false
 
+        // Reuse an existing queue row if there is one; otherwise insert a fresh
+        // manual (discovery-partition) row. A manual tap is an explicit
+        // "download this now", so a pre-existing non-terminal row must NOT make
+        // this a silent no-op: previously a stuck sync row (streaming-mode
+        // PENDING / deferred WAITING_FOR_LOSSLESS) made every already-synced
+        // track report "Couldn't queue download". Reset the row to PENDING so it
+        // downloads fresh.
         val existing = downloadQueueDao.getByTrackId(trackId)
-        if (existing != null && existing.status in NON_TERMINAL_QUEUE_STATES) return false
-
-        downloadQueueDao.insert(
-            com.stash.core.data.db.entity.DownloadQueueEntity(
-                trackId = trackId,
-                syncId = null,
-                searchQuery = "${entity.artist} - ${entity.title}",
-                youtubeUrl = entity.youtubeId?.let { "https://music.youtube.com/watch?v=$it" },
+        val queueId = if (existing == null) {
+            downloadQueueDao.insert(
+                com.stash.core.data.db.entity.DownloadQueueEntity(
+                    trackId = trackId,
+                    syncId = null,
+                    searchQuery = "${entity.artist} - ${entity.title}",
+                    youtubeUrl = entity.youtubeId?.let { "https://music.youtube.com/watch?v=$it" },
+                )
             )
-        )
+        } else {
+            downloadQueueDao.resetToPending(listOf(existing.id))
+            existing.id
+        }
 
-        val mode = downloadNetworkPreference.current()
-        com.stash.core.data.sync.workers.DiscoveryDownloadWorker.enqueueOneTime(
-            context = context,
-            constraints = com.stash.core.data.sync.workers.constraintsForManualTrigger(mode),
-        )
+        // Drive THIS row through TrackDownloadWorker single-track mode, which
+        // downloads regardless of streaming mode and the sync/discovery
+        // partition — unlike the chain/discovery drains, which skip in streaming
+        // mode (the reason the stuck sync rows never drained).
+        singleTrackDownloadEnqueuer.enqueue(queueId)
         return true
     }
 

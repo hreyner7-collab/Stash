@@ -45,6 +45,15 @@ class LyricsRepository @Inject constructor(
     /** Observe the lyrics row for [trackId]. Emits null when no row exists yet. */
     fun observe(trackId: Long): Flow<LyricsEntity?> = lyricsDao.observe(trackId)
 
+    /**
+     * Observe the parent track's `lyrics_fetched_at` stamp. The sheet pairs this
+     * with [observe] so it reacts the moment a fetch finishes — the stamp is what
+     * distinguishes "never tried" (null → Loading) from "tried and missed"
+     * (0L → None), and watching it live is what stops the sheet sticking on
+     * Loading until a close+reopen re-queries the track.
+     */
+    fun observeFetchedAt(trackId: Long): Flow<Long?> = trackDao.observeLyricsFetchedAt(trackId)
+
     /** One-shot read of the lyrics row for [trackId], or null when absent. */
     suspend fun get(trackId: Long): LyricsEntity? = lyricsDao.get(trackId)
 
