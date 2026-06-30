@@ -14,6 +14,8 @@ import com.stash.data.ytmusic.model.SearchResultSection
 import com.stash.data.ytmusic.model.TrackSummary
 import com.stash.data.ytmusic.model.YTMusicPlaylist
 import com.stash.data.ytmusic.model.YTMusicTrack
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -46,6 +48,12 @@ class YTMusicApiClient @Inject constructor(
     companion object {
         private const val TAG = "StashYTApi"
 
+        /** Max song rows shown in the Search tab's Songs section. */
+        private const val MAX_SONG_RESULTS = 20
+
+        /** Max playlist cards shown in the Search tab's Playlists section. */
+        private const val MAX_PLAYLIST_RESULTS = 15
+
         /** InnerTube browse ID for the YouTube Music home feed. */
         private const val BROWSE_HOME = "FEmusic_home"
 
@@ -69,6 +77,14 @@ class YTMusicApiClient @Inject constructor(
          * exceeds the user's expectation for these "Daily Mix"-style surfaces.
          */
         internal const val RADIO_MAX_PAGES = 1
+
+        /**
+         * Cap for the artist "all songs" playlist fetch on an artist page.
+         * One page (~100 songs) covers virtually every artist's full catalogue
+         * while keeping the artist screen fast; deeper paging is rarely worth
+         * the extra round-trips for a browse surface.
+         */
+        internal const val ARTIST_SONGS_MAX_PAGES = 2
 
         /** Backoff delays (ms) between retries on transient failures. */
         private val RETRY_BACKOFFS_MS = listOf(500L, 1500L)
@@ -254,16 +270,27 @@ class YTMusicApiClient @Inject constructor(
     suspend fun searchCanonicalVideoId(artist: String, title: String): String? =
         innerTubeClient.searchCanonical(artist, title)
 
-    suspend fun searchAll(query: String): SearchAllResults {
-        val response = innerTubeClient.search(query)
-            ?: return SearchAllResults(emptyList())
+    suspend fun searchAll(query: String): SearchAllResults = coroutineScope {
+        // Fire all THREE InnerTube round-trips at once instead of one after
+        // another. The combined search (Top/Artists/Albums), the deep
+        // songs-only list, and the community-playlists list are independent
+        // requests — running them concurrently cuts perceived latency from
+        // the SUM of the three to the slowest single one (~3x faster).
+        val combinedDeferred = async { innerTubeClient.search(query) }
+        val songsDeferred = async { fullSongsList(query) }
+        val playlistsDeferred = async { playlistsList(query) }
+
+        val response = combinedDeferred.await()
+            ?: return@coroutineScope SearchAllResults(emptyList())
+        val deepSongs = songsDeferred.await()
+        val playlists = playlistsDeferred.await()
 
         val shelves = response.navigatePath(
             "contents", "tabbedSearchResultsRenderer", "tabs",
         )?.firstArray()?.firstOrNull()?.asObject()
             ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
             ?.asArray()
-            ?: return SearchAllResults(emptyList())
+            ?: return@coroutineScope SearchAllResults(emptyList())
 
         val sections = mutableListOf<SearchResultSection>()
 
@@ -275,15 +302,31 @@ class YTMusicApiClient @Inject constructor(
             ?.let { parseTopResultCard(it) }
             ?.let { sections.add(SearchResultSection.Top(it)) }
 
-        // 2..4. Named musicShelfRenderer shelves, dispatched by their title text.
+        // 2. Songs — DEEP list (10+). The combined search only carries ~4
+        //    inline song rows; a dedicated songs-only filtered search
+        //    returns the full Songs shelf (typically 20+). Falls back to the
+        //    combined shelf if the filtered call comes back empty.
+        //    (deepSongs already resolved in parallel above.)
+        if (deepSongs.isNotEmpty()) {
+            sections.add(SearchResultSection.Songs(deepSongs.take(MAX_SONG_RESULTS)))
+        } else {
+            shelves.asSequence()
+                .mapNotNull { it.asObject()?.get("musicShelfRenderer")?.asObject() }
+                .firstOrNull {
+                    it.navigatePath("title", "runs")?.firstArray()?.firstOrNull()
+                        ?.asObject()?.get("text")?.asString() == "Songs"
+                }
+                ?.let { parseSongsShelf(it) }
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { sections.add(SearchResultSection.Songs(it.take(MAX_SONG_RESULTS))) }
+        }
+
+        // 3..4. Artists + Albums from the combined response.
         for (shelf in shelves) {
             val renderer = shelf.asObject()?.get("musicShelfRenderer")?.asObject() ?: continue
             val title = renderer.navigatePath("title", "runs")?.firstArray()
                 ?.firstOrNull()?.asObject()?.get("text")?.asString() ?: continue
-            // Parsers live in SearchResponseParser.kt as top-level internal funcs.
             when (title) {
-                "Songs" -> parseSongsShelf(renderer).takeIf { it.isNotEmpty() }
-                    ?.let { sections.add(SearchResultSection.Songs(it.take(4))) }
                 "Artists" -> parseArtistsShelf(renderer).takeIf { it.isNotEmpty() }
                     ?.let { sections.add(SearchResultSection.Artists(it)) }
                 "Albums" -> parseAlbumsShelf(renderer).takeIf { it.isNotEmpty() }
@@ -291,8 +334,112 @@ class YTMusicApiClient @Inject constructor(
             }
         }
 
-        Log.d(TAG, "searchAll('$query'): ${sections.size} sections")
-        return SearchAllResults(sections)
+        // 5. Playlists — a dedicated community-playlists filtered search.
+        //    (playlists already resolved in parallel above.)
+        if (playlists.isNotEmpty()) {
+            sections.add(SearchResultSection.Playlists(playlists.take(MAX_PLAYLIST_RESULTS)))
+        }
+
+        Log.d(TAG, "searchAll('$query'): ${sections.size} sections, ${deepSongs.size} songs, ${playlists.size} playlists")
+        SearchAllResults(sections)
+    }
+
+    /**
+     * Radio / "Up Next" queue for a seed [videoId] — the engine behind the
+     * DJ / discovery station. Primary source is the canonical `next` (watch)
+     * endpoint, whose `playlistPanelRenderer` carries a queue of similar
+     * songs (YT Music's collaborative-filtering radio — the same signal
+     * Spotify radio uses). Falls back to browsing the `RDAMVM…` radio
+     * playlist if `next` comes back unparseable, so a station is built even
+     * if YouTube A/B-ships a layout we don't recognise.
+     */
+    suspend fun getRadioTracks(videoId: String): List<YTMusicTrack> {
+        val next = runCatching { innerTubeClient.nextRadio(videoId) }.getOrNull()
+        val fromNext = next?.let { parseWatchNextQueue(it) }.orEmpty()
+        if (fromNext.isNotEmpty()) {
+            Log.d(TAG, "getRadioTracks('$videoId'): ${fromNext.size} via nextRadio()")
+            return fromNext
+        }
+        val radio = runCatching { getPlaylistTracks("RDAMVM$videoId", maxPages = 1) }.getOrNull()
+        val fromBrowse = (radio as? SyncResult.Success)?.data?.tracks.orEmpty()
+        Log.d(TAG, "getRadioTracks('$videoId'): ${fromBrowse.size} via RDAMVM browse fallback")
+        return fromBrowse
+    }
+
+    /** Parse the `next` watch-queue (`playlistPanelVideoRenderer` rows). */
+    private fun parseWatchNextQueue(response: JsonObject): List<YTMusicTrack> {
+        val contents = response.navigatePath(
+            "contents", "singleColumnMusicWatchNextResultsRenderer",
+            "tabbedRenderer", "watchNextTabbedResultsRenderer", "tabs",
+        )?.firstArray()?.firstOrNull()?.asObject()
+            ?.navigatePath(
+                "tabRenderer", "content", "musicQueueRenderer", "content",
+                "playlistPanelRenderer", "contents",
+            )?.asArray() ?: return emptyList()
+        val out = mutableListOf<YTMusicTrack>()
+        for (item in contents) {
+            val r = item.asObject()?.get("playlistPanelVideoRenderer")?.asObject() ?: continue
+            val vid = r["videoId"]?.asString() ?: continue
+            val title = r.navigatePath("title", "runs")?.firstArray()?.firstOrNull()
+                ?.asObject()?.get("text")?.asString() ?: continue
+            val artist = r.navigatePath("longBylineText", "runs")?.asArray()
+                ?.mapNotNull { it.asObject()?.get("text")?.asString() }
+                ?.firstOrNull { it != " • " && it != ", " && it != " & " }
+                .orEmpty()
+            val lengthText = r.navigatePath("lengthText", "runs")?.firstArray()?.firstOrNull()
+                ?.asObject()?.get("text")?.asString()
+            val durationMs = lengthText?.let { (parseDurationToSeconds(it) * 1000).toLong() }
+            val thumb = r.navigatePath("thumbnail", "thumbnails")?.asArray()
+                ?.maxByOrNull { it.asObject()?.get("width")?.asString()?.toIntOrNull() ?: 0 }
+                ?.asObject()?.get("url")?.asString()
+            out.add(
+                YTMusicTrack(
+                    videoId = vid,
+                    title = title,
+                    artists = artist,
+                    album = null,
+                    durationMs = durationMs,
+                    thumbnailUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(thumb),
+                ),
+            )
+        }
+        return out
+    }
+
+    /** Full Songs shelf for [query] via the songs-only filter (10-20+ rows). */
+    private suspend fun fullSongsList(query: String): List<com.stash.data.ytmusic.model.TrackSummary> {
+        val response = runCatching { innerTubeClient.searchSongsOnly(query) }.getOrNull()
+            ?: return emptyList()
+        val shelves = response.navigatePath(
+            "contents", "tabbedSearchResultsRenderer", "tabs",
+        )?.firstArray()?.firstOrNull()?.asObject()
+            ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
+            ?.asArray() ?: return emptyList()
+        // The filtered response's Songs shelf may be titled "Songs" or
+        // untitled; collect rows from every musicShelfRenderer present.
+        val out = mutableListOf<com.stash.data.ytmusic.model.TrackSummary>()
+        for (shelf in shelves) {
+            val renderer = shelf.asObject()?.get("musicShelfRenderer")?.asObject() ?: continue
+            out += parseSongsShelf(renderer)
+        }
+        return out
+    }
+
+    /** Community-playlists shelf for [query] via the playlists-only filter. */
+    private suspend fun playlistsList(query: String): List<com.stash.data.ytmusic.model.PlaylistSummary> {
+        val response = runCatching { innerTubeClient.searchCommunityPlaylists(query) }.getOrNull()
+            ?: return emptyList()
+        val shelves = response.navigatePath(
+            "contents", "tabbedSearchResultsRenderer", "tabs",
+        )?.firstArray()?.firstOrNull()?.asObject()
+            ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
+            ?.asArray() ?: return emptyList()
+        val out = mutableListOf<com.stash.data.ytmusic.model.PlaylistSummary>()
+        for (shelf in shelves) {
+            val renderer = shelf.asObject()?.get("musicShelfRenderer")?.asObject() ?: continue
+            out += parsePlaylistsShelf(renderer)
+        }
+        return out
     }
 
     /**
@@ -361,6 +508,7 @@ class YTMusicApiClient @Inject constructor(
         // the full discography.
         var albumsMoreBrowseId: String? = null
         var singlesMoreBrowseId: String? = null
+        var popularMoreBrowseId: String? = null
 
         // Parsers live in ArtistResponseParser.kt as top-level internal funcs.
         for (section in sections) {
@@ -372,7 +520,13 @@ class YTMusicApiClient @Inject constructor(
                 // instead of "Popular" — which is common in production.
                 if (popular.isEmpty()) {
                     val parsed = parseTracksFromShelf(shelf).take(10)
-                    if (parsed.isNotEmpty()) popular = parsed
+                    if (parsed.isNotEmpty()) {
+                        popular = parsed
+                        // Capture the "show all songs" link so we can replace
+                        // this capped, duration-less shelf with the artist's
+                        // FULL songs playlist (every track, with durations).
+                        popularMoreBrowseId = parseSongsShelfMoreBrowseId(shelf)
+                    }
                 }
             }
             obj["musicCarouselShelfRenderer"]?.asObject()?.let { carousel ->
@@ -437,6 +591,33 @@ class YTMusicApiClient @Inject constructor(
                     }
                 }
             }.onFailure { Log.w(TAG, "getArtist: singles-more fetch failed: ${it.message}") }
+        }
+
+        // Replace the capped, duration-less "Popular" shelf with the
+        // artist's COMPLETE songs playlist. The browse response for the
+        // "show all songs" link is a playlist whose rows DO carry durations,
+        // so this fixes both "only popular songs" and the "0:00" display in
+        // one step. Best-effort: keep the inline shelf if the fetch fails or
+        // the link is absent (small artist whose catalogue fits inline).
+        popularMoreBrowseId?.let { moreId ->
+            runCatching {
+                val full = getPlaylistTracks(moreId, maxPages = ARTIST_SONGS_MAX_PAGES)
+                val tracks = (full as? SyncResult.Success)?.data?.tracks.orEmpty()
+                if (tracks.isNotEmpty()) {
+                    val mapped = tracks.map { t ->
+                        TrackSummary(
+                            videoId = t.videoId,
+                            title = t.title,
+                            artist = t.artists,
+                            album = t.album,
+                            durationSeconds = (t.durationMs ?: 0L) / 1000.0,
+                            thumbnailUrl = t.thumbnailUrl,
+                        )
+                    }
+                    Log.d(TAG, "getArtist: songs expanded ${popular.size} -> ${mapped.size} (with durations)")
+                    popular = mapped
+                }
+            }.onFailure { Log.w(TAG, "getArtist: songs-more fetch failed: ${it.message}") }
         }
 
         Log.d(

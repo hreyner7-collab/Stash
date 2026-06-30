@@ -144,8 +144,10 @@ fun SearchScreen(
                     previewState = previewState,
                     tappedTrackId = tappedTrackId,
                     losslessPrefetcher = viewModel.losslessPrefetcher,
+                    streamUrlPrewarmer = viewModel.streamUrlPrewarmer,
                     onArtistClick = { a -> onNavigateToArtist(a.id, a.name, a.avatarUrl) },
                     onAlbumClick = onNavigateToAlbum,
+                    onPlaylistClick = { p -> viewModel.onPlaylistTap(p) },
                     onTopTrackClick = { t -> viewModel.onResultTap(t.toTrackItem()) },
                     onPreview = { track -> viewModel.onResultTap(track) },
                     onStopPreview = viewModel.delegate::stopPreview,
@@ -249,8 +251,10 @@ private fun SectionedResultsList(
     previewState: PreviewState,
     tappedTrackId: Long?,
     losslessPrefetcher: LosslessUrlPrefetcher,
+    streamUrlPrewarmer: com.stash.core.media.preview.StreamUrlPrewarmer,
     onArtistClick: (ArtistSummary) -> Unit,
     onAlbumClick: (AlbumSummary) -> Unit,
+    onPlaylistClick: (com.stash.data.ytmusic.model.PlaylistSummary) -> Unit,
     onTopTrackClick: (TrackSummary) -> Unit,
     onPreview: (TrackItem) -> Unit,
     onStopPreview: () -> Unit,
@@ -326,6 +330,15 @@ private fun SectionedResultsList(
                         // recomposition (LosslessUrlPrefetcher dedupes by videoId).
                         LaunchedEffect(t.videoId) {
                             losslessPrefetcher.warmUp(t.toTrackItem())
+                            // Pre-resolve the PLAYBACK stream URL (Piped) for
+                            // this on-screen row so a tap is an instant cache hit.
+                            streamUrlPrewarmer.warm(
+                                videoId = t.videoId,
+                                title = t.title,
+                                artist = t.artist,
+                                durationSeconds = t.durationSeconds,
+                                thumbnailUrl = t.thumbnailUrl,
+                            )
                         }
                         PreviewDownloadRow(
                             item = item,
@@ -374,6 +387,25 @@ private fun SectionedResultsList(
                                     thumbnailUrl = a.thumbnailUrl,
                                     year = a.year,
                                     onClick = { onAlbumClick(a) },
+                                )
+                            }
+                        }
+                    }
+                }
+                is SearchResultSection.Playlists -> {
+                    item(key = "playlists_header") { SectionHeader("Playlists") }
+                    item(key = "playlists_row") {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                        ) {
+                            items(section.playlists, key = { it.playlistId }) { p ->
+                                AlbumSquareCard(
+                                    title = p.title,
+                                    artist = p.subtitle ?: "Playlist",
+                                    thumbnailUrl = p.thumbnailUrl,
+                                    year = null,
+                                    onClick = { onPlaylistClick(p) },
                                 )
                             }
                         }
@@ -666,7 +698,7 @@ private fun EmptySearchPrompt() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Search YouTube Music",
+                text = "Search Spotify",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onBackground,
             )

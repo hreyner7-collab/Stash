@@ -267,6 +267,8 @@ fun SettingsScreen(
         onStreamingToggle = viewModel::onStreamingToggle,
         streamOnCellular = viewModel.streamOnCellular.collectAsStateWithLifecycle().value,
         onStreamOnCellularToggle = viewModel::onStreamOnCellularToggle,
+        pipedInstancesText = viewModel.pipedInstancesText.collectAsStateWithLifecycle().value,
+        onPipedInstancesChange = viewModel::onPipedInstancesChange,
         forceYouTubeFallback = viewModel.forceYouTubeFallback.collectAsStateWithLifecycle().value,
         onToggleForceYouTubeFallback = viewModel::setForceYouTubeFallback,
         forceAntraOnly = viewModel.forceAntraOnly.collectAsStateWithLifecycle().value,
@@ -349,6 +351,9 @@ private fun SettingsContent(
     streamOnCellular: Boolean,
     /** Routed to [SettingsViewModel.onStreamOnCellularToggle] in the host. */
     onStreamOnCellularToggle: (Boolean) -> Unit,
+    /** User's own Piped/Invidious server URLs (one per line). */
+    pipedInstancesText: String,
+    onPipedInstancesChange: (String) -> Unit,
     /** Live "force YouTube fallback" test pref — see [SettingsViewModel.forceYouTubeFallback]. */
     forceYouTubeFallback: Boolean,
     /** Routed to [SettingsViewModel.setForceYouTubeFallback] in the host. */
@@ -484,6 +489,35 @@ private fun SettingsContent(
                         Switch(
                             checked = streamOnCellular,
                             onCheckedChange = onStreamOnCellularToggle,
+                        )
+                    }
+
+                    // Your own music servers (Piped/Invidious). These join the
+                    // race AHEAD of the built-in public pool, so a self-hosted
+                    // instance keeps playback instant + reliable. One URL/line.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                    ) {
+                        Text(
+                            text = "Your music servers (advanced)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Optional. Paste your own Piped server URLs (one per line) to make playback faster and more reliable. Leave empty to use the built-in public servers.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        androidx.compose.material3.OutlinedTextField(
+                            value = pipedInstancesText,
+                            onValueChange = onPipedInstancesChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("https://pipedapi.example.com") },
+                            singleLine = false,
+                            minLines = 2,
                         )
                     }
 
@@ -642,6 +676,13 @@ private fun SettingsContent(
                     onClearScrobbleDrainResult()
                 }
             }
+        }
+
+        // OneDrive personal-cloud warehouse: synced songs stream from the
+        // user's own storage before any third-party source is consulted.
+        // Self-contained section (own ViewModel) — see OneDriveSyncSection.
+        GlassCard {
+            com.stash.feature.settings.components.OneDriveSyncSection()
         }
 
         // -- Audio Quality section (top-level) --------------------------------
@@ -1636,6 +1677,12 @@ private fun SettingsContent(
                 }
             }
         }
+
+        // -- Liquid Glass intensity (very bottom, per request) -----------
+        // Apple ships the same clear ↔ tinted control in iOS 26 System
+        // Settings; selecting a level restyles every glass surface live.
+        Spacer(modifier = Modifier.height(8.dp))
+        com.stash.feature.settings.components.GlassIntensitySection()
 
         // Bottom padding for navigation bar clearance
         Spacer(modifier = Modifier.height(80.dp))

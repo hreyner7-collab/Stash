@@ -104,7 +104,10 @@ class PreviewUrlExtractor @Inject constructor(
     companion object {
         private const val TAG = "PreviewUrlExtractor"
         private const val YTDLP_TIMEOUT_MS = 60_000L
-        private const val INNERTUBE_TIMEOUT_MS = 10_000L
+        // 6000 (was 10000): InnerTube answers in 0.2-2s when healthy; 6s
+        // is still 3x the p99, and a flaky endpoint releases the fast
+        // lane 4s sooner so callers fail over to the next source faster.
+        private const val INNERTUBE_TIMEOUT_MS = 6_000L
         private const val FORMAT_SELECTOR = "251/250/bestaudio"
 
         /**
@@ -117,7 +120,12 @@ class PreviewUrlExtractor @Inject constructor(
          * JNI boundary; coalescing (above) ensures redundant calls for the
          * same videoId never reach the semaphore at all.
          */
-        private const val INNERTUBE_CONCURRENCY = 8
+        // INNERTUBE 12 (was 8): the library primer's fast-lane burst shares
+        // these permits with tap/prefetch resolution — the extra headroom
+        // keeps a foreground tap's InnerTube call from queuing behind
+        // primer traffic. InnerTube requests are lightweight HTTP; 12 in
+        // flight is well within what the device and endpoint tolerate.
+        private const val INNERTUBE_CONCURRENCY = 12
         private const val YTDLP_CONCURRENCY = 1   // was 2 — see spec
 
         /**

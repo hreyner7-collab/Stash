@@ -38,6 +38,38 @@ class StashRenderersFactory(
     private val loudnessController: LoudnessController,
 ) : DefaultRenderersFactory(context) {
 
+    /**
+     * AUDIO-ONLY player: Stash never renders video, so don't construct
+     * video renderers at all. [DefaultRenderersFactory] otherwise
+     * enumerates the device's MediaCodec video decoders and instantiates
+     * a [androidx.media3.exoplayer.video.MediaCodecVideoRenderer] on
+     * every player build — pure startup cost and per-track track-group
+     * evaluation overhead for capabilities this app can never use.
+     */
+    override fun buildVideoRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: androidx.media3.exoplayer.mediacodec.MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        eventHandler: android.os.Handler,
+        eventListener: androidx.media3.exoplayer.video.VideoRendererEventListener,
+        allowedVideoJoiningTimeMs: Long,
+        out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>,
+    ) {
+        // Intentionally empty — audio-only pipeline.
+    }
+
+    /** Audio-only: no subtitle/caption renderers either. */
+    override fun buildTextRenderers(
+        context: Context,
+        output: androidx.media3.exoplayer.text.TextOutput,
+        outputLooper: android.os.Looper,
+        extensionRendererMode: Int,
+        out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>,
+    ) {
+        // Intentionally empty — audio-only pipeline.
+    }
+
     override fun buildAudioSink(
         context: Context,
         enableFloatOutput: Boolean,

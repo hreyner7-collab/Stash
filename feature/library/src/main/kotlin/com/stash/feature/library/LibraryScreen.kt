@@ -2,6 +2,15 @@ package com.stash.feature.library
 
 import android.net.Uri
 import kotlin.math.absoluteValue
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.geometry.Offset
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -331,11 +340,31 @@ private fun LibraryContent(
     selection: SelectionState,
     modifier: Modifier = Modifier,
 ) {
+    // Spotify-style collapsing header: the filter/sort/tab chips slide
+    // away as you scroll the content DOWN and return the moment you
+    // scroll back UP, so they never block the list. Driven by a
+    // nested-scroll listener so it works uniformly for every tab (the
+    // tracks LazyColumn and the playlist/artist/album grids all bubble
+    // their scroll deltas up here).
+    var chipsVisible by remember { mutableStateOf(true) }
+    val collapsingScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                when {
+                    available.y < -6f -> chipsVisible = false // content moving up → hide chrome
+                    available.y > 6f -> chipsVisible = true // pulling back down → reveal
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(top = 16.dp),
+            .padding(top = 16.dp)
+            .nestedScroll(collapsingScroll),
     ) {
         // -- Heading + Import action --
         // SAF audio picker launched from the "Add tracks" icon button in
@@ -415,29 +444,38 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // -- Tab chips (horizontal scroll) --
-        TabChipRow(
-            activeTab = state.activeTab,
-            onTabSelected = onTabSelected,
-        )
+        // -- Collapsing chip header (tab / sort / source filter) --
+        // Slides + fades away as a unit on scroll-down, returns on
+        // scroll-up. Keeps the song list unobstructed (the user's "it
+        // blocks the way" report) while staying one tap from view.
+        AnimatedVisibility(
+            visible = chipsVisible,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Column {
+                TabChipRow(
+                    activeTab = state.activeTab,
+                    onTabSelected = onTabSelected,
+                )
 
-        Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-        // -- Sort chips --
-        SortChipRow(
-            activeSort = state.sortOrder,
-            onSortSelected = onSortOrderChanged,
-        )
+                SortChipRow(
+                    activeSort = state.sortOrder,
+                    onSortSelected = onSortOrderChanged,
+                )
 
-        Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-        // -- Source filter chips --
-        SourceFilterChipRow(
-            activeFilter = state.sourceFilter,
-            onFilterSelected = onSourceFilterChanged,
-        )
+                SourceFilterChipRow(
+                    activeFilter = state.sourceFilter,
+                    onFilterSelected = onSourceFilterChanged,
+                )
 
-        Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
 
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected

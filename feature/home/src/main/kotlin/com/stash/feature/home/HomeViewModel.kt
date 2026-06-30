@@ -103,8 +103,17 @@ class HomeViewModel @Inject constructor(
     private val streamingPreference: StreamingPreference,
     private val metadataBackfillState: MetadataBackfillState,
     private val lyricsBackfillState: LyricsBackfillState,
+    private val djStationBuilder: com.stash.core.data.dj.DjStationBuilder,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
+
+    /**
+     * True while the DJ is building a station (seed → radio → blend). The
+     * Home DJ button shows a spinner so a tap clearly registers — building
+     * the first batch involves a couple of InnerTube round-trips.
+     */
+    private val _djLoading = MutableStateFlow(false)
+    val djLoading: StateFlow<Boolean> = _djLoading.asStateFlow()
 
     /**
      * Master streaming-mode toggle observed by the Home `StreamingModeToggle`.
@@ -621,6 +630,46 @@ class HomeViewModel @Inject constructor(
     fun playTrack(tracks: List<Track>, index: Int) {
         viewModelScope.launch {
             playerRepository.setQueue(tracks, index)
+        }
+    }
+
+    /**
+     * Start the AI DJ: build a personalised discovery station from your
+     * listening history (YouTube Music radio under the hood) and play it.
+     *
+     * The first batch needs a couple of network round-trips, so we flag
+     * [djLoading] for the button spinner. Playback goes through the normal
+     * streaming queue, so the look-ahead resolver keeps the next songs warm
+     * and it feels instant once it starts. Streaming must be on — without it
+     * every stream is refused, so we nudge the user to flip it.
+     */
+    fun startDj() {
+        if (_djLoading.value) return
+        viewModelScope.launch {
+            if (!streamingPreference.current()) {
+                _userMessages.tryEmit("Turn on Online mode to start the DJ.")
+                return@launch
+            }
+            _djLoading.value = true
+            try {
+                val station = djStationBuilder.buildStation()
+                if (station.isEmpty()) {
+                    _userMessages.tryEmit("Play a few songs first so the DJ can learn your taste.")
+                    return@launch
+                }
+                val playable = queuePlayableTracks(station, true)
+                if (playable.isEmpty()) {
+                    _userMessages.tryEmit("Couldn't start the DJ right now — try again.")
+                    return@launch
+                }
+                playerRepository.setQueue(playable, startIndex = 0)
+                _userMessages.tryEmit("DJ started — playing songs picked for you.")
+            } catch (e: Exception) {
+                Log.w(TAG, "startDj failed", e)
+                _userMessages.tryEmit("Couldn't start the DJ right now — try again.")
+            } finally {
+                _djLoading.value = false
+            }
         }
     }
 

@@ -10,10 +10,12 @@ import com.stash.core.data.cache.AlbumCache
 import com.stash.core.data.cache.ArtistCache
 import com.stash.core.data.cache.CachedProfile
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.StreamRoutingResult
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.LosslessUrlPrefetcher
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
+import com.stash.core.model.TrackItem
 import com.stash.data.ytmusic.model.ArtistProfile
 import com.stash.data.ytmusic.model.TrackSummary
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -181,15 +183,28 @@ class ArtistProfileViewModel @Inject constructor(
     private var fillCatalogJob: Job? = null
 
     /**
+     * True while the initial [PlayerRepository.setQueue] resolve is still in
+     * flight. Guards against the user mashing the big Play button: a track
+     * that needs the slow yt-dlp lane takes several seconds to resolve, and
+     * every extra tap used to start a NEW setQueue that superseded the prior
+     * one — so nothing ever finished resolving (observed on-device: epochs
+     * 1→3 all "failed to resolve"). We now ignore taps until the first
+     * resolve lands.
+     */
+    private var playArtistStarting = false
+
+    /**
      * Start playing this artist. Hybrid strategy:
      *  1. Instant start with the cached popular tracks (immediate setQueue).
      *  2. Background-fill the queue from albums then singles via [albumCache].
      *  3. Stop at [CATALOG_CAP] tracks total (soft cap, ~hours of playback).
      *
-     * Double-tap-safe: a second invocation cancels the prior fill job before
-     * relaunching. Per spec, no Snackbar — actual playback IS the feedback.
+     * Mash-safe: re-taps during the initial resolve are ignored (see
+     * [playArtistStarting]). Per spec, no Snackbar — actual playback IS the
+     * feedback.
      */
     fun playArtist() {
+        if (playArtistStarting) return
         fillCatalogJob?.cancel()
         fillCatalogJob = viewModelScope.launch {
             val state = _uiState.value
@@ -207,7 +222,14 @@ class ArtistProfileViewModel @Inject constructor(
 
             var appended = popularTracks.size
             if (popularTracks.isNotEmpty()) {
-                playerRepository.setQueue(popularTracks, startIndex = 0)
+                // Hold the mash-guard across the (possibly multi-second)
+                // initial resolve so re-taps can't supersede it.
+                playArtistStarting = true
+                try {
+                    playerRepository.setQueue(popularTracks, startIndex = 0)
+                } finally {
+                    playArtistStarting = false
+                }
             }
 
             val catalog = state.albums + state.singles
@@ -233,6 +255,35 @@ class ArtistProfileViewModel @Inject constructor(
                     playerRepository.addToQueue(albumTracks)
                 }
                 appended += albumTracks.size
+            }
+        }
+    }
+
+    /**
+     * Tap on a song row: play the FULL track through the main player — the
+     * exact same proven path the Search tab uses ([PlayerRepository.playFromStream]).
+     *
+     * This replaces the old 30-second *preview* on tap, which was why artist
+     * songs "didn't play well": a preview runs on a separate player, so the
+     * Now Playing screen's play/pause button couldn't control it and it
+     * never played in the background. playFromStream routes through the
+     * MediaSession-backed controller (real play/pause, lockscreen, background)
+     * and resolves via the full chain (Kennyy → InnerTube → yt-dlp → antra),
+     * with built-in dedup so rapid taps don't pile up.
+     */
+    fun onTrackTap(item: TrackItem) {
+        viewModelScope.launch {
+            when (playerRepository.playFromStream(item)) {
+                is StreamRoutingResult.Item -> Unit
+                StreamRoutingResult.Deduped -> Unit
+                StreamRoutingResult.NotAvailable ->
+                    _userMessages.emit("Couldn't find this track.")
+                StreamRoutingResult.OfflineMode ->
+                    _userMessages.emit("Turn on Online mode to stream this track.")
+                StreamRoutingResult.CellularRefused ->
+                    _userMessages.emit("Streaming on cellular is off in Settings.")
+                StreamRoutingResult.NoConnectivity ->
+                    _userMessages.emit("You're offline — can't stream this track.")
             }
         }
     }

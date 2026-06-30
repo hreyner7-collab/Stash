@@ -15,8 +15,8 @@ import com.stash.data.ytmusic.model.TrackSummary
 /**
  * "Popular" shelf on the Artist Profile screen.
  *
- * Renders up to 5 of the artist's popular tracks via [PreviewDownloadRow] —
- * the exact same composable the main Search tab uses for song results. No
+ * Renders the artist's full songs list via [PreviewDownloadRow] — the
+ * exact same composable the main Search tab uses for song results. No
  * fork: a shared Compose UI test (when the androidTest source set lands)
  * asserts identity via the `"PreviewDownloadRow"` test tag.
  *

@@ -7,6 +7,8 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import com.stash.core.data.db.dao.TrackDao
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -53,6 +55,7 @@ class RefreshingDataSource(
     private val cache: StreamUrlCache,
     private val trackId: Long,
     private val trackDao: TrackDao,
+    private val upgradeScope: CoroutineScope? = null,
 ) : DataSource by inner {
 
     override fun open(spec: DataSpec): Long {
@@ -60,16 +63,58 @@ class RefreshingDataSource(
             inner.open(spec)
         } catch (e: HttpDataSource.InvalidResponseCodeException) {
             if (e.responseCode !in REFRESH_TRIGGERS) throw e
-            // Single coroutine scope for both lookups — avoids re-entrance
+            // Cache first: the prefetch / placeholder-upgrade paths may
+            // already have resolved a fresh full-playback URL for this
+            // track. Using it makes the swap instant instead of blocking
+            // the loader thread on a live resolve.
+            // Guards: never a placeholder (it would 403 again ~1 MB in),
+            // never the URL that just failed, and only while unexpired.
+            val cachedFresh = cache.get(trackId)?.takeUnless {
+                it.placeholder || it.url == spec.uri.toString()
+            }
+            // Live fallback is FAST LANE ONLY (no yt-dlp): this runs
+            // runBlocking on Media3's loader thread, and a full-chain
+            // resolve can sit 8-25s+ in the serialized yt-dlp FIFO —
+            // long enough to drain the playback buffer mid-song (the
+            // on-device "third song loads forever" stall, 2026-06-11:
+            // a placeholder died at its 1 MB gate and the refresh queued
+            // behind library-primer extractions). The fast lane answers
+            // in ~1-3s; if it can only offer another placeholder, that
+            // still buys ~1 MB of immediate audio at the failed offset.
+            // Single runBlocking for both lookups — avoids re-entrance
             // hazards from two independent runBlocking calls sharing the
             // loader thread with Room's connection pool + Kennyy's
             // rate-limiter.
-            val fresh = runBlocking {
+            val fresh = cachedFresh ?: runBlocking {
                 val track = trackDao.getById(trackId) ?: return@runBlocking null
-                resolver.resolve(track)
+                resolver.resolve(track, allowYtDlp = false)
+                    // The fast lane re-serving the exact URL that just
+                    // died is not a recovery — treat as miss.
+                    ?.takeUnless { it.url == spec.uri.toString() }
             } ?: throw e
             cache.put(trackId, fresh)
-            val newSpec = spec.buildUpon().setUri(Uri.parse(fresh.url)).build()
+            // If the sync recovery is itself a gated placeholder, line up
+            // the REAL URL in the background so the next 403 (≤1 MB away)
+            // swaps instantly from cache — the slow lane never holds up
+            // the loader thread. The registry's chokepoint caching stores
+            // the result even if this source instance is long gone.
+            if (fresh.placeholder) {
+                upgradeScope?.launch {
+                    runCatching {
+                        trackDao.getById(trackId)?.let { resolver.resolve(it, allowYtDlp = true) }
+                    }
+                }
+            }
+            // Recompute the cache key alongside the URL: if the re-resolve
+            // switched source/format (kennyy FLAC -> youtube AAC during an
+            // outage), the fresh bytes must cache under their own key
+            // rather than appending a different encoding to the old
+            // entry. Only when the original spec carried a custom key —
+            // a null key means the item predates track-keyed caching.
+            val newSpec = spec.buildUpon()
+                .setUri(Uri.parse(fresh.url))
+                .apply { if (spec.key != null) setKey(streamCacheKey(trackId, fresh)) }
+                .build()
             inner.open(newSpec)
         }
     }
@@ -91,6 +136,7 @@ class RefreshingDataSourceFactory(
     private val cache: StreamUrlCache,
     private val trackDao: TrackDao,
     private val trackId: Long,
+    private val upgradeScope: CoroutineScope? = null,
 ) : DataSource.Factory {
 
     override fun createDataSource(): DataSource = RefreshingDataSource(
@@ -99,5 +145,6 @@ class RefreshingDataSourceFactory(
         cache = cache,
         trackId = trackId,
         trackDao = trackDao,
+        upgradeScope = upgradeScope,
     )
 }

@@ -49,6 +49,9 @@ class RefreshingDataSourceFactoryTest {
         // Default: DAO returns the track for id 42; tests that need a
         // missing track override this.
         coEvery { fakeTrackDao.getById(42L) } returns track
+        // Default: URL cache is empty, so the refresh path exercises the
+        // live-resolve branch. The cache-first fast path has its own test.
+        every { fakeCache.get(any()) } returns null
     }
 
     private fun newSource(trackId: Long = 42L): RefreshingDataSource =
@@ -85,7 +88,9 @@ class RefreshingDataSourceFactoryTest {
         every { fakeInner.open(match { it.uri.toString().contains("stale-url") }) } throws
             invalidResponseCodeException(403)
         every { fakeInner.open(match { it.uri.toString().contains("fresh-url") }) } returns 1024L
-        coEvery { fakeResolver.resolve(track) } returns freshUrl
+        // The live refresh is fast-lane only (allowYtDlp = false): the
+        // loader thread must never wait on the serialized yt-dlp slot.
+        coEvery { fakeResolver.resolve(track, allowYtDlp = false) } returns freshUrl
 
         val source = newSource()
         val length = source.open(staleSpec())
@@ -106,13 +111,64 @@ class RefreshingDataSourceFactoryTest {
         every { fakeInner.open(match { it.uri.toString().contains("stale-url") }) } throws
             invalidResponseCodeException(410)
         every { fakeInner.open(match { it.uri.toString().contains("fresh-url-410") }) } returns 2048L
-        coEvery { fakeResolver.resolve(track) } returns freshUrl
+        coEvery { fakeResolver.resolve(track, allowYtDlp = false) } returns freshUrl
 
         val source = newSource()
         val length = source.open(staleSpec())
 
         assertThat(length).isEqualTo(2048L)
         verify { fakeCache.put(42L, freshUrl) }
+    }
+
+    /**
+     * When the URL cache already holds a fresh full-playback URL (the
+     * prefetch / placeholder-upgrade paths put it there), the 403 swap
+     * must use it directly — no live resolve blocking the loader thread.
+     */
+    @Test
+    fun open_on403_usesCachedFreshUrl_withoutLiveResolve() {
+        val cachedFresh = StreamUrl(
+            url = "https://cached-fresh?etsp=1800000000",
+            expiresAtMs = 1_800_000_000_000L,
+        )
+        every { fakeCache.get(42L) } returns cachedFresh
+        every { fakeInner.open(match { it.uri.toString().contains("stale-url") }) } throws
+            invalidResponseCodeException(403)
+        every { fakeInner.open(match { it.uri.toString().contains("cached-fresh") }) } returns 4096L
+
+        val source = newSource()
+        val length = source.open(staleSpec())
+
+        assertThat(length).isEqualTo(4096L)
+        coVerify(exactly = 0) { fakeResolver.resolve(any(), any(), any(), any()) }
+    }
+
+    /**
+     * A cached PLACEHOLDER (fast-lane) URL must not be used for the 403
+     * swap — it would 403 again ~1 MB in. The refresh falls through to a
+     * live resolve instead.
+     */
+    @Test
+    fun open_on403_ignoresCachedPlaceholder_fallsToLiveResolve() {
+        every { fakeCache.get(42L) } returns StreamUrl(
+            url = "https://placeholder?expire=1800000000",
+            expiresAtMs = 1_800_000_000_000L,
+            placeholder = true,
+        )
+        val freshUrl = StreamUrl(
+            url = "https://fresh-url?etsp=1800000000",
+            expiresAtMs = 1_800_000_000_000L,
+        )
+        every { fakeInner.open(match { it.uri.toString().contains("stale-url") }) } throws
+            invalidResponseCodeException(403)
+        every { fakeInner.open(match { it.uri.toString().contains("fresh-url") }) } returns 1024L
+        coEvery { fakeResolver.resolve(track, allowYtDlp = false) } returns freshUrl
+
+        val source = newSource()
+        val length = source.open(staleSpec())
+
+        assertThat(length).isEqualTo(1024L)
+        coVerify(exactly = 1) { fakeResolver.resolve(track, allowYtDlp = false) }
     }
 
     @Test
@@ -131,7 +187,7 @@ class RefreshingDataSourceFactoryTest {
         assertThat(thrown).isNotNull()
         assertThat(thrown!!.responseCode).isEqualTo(500)
         // Must NOT have attempted a re-resolve or cache write.
-        coVerify(exactly = 0) { fakeResolver.resolve(any()) }
+        coVerify(exactly = 0) { fakeResolver.resolve(any(), any(), any(), any()) }
         verify(exactly = 0) { fakeCache.put(any(), any()) }
     }
 
@@ -158,7 +214,7 @@ class RefreshingDataSourceFactoryTest {
     fun open_whenResolverReturnsNull_propagatesOriginalError() {
         val exception = invalidResponseCodeException(403)
         every { fakeInner.open(any()) } throws exception
-        coEvery { fakeResolver.resolve(track) } returns null
+        coEvery { fakeResolver.resolve(track, allowYtDlp = false) } returns null
 
         val source = newSource()
         val thrown = try {

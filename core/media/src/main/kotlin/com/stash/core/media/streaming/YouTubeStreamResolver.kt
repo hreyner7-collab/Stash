@@ -132,6 +132,10 @@ class YouTubeStreamResolver @Inject constructor(
             bitrateKbps = null,
             coverArtUrl = null,
             origin = ORIGIN,
+            // Fast-lane (InnerTube) URLs are PO-token-gated to ~1 MB —
+            // mark them so cache consumers know this entry seeds a
+            // timeline but doesn't satisfy a real resolve.
+            placeholder = !allowYtDlp,
         )
     }
 
@@ -276,7 +280,10 @@ class YouTubeStreamResolver @Inject constructor(
          * the queue waiting too long on a track that might not be on
          * YouTube either.
          */
-        private const val YT_SEARCH_TIMEOUT_MS = 3_000L
+        // 2000 (was 3000): YT Music search answers in well under a second
+        // normally; 2s is still ~3x the p95 while shaving a second off the
+        // worst-case of every search-dependent resolve.
+        private const val YT_SEARCH_TIMEOUT_MS = 2_000L
 
         /** Fallback expiry when the YT URL has no `expire=` parameter. */
         private const val DEFAULT_TTL_MS = 60 * 60 * 1000L

@@ -7,13 +7,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import androidx.compose.runtime.CompositionLocalProvider
 import com.stash.app.navigation.StashScaffold
+import com.stash.core.data.prefs.GlassPreference
 import com.stash.core.data.prefs.ThemePreference
+import com.stash.core.model.GlassIntensity
 import com.stash.core.model.ThemeMode
+import com.stash.core.ui.components.LocalGlassIntensity
 import com.stash.core.ui.theme.StashTheme
 import com.stash.data.download.files.LocalImportCoordinator
 import com.stash.data.download.lossless.squid.CaptchaExpiredNotifier
@@ -21,11 +28,20 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 
+// Purely cosmetic: a brief branded flash, fully decoupled from network /
+// player priming (a fixed timer — never awaits resolution, can't hang). The
+// main UI loads reactively from Room regardless; priming runs in the
+// background and the first Play resumes instantly.
+private const val SPLASH_DURATION_MS = 700L
+
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var themePreference: ThemePreference
+
+    @Inject
+    lateinit var glassPreference: GlassPreference
 
     @Inject
     lateinit var localImportCoordinator: LocalImportCoordinator
@@ -43,9 +59,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val themeModeFlow: Flow<ThemeMode> = themePreference.themeMode
+        val glassFlow: Flow<Float> = glassPreference.level
 
         setContent {
             val themeMode by themeModeFlow.collectAsState(initial = ThemeMode.SYSTEM)
+            val glassIntensity by glassFlow.collectAsState(initial = GlassIntensity.DEFAULT)
             val systemDark = isSystemInDarkTheme()
             val darkTheme = when (themeMode) {
                 ThemeMode.LIGHT -> false
@@ -54,10 +72,28 @@ class MainActivity : ComponentActivity() {
             }
 
             StashTheme(darkTheme = darkTheme) {
-                StashScaffold(
-                    pendingDeepLink = pendingDeepLink.value,
-                    onDeepLinkConsumed = { pendingDeepLink.value = null },
-                )
+                // Provide the chosen Liquid Glass intensity to every glass
+                // surface in the tree (GlassCard reads LocalGlassIntensity).
+                CompositionLocalProvider(LocalGlassIntensity provides glassIntensity) {
+                    // "Stash Loading" warm-up gate. Shows the branded screen
+                    // while the background warm-up (Piped pre-resolution, server
+                    // list, audio engine) gets a head start, then enters the app.
+                    // HARD-CAPPED so a slow network can never strand the user —
+                    // the rest of the library keeps warming after dismissal.
+                    var warmedUp by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) {
+                        kotlinx.coroutines.delay(SPLASH_DURATION_MS)
+                        warmedUp = true
+                    }
+                    if (warmedUp) {
+                        StashScaffold(
+                            pendingDeepLink = pendingDeepLink.value,
+                            onDeepLinkConsumed = { pendingDeepLink.value = null },
+                        )
+                    } else {
+                        StashLoadingScreen()
+                    }
+                }
             }
         }
 

@@ -19,15 +19,23 @@ class StreamSourceRegistryTest {
     private val youtube: YouTubeStreamResolver = mockk()
     private val streamingPreference: StreamingPreference = mockk()
 
-    private fun registry() = StreamSourceRegistry(kennyy, qobuz, antra, youtube, streamingPreference)
+    // OneDrive sits first in every chain but self-gates to null when not
+    // connected — that's the baseline state for all existing tests.
+    private val oneDrive: OneDriveStreamResolver = mockk {
+        coEvery { resolve(any()) } returns null
+    }
+
+    // Real (in-memory, no persistence file) StreamUrlCache: the registry's
+    // chokepoint caching writes resolved URLs into it as a side effect,
+    // which is harmless to every assertion here.
+    private fun registry() = StreamSourceRegistry(kennyy, qobuz, antra, youtube, oneDrive, streamingPreference, StreamUrlCache())
 
     /**
-     * The forceAntraOnly test toggle is the outage drill for the antra
-     * fallback: kennyy, squid AND youtube are all removed from play, so a
-     * track either streams via antra or not at all.
+     * The forceAntraOnly toggle makes antra the PREFERRED first source:
+     * when antra serves, no other resolver is consulted.
      */
     @Test
-    fun resolve_forceAntraOnly_routes_through_antra_only() = runTest {
+    fun resolve_forceAntraOnly_serves_antra_first() = runTest {
         coEvery { streamingPreference.isForceAntraOnly() } returns true
         // kennyy/qobuz/youtube must never be consulted — intentionally unstubbed.
         coEvery { antra.resolve(any()) } returns antraStreamUrl()
@@ -40,20 +48,26 @@ class StreamSourceRegistryTest {
     }
 
     /**
-     * Under forceAntraOnly an antra miss must NOT fall through to youtube —
-     * the drill exists to prove antra alone can serve, so a miss surfaces
-     * as "no stream" rather than being papered over.
+     * Under forceAntraOnly an antra miss falls through to the normal chain
+     * (lossless proxies, then youtube). The old hard-exclusive semantics
+     * silently disabled ALL playback when the toggle was on without a
+     * connected antra account (on-device 2026-06-11) — a user-facing
+     * toggle must never be able to brick the whole app.
      */
     @Test
-    fun resolve_forceAntraOnly_returns_null_when_antra_misses() = runTest {
+    fun resolve_forceAntraOnly_falls_back_to_normal_chain_when_antra_misses() = runTest {
         coEvery { streamingPreference.isForceAntraOnly() } returns true
         coEvery { antra.resolve(any()) } returns null
+        coEvery { kennyy.resolve(any()) } returns null
+        coEvery { qobuz.resolve(any()) } returns null
+        coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
         val result = registry().resolve(track, allowYouTube = true)
 
         assertThat(result).isNull()
-        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+        coVerify { antra.resolve(track) }
+        coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
     /**
@@ -177,24 +191,26 @@ class StreamSourceRegistryTest {
     }
 
     /**
-     * Under the forceAntraOnly drill, a speculative resolve
-     * (`allowAntra = false`) resolves NOTHING — mirroring how the forceYt
-     * branch keeps the background fill empty. Only the actually-played
-     * track may spend drill quota.
+     * Under the forceAntraOnly toggle, a speculative resolve
+     * (`allowAntra = false`) skips antra (quota protection) but still uses
+     * the normal fallback chain — the background fill keeps working so the
+     * queue stays playable.
      */
     @Test
-    fun resolve_forceAntraOnly_with_allowAntra_false_resolves_nothing() = runTest {
+    fun resolve_forceAntraOnly_with_allowAntra_false_uses_fallback_chain_without_antra() = runTest {
         coEvery { streamingPreference.isForceAntraOnly() } returns true
-        // Stubbed (not strictly reached today) so the test survives a
-        // reordering of the toggle branches rather than erroring.
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
-        // No resolver may be consulted — all intentionally unstubbed.
+        coEvery { kennyy.resolve(any()) } returns null
+        coEvery { qobuz.resolve(any()) } returns null
+        coEvery { youtube.resolve(any(), any()) } returns null
+        // antra must never be consulted — intentionally unstubbed.
         val track = stubTrack()
 
         val result = registry().resolve(track, allowYouTube = true, allowAntra = false)
 
         assertThat(result).isNull()
         coVerify(exactly = 0) { antra.resolve(any()) }
+        coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
     private fun stubTrack(): TrackEntity = TrackEntity(

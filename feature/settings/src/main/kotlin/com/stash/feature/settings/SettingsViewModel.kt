@@ -150,6 +150,24 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
+     * The user's own music-server (Piped/Invidious) URLs, one per line. These
+     * join the race AHEAD of the built-in public pool, so a user's own fast
+     * instance wins and playback stays instant. Empty by default.
+     */
+    val pipedInstancesText: kotlinx.coroutines.flow.StateFlow<String> =
+        kotlinx.coroutines.flow.flow { emit(streamingPreference.pipedInstancesRaw()) }
+            .stateIn(
+                scope = viewModelScope,
+                started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+                initialValue = "",
+            )
+
+    /** Persist the edited server list. */
+    fun onPipedInstancesChange(text: String) {
+        viewModelScope.launch { streamingPreference.setPipedInstances(text) }
+    }
+
+    /**
      * Test-only "Force YouTube fallback" toggle. When on,
      * [StreamSourceRegistry] skips Kennyy/Squid and streams every track
      * via YouTube — surfaced as a switch in the Diagnostics card so the

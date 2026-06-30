@@ -30,15 +30,20 @@ enum class StreamQualityTier { LOSSLESS, HIGH_QUALITY_LOSSY }
  * User-facing preferences for the online-streaming engine:
  *
  *  - [enabled] — master toggle. When `false`, the app stays in pure
- *    download-and-play mode (current behavior). When `true`, the
- *    streaming source factory is wired into the player.
+ *    download-and-play mode. When `true`, the streaming source factory is
+ *    wired into the player.
  *  - [streamOnCellular] — whether streaming is allowed on a metered
  *    network. Default `false` so users don't burn data unintentionally.
  *  - [streamQuality] — preferred lossless vs high-quality-lossy tier
  *    used when resolving stream URLs.
  *
- * Default is `enabled = false` — preserves current download-only behavior
- * for the existing install base. The user opts in to streaming.
+ * Default is `enabled = true` — Stash is a streaming-first music app, so a
+ * fresh install streams search / artist results immediately on Wi-Fi. This
+ * is intentionally decoupled from [streamOnCellular] (still `false`): the
+ * master toggle being on does NOT spend mobile data — cellular streaming
+ * stays a separate, explicit opt-in. Without this, a clean install plays
+ * only already-downloaded library tracks and every search/artist tap is
+ * silently refused with OfflineMode.
  */
 @Singleton
 class StreamingPreference @Inject constructor(
@@ -51,7 +56,7 @@ class StreamingPreference @Inject constructor(
     private val forceAntraOnlyKey = booleanPreferencesKey("force_antra_only")
 
     val enabled: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
-        prefs[enabledKey] ?: false
+        prefs[enabledKey] ?: true
     }
 
     val streamOnCellular: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
@@ -83,6 +88,47 @@ class StreamingPreference @Inject constructor(
      */
     val forceAntraOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
         prefs[forceAntraOnlyKey] ?: false
+    }
+
+    private val pipedInstancesKey = stringPreferencesKey("piped_instances")
+
+    /**
+     * User-supplied Piped/Invidious server URLs (the "your own server" knob),
+     * one per line. Merged AHEAD of the built-in public pool by
+     * [com.stash.core.media.streaming.PipedStreamResolver] so a user's own
+     * fast instance wins the race. Empty by default — the app works out of the
+     * box on the built-in public instances.
+     */
+    val pipedInstances: Flow<List<String>> = context.streamingDataStore.data.map { prefs ->
+        (prefs[pipedInstancesKey] ?: "")
+            .split('\n', ',')
+            .map { it.trim().trimEnd('/') }
+            .filter { it.startsWith("http") }
+    }
+
+    suspend fun pipedInstancesNow(): List<String> = pipedInstances.first()
+
+    /** Persist the raw multi-line instance list from the Settings field. */
+    suspend fun setPipedInstances(raw: String) {
+        context.streamingDataStore.edit { it[pipedInstancesKey] = raw }
+    }
+
+    /** Raw stored text (for pre-filling the Settings text field). */
+    suspend fun pipedInstancesRaw(): String =
+        context.streamingDataStore.data.first()[pipedInstancesKey] ?: ""
+
+    private val cachedInstancesKey = stringPreferencesKey("piped_instances_cache")
+
+    /**
+     * Last auto-fetched live Piped server list, persisted so a cold app open
+     * starts with a known-good pool immediately instead of re-learning it.
+     */
+    suspend fun cachedPipedInstances(): List<String> =
+        (context.streamingDataStore.data.first()[cachedInstancesKey] ?: "")
+            .split('\n').map { it.trim() }.filter { it.startsWith("http") }
+
+    suspend fun setCachedPipedInstances(instances: List<String>) {
+        context.streamingDataStore.edit { it[cachedInstancesKey] = instances.joinToString("\n") }
     }
 
     suspend fun current(): Boolean = enabled.first()

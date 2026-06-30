@@ -89,7 +89,10 @@ class KennyyHealthProbe(
 
     private companion object {
         const val TAG = "KennyyHealthProbe"
-        const val PROBE_INTERVAL_MS = 45_000L
+        // 30s (was 45s): a kennyy recovery is detected up to 15s sooner,
+        // so lossless quality returns to the resolve chain faster after
+        // an outage. One tiny request per interval — negligible.
+        const val PROBE_INTERVAL_MS = 30_000L
         const val RAMP_INTERVAL_MS = 2_000L
         const val PROBE_TIMEOUT_MS = 3_000L
         // Hardcoded always-in-catalog track — any null result is a proxy anomaly.

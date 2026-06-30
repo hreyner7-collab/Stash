@@ -48,6 +48,10 @@ fun SyncStatusCard(
     youTubeConnected: Boolean,
     hasEverSynced: Boolean,
     modifier: Modifier = Modifier,
+    // OneDrive warehouse stats — rendered as a fifth column when the
+    // user has connected OneDrive (null = not connected, column hidden).
+    oneDriveTracks: Int? = null,
+    oneDriveBytes: Long = 0L,
 ) {
     val anyServiceConnected = spotifyConnected || youTubeConnected
 
@@ -116,6 +120,13 @@ fun SyncStatusCard(
                         value = formatBytes(syncStatus.storageUsedBytes),
                         subValue = if (syncStatus.flacStorageBytes > 0) "${formatBytes(syncStatus.flacStorageBytes)} FLAC" else null,
                     )
+                    if (oneDriveTracks != null) {
+                        StatItem(
+                            label = "OneDrive",
+                            value = oneDriveTracks.toString(),
+                            subValue = if (oneDriveBytes > 0) formatBytes(oneDriveBytes) else null,
+                        )
+                    }
                 }
                 if (syncStatus.lastSyncTime != null) {
                     Text(

@@ -142,13 +142,17 @@ class StashPlaybackService : MediaLibraryService() {
 
         /**
          * How often the prefetch poll checks playback position against
-         * the 60 %-played threshold. 5 s keeps the worst-case prefetch
-         * latency below half a poll-interval after crossing the
-         * threshold without burning unnecessary CPU on a wakelock-held
-         * service. Pulling this lower wastes battery; higher than ~10 s
-         * risks crossing the threshold too late on short (<60 s) tracks.
+         * the played-fraction threshold (see
+         * [PrefetchOrchestrator.PREFETCH_THRESHOLD]). 3 s keeps the
+         * worst-case detection latency small even on short (<60 s)
+         * tracks without burning meaningful CPU on a wakelock-held
+         * service — the tick itself is a few main-thread reads; the
+         * heavy resolve only fires once per next-track id.
          */
-        private const val PREFETCH_POLL_INTERVAL_MS = 5_000L
+        // 1000 (was 3000): the prefetch orchestrator notices playback
+        // progress 3x sooner, so next-track preparation starts up to 2s
+        // earlier. Cost is one cheap position read per second.
+        private const val PREFETCH_POLL_INTERVAL_MS = 1_000L
     }
 
     private var mediaSession: MediaLibrarySession? = null
@@ -186,23 +190,47 @@ class StashPlaybackService : MediaLibraryService() {
         val audioSessionId = audioManager.generateAudioSessionId()
         android.util.Log.i("StashPlayback", "Generated audio session ID: $audioSessionId")
 
-        // Optimised buffer for local music playback: larger buffers eliminate
-        // micro-stutters from storage I/O; lower playback thresholds keep
-        // start-up snappy.
+        // Optimised buffer for both local and streamed playback: large
+        // buffers smooth over storage I/O micro-stutters AND network
+        // hiccups on flaky connections — at maxBuffer 180s a streamed
+        // track is usually fully buffered shortly after it starts, so a
+        // mid-song signal drop doesn't interrupt audio at all. Low
+        // playback thresholds keep start-up snappy (audio begins after
+        // 1s of buffer; the rest fills behind it). Memory cost is modest
+        // for audio (~30 MB at FLAC bitrates for the extra 120s).
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
+                // Spotify-style start threshold: begin playback on just
+                // 100 ms of buffered audio — for any primed/warmed/cached
+                // track that gate is met from disk, making tap-to-sound
+                // a milliseconds affair rather than seconds. The deep
+                // 180 s max buffer keeps rebuffer risk low despite the
+                // hair-trigger start gate. Post-rebuffer restart is
+                // looser (1 s) since a rebuffer means the network is
+                // already struggling — restarting on a hair-trigger there
+                // just oscillates.
                 /* minBufferMs = */ 30_000,
-                /* maxBufferMs = */ 60_000,
-                /* bufferForPlaybackMs = */ 1_000,
-                /* bufferForPlaybackAfterRebufferMs = */ 2_000,
+                /* maxBufferMs = */ 180_000,
+                /* bufferForPlaybackMs = */ 100,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_000,
             )
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        // Route ONLY YouTube-origin streaming items through the refresh chain
-        // (RefreshingDataSource → yt-dlp on 403). Background queue-fill seeds
-        // the timeline with cheap InnerTube/iOS placeholder URLs that 403 past
-        // ~1 MB; without this they surface as onPlayerError and skip-storm the
-        // queue. Lossless (Kennyy/Squid) and local/downloaded items stay on the
+        // Route EVERY http(s) stream-resolved item (any non-null
+        // EXTRA_STREAM_ORIGIN — kennyy, squid, youtube) through the refresh
+        // chain (RefreshingDataSource → registry re-resolve on 403/410).
+        // Two failure modes this absorbs:
+        //  - YouTube: background queue-fill seeds the timeline with cheap
+        //    InnerTube/iOS placeholder URLs that 403 past ~1 MB; the refresh
+        //    re-resolves via yt-dlp and resumes at the same byte offset.
+        //  - Lossless (kennyy/squid): signed CDN URLs expire at `etsp` —
+        //    pause-and-resume-later, or a long queue whose tail URLs went
+        //    stale, used to surface as onPlayerError → skip (and after 3
+        //    consecutive errors, a cascade HALT that paused playback). Now
+        //    the 403 is caught in the data source and the URL is silently
+        //    re-resolved — no skip, no halt.
+        // Local/downloaded items (file:// — no origin extra) stay on the
         // default factory, unchanged.
         val mediaSourceFactory = StashMediaSourceFactory(
             context = this,
@@ -211,7 +239,7 @@ class StashPlaybackService : MediaLibraryService() {
                 val scheme = item.localConfiguration?.uri?.scheme?.lowercase()
                 val origin = item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN)
                 val trackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: -1L
-                if ((scheme == "http" || scheme == "https") && origin == "youtube" && trackId > 0L) {
+                if ((scheme == "http" || scheme == "https") && origin != null && trackId > 0L) {
                     trackId
                 } else {
                     null

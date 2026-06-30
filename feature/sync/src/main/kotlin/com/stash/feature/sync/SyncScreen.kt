@@ -106,11 +106,21 @@ fun SyncScreen(
         // first content card on Home, directly under the supporter pill).
         item {
             Spacer(Modifier.height(8.dp))
+            // OneDrive warehouse stats join the per-source row. Same
+            // ViewModel instance as the OneDriveSyncCard below (Hilt
+            // scopes it to this destination), so the numbers always match.
+            val oneDriveVm: com.stash.feature.sync.components.OneDriveSyncCardViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel()
+            val oneDriveConnected by oneDriveVm.connected.collectAsStateWithLifecycle()
+            val oneDriveTracks by oneDriveVm.totalSynced.collectAsStateWithLifecycle()
+            val oneDriveBytes by oneDriveVm.totalSyncedBytes.collectAsStateWithLifecycle()
             SyncStatusCard(
                 syncStatus = uiState.syncStatus,
                 spotifyConnected = uiState.spotifyConnected,
                 youTubeConnected = uiState.youTubeConnected,
                 hasEverSynced = uiState.hasEverSynced,
+                oneDriveTracks = if (oneDriveConnected) oneDriveTracks else null,
+                oneDriveBytes = oneDriveBytes,
             )
         }
 
@@ -144,6 +154,14 @@ fun SyncScreen(
                     )
                 },
             )
+        }
+
+        // -- OneDrive warehouse card -------------------------------------
+        // Sits directly under the hero card with the same design language:
+        // library sync pulls tracks IN (above); this pushes the audio UP
+        // to the user's OneDrive so it streams instantly from anywhere.
+        item(key = "onedrive_sync") {
+            com.stash.feature.sync.components.OneDriveSyncCard()
         }
 
         // -- Songs that need review card --------------------------------------

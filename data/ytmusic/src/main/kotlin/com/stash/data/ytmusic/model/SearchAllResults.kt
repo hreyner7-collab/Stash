@@ -22,7 +22,21 @@ sealed interface SearchResultSection {
 
     /** Horizontal row of album square cards. */
     data class Albums(val albums: List<AlbumSummary>) : SearchResultSection
+
+    /** Horizontal row of playlist cards (community / editorial playlists). */
+    data class Playlists(val playlists: List<PlaylistSummary>) : SearchResultSection
 }
+
+/** Minimal playlist identity for the Search tab's Playlists row. */
+@Serializable
+data class PlaylistSummary(
+    /** Browse id (e.g. `VLPL…` / `MPRE…`) used to open the playlist. */
+    val playlistId: String,
+    val title: String,
+    /** Author / curator line, when present ("YouTube Music", a user, …). */
+    val subtitle: String?,
+    val thumbnailUrl: String?,
+)
 
 /**
  * Discriminator for the tall "Top result" card at the top of a search page.

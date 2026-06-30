@@ -91,7 +91,11 @@ class PrefetchOrchestrator @Inject constructor(
         scope.launch {
             try {
                 if (!streamingPreference.current()) return@launch
-                if (streamUrlCache.get(nextTrackId) != null) return@launch
+                // Placeholder (fast-lane) entries don't count as cached —
+                // they 403 ~1 MB in; the whole point of this prefetch is
+                // to replace them with a full-playback URL before play.
+                val cached = streamUrlCache.get(nextTrackId)
+                if (cached != null && !cached.placeholder) return@launch
 
                 val track = trackDao.getById(nextTrackId) ?: return@launch
                 if (track.isDownloaded) return@launch
@@ -136,10 +140,14 @@ class PrefetchOrchestrator @Inject constructor(
 
         /**
          * Pre-fetch fires once playback crosses this fraction of the
-         * current track's duration. 60 % leaves ~40 % of runway to
-         * absorb a slow Kennyy resolve before the user hits auto-
-         * advance.
+         * current track's duration. 35 % leaves ~65 % of runway to
+         * absorb a slow resolve before auto-advance — enough to cover
+         * not just a Kennyy roundtrip but a full YouTube yt-dlp
+         * fallback (~11-35s) on a typical 3-4 minute track, so the
+         * next song is ready even when the lossless sources miss it.
+         * The idempotency guard (one attempt per next-id per session)
+         * means firing earlier costs no extra resolver traffic.
          */
-        const val PREFETCH_THRESHOLD = 0.60
+        const val PREFETCH_THRESHOLD = 0.35
     }
 }

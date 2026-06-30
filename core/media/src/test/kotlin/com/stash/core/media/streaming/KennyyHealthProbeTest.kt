@@ -39,11 +39,11 @@ class KennyyHealthProbeTest {
             every { isHealthy } returns MutableStateFlow(false)
         }
         val probe = KennyyHealthProbe(source, monitor, this)
-        probe.start(); runCurrent()            // probe #1, then delay(45s)
+        probe.start(); runCurrent()            // probe #1, then delay(PROBE_INTERVAL_MS = 30s)
         coVerify(exactly = 1) { source.resolveImmediate(any()) }
-        advanceTimeBy(45_001L); runCurrent()   // probe #2
+        advanceTimeBy(30_001L); runCurrent()   // probe #2
         coVerify(exactly = 2) { source.resolveImmediate(any()) }
-        advanceTimeBy(45_001L); runCurrent()   // probe #3
+        advanceTimeBy(30_001L); runCurrent()   // probe #3
         coVerify(exactly = 3) { source.resolveImmediate(any()) }
         probe.stop()
     }
@@ -71,7 +71,7 @@ class KennyyHealthProbeTest {
         }
         val probe = KennyyHealthProbe(source, monitor, this)
         probe.start(); runCurrent()           // iteration 1 throws -> caught as failure, loop lives
-        advanceTimeBy(45_001L); runCurrent()  // iteration 2 runs (proves loop survived)
+        advanceTimeBy(30_001L); runCurrent()  // iteration 2 runs (proves loop survived)
         coVerify(atLeast = 2) { source.resolveImmediate(any()) }
         verify(atLeast = 1) { monitor.recordFailure() }
         probe.stop()

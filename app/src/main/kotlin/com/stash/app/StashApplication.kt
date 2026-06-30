@@ -90,6 +90,12 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var listeningRecorder: ListeningRecorder
 
     @Inject
+    lateinit var libraryWarmupService: com.stash.core.media.preview.LibraryWarmupService
+
+    @Inject
+    lateinit var playerRepository: com.stash.core.media.PlayerRepository
+
+    @Inject
     lateinit var lastFmScrobbler: LastFmScrobbler
 
     @Inject
@@ -387,6 +393,12 @@ class StashApplication : Application(), Configuration.Provider {
         // they no-op until configuration/authentication is in place, and the
         // recorder just observes the player regardless of whether scrobbling is on.
         listeningRecorder.start()
+        // Pre-resolve the streamable library's Piped URLs in the background so
+        // songs are "ready" the moment the user opens the app.
+        libraryWarmupService.start()
+        // Pipeline priming: hold the last-played track prepared + paused at 0:00
+        // so the first Play is ~0 ms ("resume where you left off, instantly").
+        applicationScope.launch { playerRepository.primeLastPlayed() }
         lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
         autoSaveScrobbler.start()

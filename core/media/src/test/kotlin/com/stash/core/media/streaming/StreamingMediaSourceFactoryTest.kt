@@ -39,6 +39,9 @@ class StreamingMediaSourceFactoryTest {
         resolver = resolver,
         urlCache = urlCache,
         trackDao = trackDao,
+        // Real (unpooled-by-test-design) client: cheap to construct, no
+        // network is touched by factory creation itself.
+        streamingHttpClient = okhttp3.OkHttpClient(),
     )
 
     @Test

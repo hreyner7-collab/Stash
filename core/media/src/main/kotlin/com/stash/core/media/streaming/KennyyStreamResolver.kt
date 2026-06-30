@@ -52,6 +52,17 @@ data class StreamUrl(
      *  - `"youtube"`             — yt-dlp/InnerTube extraction (lossy)
      */
     val origin: String? = null,
+    /**
+     * `true` when this URL came from the InnerTube fast lane
+     * (`allowYtDlp = false`) — those URLs are PO-token-gated to ~1 MB and
+     * 403 on any full-file read, so they may seed a timeline (the
+     * 403-refresh seam upgrades them mid-stream) but must NEVER be
+     * treated as a satisfied cache entry: a placeholder cache hit was
+     * exactly what poisoned the prefetch pipeline during a kennyy outage
+     * (observed on-device 2026-06-11 — prefetch saw the placeholder as
+     * "fresh", skipped the real resolve, and every track 403'd ~1 MB in).
+     */
+    val placeholder: Boolean = false,
 )
 
 /**

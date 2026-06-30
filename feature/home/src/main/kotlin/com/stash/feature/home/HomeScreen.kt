@@ -136,6 +136,7 @@ fun HomeScreen(
     // truth; the chip itself early-returns to nothing while the build-
     // time kill-switch (StashConstants.STREAMING_ENGINE_ENABLED) is off.
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
+    val djLoading by viewModel.djLoading.collectAsStateWithLifecycle()
 
     // Bottom-sheet state for the playback-mode picker triggered by the
     // top-bar chip. The sheet is the chip's tap target — keeps the chip
@@ -219,23 +220,10 @@ fun HomeScreen(
                     onClick = { showStreamingSheet = true },
                 )
 
-                Spacer(modifier = Modifier.width(8.dp))
-
+                // v0.9.40: Discord icon and the Ko-fi supporter pill
+                // removed from Home for a cleaner, more professional
+                // header. Issue-report (wrench → GitHub) kept.
                 val socialUriHandler = LocalUriHandler.current
-                androidx.compose.material3.IconButton(
-                    onClick = { socialUriHandler.openUri(STASH_DISCORD_URL) },
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    androidx.compose.material3.Icon(
-                        painter = androidx.compose.ui.res.painterResource(
-                            id = R.drawable.ic_discord,
-                        ),
-                        contentDescription = "Join the Stash Discord",
-                        tint = androidx.compose.ui.graphics.Color(0xFF5865F2),
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-
                 androidx.compose.material3.IconButton(
                     onClick = { socialUriHandler.openUri(STASH_ISSUE_URL) },
                     modifier = Modifier.size(40.dp),
@@ -250,22 +238,37 @@ fun HomeScreen(
             }
         }
 
-        // ── Supporter pill (full row) ─────────────────────────────────
-        // v0.9.13: live data from TipJarRepository. Tap → ko-fi.
+        // ── AI DJ ─────────────────────────────────────────────────────
+        // Spotify-DJ-style endless discovery: seeds from your listening
+        // history, pulls YouTube Music radio, plays a personalised stream.
         item {
-            val tipJar = uiState.tipJar
-            val pillSupporters = remember(tipJar) {
-                tipJar.supporters.map {
-                    Supporter(name = it.name, amount = "$${it.amountUsd}", message = it.message)
-                }.ifEmpty { HOME_SUPPORTERS }
-            }
-            SupporterPill(
-                supporters = pillSupporters,
+            androidx.compose.material3.Button(
+                onClick = { viewModel.startDj() },
+                enabled = !djLoading,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
-                    .padding(bottom = 12.dp),
-            )
+                    .height(54.dp),
+            ) {
+                if (djLoading) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.size(12.dp))
+                    androidx.compose.material3.Text("Building your station…")
+                } else {
+                    androidx.compose.material3.Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.size(10.dp))
+                    androidx.compose.material3.Text("Start DJ — songs picked for you")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
 
         // ── Last.fm connect nudge ────────────────────────────────────

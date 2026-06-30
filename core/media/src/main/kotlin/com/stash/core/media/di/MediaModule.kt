@@ -10,12 +10,14 @@ import com.stash.core.media.equalizer.EqStore
 import com.stash.core.media.equalizer.LegacyEqualizerStore
 import com.stash.core.media.equalizer.LegacyEqualizerStoreImpl
 import com.stash.core.media.equalizer.LoudnessStore
+import com.stash.core.media.streaming.StreamUrlCache
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import javax.inject.Singleton
 
 // File-scope extension for the new EqStore DataStore (name differs from the
@@ -52,6 +54,14 @@ abstract class MediaModule {
     @Singleton
     abstract fun bindLegacyEqualizerStore(impl: LegacyEqualizerStoreImpl): LegacyEqualizerStore
 
+    /** Cloud-fill port: OneDriveSyncManager (core/data) fetches complete
+     * track audio through the streaming machinery living in this module. */
+    @Binds
+    @Singleton
+    abstract fun bindCloudAudioFetcher(
+        impl: com.stash.core.media.streaming.CloudAudioFetcherImpl,
+    ): com.stash.core.data.onedrive.CloudAudioFetcher
+
     companion object {
 
         @Provides
@@ -65,5 +75,18 @@ abstract class MediaModule {
         fun provideLoudnessStore(
             @ApplicationContext context: Context,
         ): LoudnessStore = LoudnessStore(context.loudnessDataStore)
+
+        /**
+         * Production [StreamUrlCache] persists resolved (non-placeholder)
+         * URLs across process restarts — signed CDN URLs live for hours,
+         * so the first tap after reopening the app skips the resolve
+         * round-trip. Unit tests construct `StreamUrlCache()` directly
+         * for pure in-memory behaviour.
+         */
+        @Provides
+        @Singleton
+        fun provideStreamUrlCache(
+            @ApplicationContext context: Context,
+        ): StreamUrlCache = StreamUrlCache(File(context.cacheDir, "stream_url_cache.json"))
     }
 }

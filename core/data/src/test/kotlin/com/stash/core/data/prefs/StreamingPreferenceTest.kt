@@ -41,8 +41,10 @@ class StreamingPreferenceTest {
         if (file.exists()) file.delete()
     }
 
-    @Test fun enabled_defaultsToFalse() = runTest {
-        assertFalse(prefs.enabled.first())
+    @Test fun enabled_defaultsToTrue() = runTest {
+        // Stash is streaming-first: a clean install streams on Wi-Fi out of
+        // the box (cellular stays a separate opt-in — see streamOnCellular).
+        assertTrue(prefs.enabled.first())
     }
 
     @Test fun enabled_roundTrips() = runTest {

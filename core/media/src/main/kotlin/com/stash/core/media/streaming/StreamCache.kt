@@ -34,14 +34,18 @@ annotation class StreamCache
  *
  * Separate cache instance from `PreviewCacheModule` so eviction policies
  * don't collide — short preview snippets and full streamed tracks have
- * different LRU footprints. Backed by 500 MB on disk under
+ * different LRU footprints. Backed by 2 GB on disk under
  * `<cacheDir>/stream_cache/` (OS may evict on storage pressure, which is
- * fine — streamed bytes are throwaway).
+ * fine — streamed bytes are throwaway). 2 GB holds roughly 25-60 hours of
+ * streamed audio — plenty for the active listening rotation. Kept
+ * deliberately small because the user's real library lives on OneDrive:
+ * anything synced there is the permanent copy, so the on-device cache only
+ * needs to cover recent playback (LRU evicts oldest-played first).
  */
 @Module
 @InstallIn(SingletonComponent::class)
 object StreamCacheModule {
-    private const val MAX_BYTES = 500L * 1024 * 1024  // 500 MB
+    private const val MAX_BYTES = 2L * 1024 * 1024 * 1024  // 2 GB
     private const val CACHE_DIR = "stream_cache"
 
     @Provides

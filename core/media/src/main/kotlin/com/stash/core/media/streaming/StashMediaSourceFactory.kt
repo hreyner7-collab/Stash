@@ -10,26 +10,30 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 
 /**
- * Player-wide [MediaSource.Factory] that routes **only YouTube-origin streaming
- * items** through the [StreamingMediaSourceFactory] refresh chain
- * (CacheDataSource → [RefreshingDataSource] → HTTP), and everything else —
- * downloaded/local files AND lossless (Kennyy/Squid) streams — through the
- * plain [DefaultMediaSourceFactory], exactly as before.
+ * Player-wide [MediaSource.Factory] that routes **every http(s) stream-resolved
+ * item** (kennyy / squid / youtube origin) through the
+ * [StreamingMediaSourceFactory] refresh chain (CacheDataSource →
+ * [RefreshingDataSource] → HTTP), and downloaded/local files through the plain
+ * [DefaultMediaSourceFactory], exactly as before.
  *
- * **Why scope to YouTube only.** Background queue-fill seeds the timeline with
- * cheap InnerTube/iOS placeholder URLs (deep, in-order), but those are
- * PO-token-gated to ~1 MB and return HTTP 403 on full playback. The default
- * factory has no recovery — a 403 surfaces as `onPlayerError`, and the cascade
- * guard skip-storms the whole queue. Wrapping YouTube items in
- * [RefreshingDataSource] makes that 403 transparently re-resolve via yt-dlp
- * (full-range-playable) and continue at the same byte offset — no skip, no
- * Halt. Lossless and local playback are left on their proven path so this
- * change can't regress them.
+ * **Why every stream needs the refresh chain.**
+ *  - YouTube: background queue-fill seeds the timeline with cheap
+ *    InnerTube/iOS placeholder URLs (deep, in-order), but those are
+ *    PO-token-gated to ~1 MB and return HTTP 403 on full playback. The refresh
+ *    re-resolves via yt-dlp (full-range-playable) and continues at the same
+ *    byte offset.
+ *  - Lossless (kennyy/squid): the signed CDN URL expires at `etsp`. A pause
+ *    resumed hours later, or a long queue whose tail URLs went stale, used to
+ *    hit the default factory's no-recovery path — a 403 surfaced as
+ *    `onPlayerError`, the track was skipped, and three consecutive errors
+ *    HALTed playback entirely. The refresh chain catches the 403 inside the
+ *    data source and re-resolves silently instead.
+ * Local/downloaded items stay on their proven default path.
  *
  * The per-item decision is delegated to [streamingTrackId]: it returns the
- * track id when the item should use the refresh chain (YouTube http(s) stream
- * with a valid id), or null otherwise. The service owns that predicate because
- * the metadata-extra keys live there.
+ * track id when the item should use the refresh chain (http(s) stream with a
+ * stream origin and a valid id), or null otherwise. The service owns that
+ * predicate because the metadata-extra keys live there.
  */
 @OptIn(UnstableApi::class)
 class StashMediaSourceFactory(

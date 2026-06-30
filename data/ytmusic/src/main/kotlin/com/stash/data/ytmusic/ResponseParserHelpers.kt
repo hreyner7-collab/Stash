@@ -3,6 +3,10 @@ package com.stash.data.ytmusic
 import com.stash.data.ytmusic.model.TrackSummary
 import kotlinx.serialization.json.JsonObject
 
+/** A duration token like "3:45" or "1:02:03" — used to recover the
+ *  duration from a flex-column run when the row has no fixedColumns. */
+private val DURATION_TOKEN_REGEX = Regex("""\d{1,2}:\d{2}(:\d{2})?""")
+
 /**
  * Cross-file renderer-parsing helpers shared by [SearchResponseParser] and
  * [ArtistResponseParser].
@@ -108,6 +112,20 @@ internal fun parseTrackSummaryFromListItem(
         ?.navigatePath("musicResponsiveListItemFixedColumnRenderer", "text", "runs")
         ?.firstArray()?.firstOrNull()?.asObject()
         ?.get("text")?.asString()
+        // Fallback: the songs-ONLY filtered search (used by the Search tab
+        // for a deep song list) carries no `fixedColumns` — the duration
+        // sits as a run inside the flex columns instead (e.g. "3:45").
+        // Without this, those rows showed "0:00". Scan every flex-column
+        // run for a m:ss / h:mm:ss token.
+        ?: flexColumns.asSequence()
+            .mapNotNull {
+                it.asObject()
+                    ?.navigatePath("musicResponsiveListItemFlexColumnRenderer", "text", "runs")
+                    ?.asArray()
+            }
+            .flatMap { it.asSequence() }
+            .mapNotNull { it.asObject()?.get("text")?.asString() }
+            .firstOrNull { DURATION_TOKEN_REGEX.matches(it) }
 
     return TrackSummary(
         videoId = videoId,

@@ -44,6 +44,38 @@ internal fun parseTracksFromShelf(
 }
 
 /**
+ * Extracts the "show all songs" browseId attached to the artist "Popular"
+ * shelf. Following it returns the artist's COMPLETE songs playlist — every
+ * track, each with a real duration — which the inline shelf lacks (the
+ * landing page ships ~10 rows and no per-row duration, hence "0:00").
+ *
+ * YouTube Music attaches the link in one of three spots depending on the
+ * client variant; we check all of them:
+ *   1. `bottomEndpoint.browseEndpoint.browseId` — the "Show all" footer.
+ *   2. `title.runs[*].navigationEndpoint.browseEndpoint.browseId` — a
+ *      tappable "Songs" header.
+ *   3. `moreContentButton.buttonRenderer…browseId` — older layout.
+ *
+ * Returns null when the artist's whole catalogue already fits inline.
+ */
+internal fun parseSongsShelfMoreBrowseId(shelf: JsonObject): String? {
+    shelf.navigatePath("bottomEndpoint", "browseEndpoint", "browseId")
+        ?.asString()?.let { return it }
+
+    shelf.navigatePath("title", "runs")?.asArray()
+        ?.firstNotNullOfOrNull {
+            it.asObject()?.navigatePath(
+                "navigationEndpoint", "browseEndpoint", "browseId",
+            )?.asString()
+        }?.let { return it }
+
+    return shelf.navigatePath(
+        "moreContentButton", "buttonRenderer",
+        "navigationEndpoint", "browseEndpoint", "browseId",
+    )?.asString()
+}
+
+/**
  * Parses an "Albums" or "Singles and EPs" carousel on an artist page.
  *
  * The carousel ships cards as `musicCarouselShelfRenderer.contents[*].musicTwoRowItemRenderer`:

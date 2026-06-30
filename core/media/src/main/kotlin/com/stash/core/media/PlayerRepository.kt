@@ -104,6 +104,16 @@ interface PlayerRepository {
     /** Pause playback. */
     suspend fun pause()
 
+    /**
+     * Pipeline priming: on app launch, resolve the user's last-played track
+     * and hold the player **prepared and PAUSED at 0:00** with its first chunk
+     * buffering — so the very next [play] starts in ~0 ms ("resume where you
+     * left off, instantly"). No-op when a session is already active, streaming
+     * is off, or there's nothing to resume. Safe to cancel: any real play
+     * ([playFromStream]/[setQueue]) supersedes it.
+     */
+    suspend fun primeLastPlayed()
+
     /** Skip to the next track in the queue. */
     suspend fun skipNext()
 

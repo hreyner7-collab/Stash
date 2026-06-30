@@ -4,10 +4,14 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.lastfm.LastFmScrobbler
+import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
+import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
+import com.stash.core.data.onedrive.OneDriveSyncManager
 import com.stash.core.media.PlayerRepository
+import com.stash.core.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +49,8 @@ class ListeningRecorder @VisibleForTesting internal constructor(
     private val listeningEventDao: ListeningEventDao,
     private val trackSkipEventDao: TrackSkipEventDao,
     private val scrobbler: LastFmScrobbler,
+    private val trackDao: TrackDao,
+    private val oneDriveSync: dagger.Lazy<OneDriveSyncManager>,
     private val scope: CoroutineScope,
 ) {
 
@@ -54,11 +60,15 @@ class ListeningRecorder @VisibleForTesting internal constructor(
         listeningEventDao: ListeningEventDao,
         trackSkipEventDao: TrackSkipEventDao,
         scrobbler: LastFmScrobbler,
+        trackDao: TrackDao,
+        oneDriveSync: dagger.Lazy<OneDriveSyncManager>,
     ) : this(
         playerRepository = playerRepository,
         listeningEventDao = listeningEventDao,
         trackSkipEventDao = trackSkipEventDao,
         scrobbler = scrobbler,
+        trackDao = trackDao,
+        oneDriveSync = oneDriveSync,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
@@ -145,6 +155,10 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                                     ),
                                 )
                             }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
+                            // "Everything you play is saved": a real listen of
+                            // a streamed track adds it to the user's OneDrive
+                            // catalogue so it replays instantly next time.
+                            warehousePlayedTrack(track)
                         }
                     }
                     pending = PendingFire(
@@ -162,6 +176,40 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                         )
                     }
                 }
+        }
+    }
+
+    /**
+     * Add a streamed track the user actually listened to into the library as
+     * a streamable row (if not already present) and kick a OneDrive sync, so
+     * it lands in their personal catalogue and replays instantly next time.
+     * Downloaded/local tracks and rows already in the library are skipped;
+     * no-ops cleanly when OneDrive isn't connected.
+     */
+    private fun warehousePlayedTrack(track: Track) {
+        val ytId = track.youtubeId?.takeIf { it.isNotBlank() } ?: return
+        if (track.isDownloaded) return
+        scope.launch {
+            runCatching {
+                if (trackDao.findByYoutubeId(ytId) == null) {
+                    trackDao.insert(
+                        TrackEntity(
+                            id = track.id,
+                            title = track.title,
+                            artist = track.artist,
+                            album = track.album,
+                            durationMs = track.durationMs,
+                            youtubeId = ytId,
+                            albumArtUrl = track.albumArtUrl,
+                            source = track.source,
+                            isStreamable = true,
+                            isDownloaded = false,
+                        ),
+                    )
+                    Log.d(TAG, "warehoused played track '${track.title}'")
+                    oneDriveSync.get().requestSync()
+                }
+            }.onFailure { Log.w(TAG, "warehouse played track failed: ${it.message}") }
         }
     }
 

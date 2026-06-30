@@ -42,7 +42,12 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
     implementation(libs.media3.datasource)
+    implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.database)
+
+    // Pooled HTTP stack for streaming reads (warm TCP+TLS connections
+    // across tracks — see StreamingHttpModule).
+    implementation(libs.okhttp)
 
     // Hilt
     implementation(libs.hilt.android)

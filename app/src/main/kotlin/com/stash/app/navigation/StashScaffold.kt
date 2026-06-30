@@ -1,9 +1,12 @@
 package com.stash.app.navigation
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -104,14 +107,21 @@ fun StashScaffold(
             // takes the bottom edge. This drops innerPadding.bottom to 0 so the
             // content extends full-height behind that action bar.
             if (!selectionActive) {
+                // The mini-player is the tap target that OPENS Now Playing,
+                // so it's redundant (and was overlapping the artwork) once
+                // you're on that full screen. Hide it there; it returns the
+                // instant you navigate away. The nav bar stays.
+                val onNowPlaying = currentRoute == NowPlayingRoute::class.qualifiedName
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                    MiniPlayer(
-                        onExpand = {
-                            navController.navigate(NowPlayingRoute) {
-                                launchSingleTop = true
-                            }
-                        },
-                    )
+                    if (!onNowPlaying) {
+                        MiniPlayer(
+                            onExpand = {
+                                navController.navigate(NowPlayingRoute) {
+                                    launchSingleTop = true
+                                }
+                            },
+                        )
+                    }
 
                     StashBottomBar(
                         currentRoute = currentRoute,
@@ -145,13 +155,45 @@ private fun StashBottomBar(
     onNavigate: (TopLevelDestination) -> Unit,
 ) {
     val extendedColors = StashTheme.extendedColors
+    val level = com.stash.core.ui.components.LocalGlassIntensity.current.coerceIn(0f, 1f)
 
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        tonalElevation = 0.dp,
-        windowInsets = WindowInsets(0.dp),
+    // Liquid-glass nav bar, driven by the Settings slider: at see-through
+    // (0) the bar is almost fully transparent with just a bright specular
+    // rim, so the content scrolls visibly behind the icons; at solid (1)
+    // it's an opaque surface. The icons/labels stay fully legible
+    // throughout. `lerp` interpolates continuously as the slider moves.
+    val glassFill = androidx.compose.ui.graphics.Brush.verticalGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.surface.copy(
+                alpha = androidx.compose.ui.util.lerp(0.04f, 0.92f, level),
+            ),
+            MaterialTheme.colorScheme.surface.copy(
+                alpha = androidx.compose.ui.util.lerp(0.10f, 0.98f, level),
+            ),
+        ),
+    )
+    val rimAlpha = androidx.compose.ui.util.lerp(0.50f, 0.12f, level)
+
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(glassFill),
     ) {
+        // Bright specular rim along the very top edge of the bar.
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(androidx.compose.ui.Alignment.TopCenter)
+                .height(1.dp)
+                .background(androidx.compose.ui.graphics.Color.White.copy(alpha = rimAlpha)),
+        )
+
+        NavigationBar(
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            tonalElevation = 0.dp,
+            windowInsets = WindowInsets(0.dp),
+        ) {
         TopLevelDestination.entries.forEach { dest ->
             val isSelected = currentRoute == dest.route::class.qualifiedName
 
@@ -175,6 +217,7 @@ private fun StashBottomBar(
                     indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                 ),
             )
+        }
         }
     }
 }

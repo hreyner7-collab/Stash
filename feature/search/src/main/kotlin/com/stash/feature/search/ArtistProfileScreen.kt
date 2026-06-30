@@ -102,7 +102,7 @@ fun ArtistProfileScreen(
                         downloadedIds = downloadedIds,
                         previewLoadingId = previewLoadingId,
                         losslessPrefetcher = vm.losslessPrefetcher,
-                        onPreview = { track -> vm.delegate.previewTrack(track) },
+                        onPreview = { track -> vm.onTrackTap(track) },
                         onStopPreview = vm.delegate::stopPreview,
                         onDownload = { vm.delegate.downloadTrack(it.toTrackItem()) },
                         onNavigateToAlbum = onNavigateToAlbum,

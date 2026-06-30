@@ -248,6 +248,28 @@ class InnerTubeClient @Inject constructor(
     }
 
     /**
+     * Calls `next` configured for **radio**: given a seed [videoId] it asks
+     * for the auto-generated radio queue (similar songs) by passing the
+     * `RDAMVM<videoId>` radio playlist id plus the radio `params` token.
+     *
+     * This is the difference between an empty `playlistPanelRenderer` and a
+     * full queue — a bare `next(videoId)` returns the watch page but NOT the
+     * radio continuation. `isAudioOnly = true` keeps the queue to songs (not
+     * music videos). Used by the DJ / discovery station.
+     */
+    suspend fun nextRadio(videoId: String): JsonObject? = withContext(Dispatchers.IO) {
+        val variant = InnerTubeVariant.WEB_REMIX
+        val body = buildJsonObject {
+            put("context", buildContext(variant))
+            put("videoId", videoId)
+            put("playlistId", "RDAMVM$videoId")
+            put("isAudioOnly", true)
+            put("params", "wAEB")
+        }
+        executeRequest("$BASE_URL/next", body, null, variant)
+    }
+
+    /**
      * Calls the InnerTube `browse` action with a continuation token.
      *
      * Continuation requests fetch the next page of a previously-browsed surface
@@ -311,6 +333,22 @@ class InnerTubeClient @Inject constructor(
      *  "Songs" shelf only. With this set, the response reverts to the legacy
      *  `musicShelfRenderer` shape that downstream parsers expect. */
     private val songsFilterParams = "EgWKAQIIAWoKEAoQAxAJEAQQBQ%3D%3D"
+
+    /** ytmusicapi-derived filter selector that constrains search results to the
+     *  "Community playlists" shelf only — the full list of user/editorial
+     *  playlists matching a query. */
+    private val communityPlaylistsFilterParams = "EgeKAQQoAEABagwQDhAKEAMQBBAJEAU%3D"
+
+    /** Songs-only search — returns the full Songs shelf (typically 20+), not
+     *  the ~4 inline rows of a combined search. Used by the Search tab to
+     *  give a deep list of song suggestions. */
+    suspend fun searchSongsOnly(query: String): JsonObject? =
+        search(query, params = songsFilterParams)
+
+    /** Community-playlists search — the full list of playlists matching a
+     *  query, for the Search tab's Playlists section. */
+    suspend fun searchCommunityPlaylists(query: String): JsonObject? =
+        search(query, params = communityPlaylistsFilterParams)
 
     /**
      * Calls the InnerTube `player` action to get actual video metadata.

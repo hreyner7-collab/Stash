@@ -2,6 +2,7 @@ package com.stash.data.ytmusic
 
 import com.stash.data.ytmusic.model.AlbumSummary
 import com.stash.data.ytmusic.model.ArtistSummary
+import com.stash.data.ytmusic.model.PlaylistSummary
 import com.stash.data.ytmusic.model.TopResultItem
 import com.stash.data.ytmusic.model.TrackSummary
 import kotlinx.serialization.json.JsonObject
@@ -267,4 +268,108 @@ internal fun parseAlbumsShelf(shelfRenderer: JsonObject): List<AlbumSummary> {
         )
     }
     return result
+}
+
+/**
+ * Parses a "Community playlists" / "Featured playlists" shelf — the same
+ * `musicTwoRowItemRenderer` two-row card shape as albums, but the
+ * navigationEndpoint carries a PLAYLIST browseId (`VL…`) and the subtitle
+ * is the curator line. Modeled directly on [parseAlbumsShelf] so the JSON
+ * navigation matches the proven album path.
+ */
+internal fun parsePlaylistsShelf(shelfRenderer: JsonObject): List<PlaylistSummary> {
+    val items = shelfRenderer["contents"]?.asArray() ?: return emptyList()
+    val result = mutableListOf<PlaylistSummary>()
+    for (item in items) {
+        val obj = item.asObject() ?: continue
+        // The dedicated community-playlists FILTER returns rows as
+        // `musicResponsiveListItemRenderer` (list shape, like songs); the
+        // inline/carousel surfaces use `musicTwoRowItemRenderer` (cards).
+        // Parse BOTH so every playlist the response carries is collected —
+        // the list-row path is what was previously dropped, leaving only
+        // the one stray card.
+        val parsed = obj["musicTwoRowItemRenderer"]?.asObject()?.let { parsePlaylistCard(it) }
+            ?: obj["musicResponsiveListItemRenderer"]?.asObject()?.let { parsePlaylistListRow(it) }
+        if (parsed != null) result.add(parsed)
+    }
+    return result
+}
+
+/** Two-row CARD shape (`musicTwoRowItemRenderer`) — carousels / inline shelves. */
+private fun parsePlaylistCard(renderer: JsonObject): PlaylistSummary? {
+    val playlistId = renderer.navigatePath(
+        "navigationEndpoint", "browseEndpoint", "browseId",
+    )?.asString() ?: return null
+
+    val title = renderer.navigatePath("title", "runs")?.firstArray()
+        ?.firstOrNull()?.asObject()?.get("text")?.asString()
+        ?: return null
+
+    val subtitle = renderer.navigatePath("subtitle", "runs")?.asArray()
+        ?.mapNotNull { it.asObject()?.get("text")?.asString() }
+        ?.filterNot { it == " • " || it == ", " }
+        ?.joinToString("")
+        ?.takeIf { it.isNotBlank() }
+
+    val thumbnails = renderer.navigatePath(
+        "thumbnailRenderer", "musicThumbnailRenderer", "thumbnail", "thumbnails",
+    )?.firstArray()
+    val thumbnailUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+        thumbnails?.maxByOrNull {
+            it.asObject()?.get("width")?.asString()?.toIntOrNull() ?: 0
+        }?.asObject()?.get("url")?.asString(),
+    )
+
+    return PlaylistSummary(
+        playlistId = playlistId,
+        title = title,
+        subtitle = subtitle,
+        thumbnailUrl = thumbnailUrl,
+    )
+}
+
+/** List-ROW shape (`musicResponsiveListItemRenderer`) — the playlist filter. */
+private fun parsePlaylistListRow(renderer: JsonObject): PlaylistSummary? {
+    val flexColumns = renderer["flexColumns"]?.asArray() ?: return null
+    val titleColumn = flexColumns.getOrNull(0)?.asObject()
+        ?.navigatePath("musicResponsiveListItemFlexColumnRenderer", "text", "runs")
+        ?.firstArray()?.firstOrNull()?.asObject()
+    val title = titleColumn?.get("text")?.asString() ?: return null
+
+    // browseId can live on the row, on the title run, or on the thumbnail
+    // overlay's play endpoint — check all three so no playlist is dropped.
+    val playlistId = renderer.navigatePath(
+        "navigationEndpoint", "browseEndpoint", "browseId",
+    )?.asString()
+        ?: titleColumn.navigatePath("navigationEndpoint", "browseEndpoint", "browseId")?.asString()
+        ?: renderer.navigatePath(
+            "overlay", "musicItemThumbnailOverlayRenderer", "content",
+            "musicPlayButtonRenderer", "playNavigationEndpoint",
+            "watchPlaylistEndpoint", "playlistId",
+        )?.asString()
+        ?: return null
+
+    val subtitle = flexColumns.getOrNull(1)?.asObject()
+        ?.navigatePath("musicResponsiveListItemFlexColumnRenderer", "text", "runs")
+        ?.asArray()
+        ?.mapNotNull { it.asObject()?.get("text")?.asString() }
+        ?.filterNot { it == " • " || it == ", " }
+        ?.joinToString("")
+        ?.takeIf { it.isNotBlank() }
+
+    val thumbnails = renderer.navigatePath(
+        "thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails",
+    )?.firstArray()
+    val thumbnailUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
+        thumbnails?.maxByOrNull {
+            it.asObject()?.get("width")?.asString()?.toIntOrNull() ?: 0
+        }?.asObject()?.get("url")?.asString(),
+    )
+
+    return PlaylistSummary(
+        playlistId = playlistId,
+        title = title,
+        subtitle = subtitle,
+        thumbnailUrl = thumbnailUrl,
+    )
 }

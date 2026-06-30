@@ -34,6 +34,12 @@ abstract class RepositoryModule {
 
     @Binds
     @Singleton
+    abstract fun bindGlassPreference(
+        impl: com.stash.core.data.prefs.GlassPreferencesManager,
+    ): com.stash.core.data.prefs.GlassPreference
+
+    @Binds
+    @Singleton
     abstract fun bindStoragePreference(impl: StoragePreferencesManager): StoragePreference
 
     @Binds

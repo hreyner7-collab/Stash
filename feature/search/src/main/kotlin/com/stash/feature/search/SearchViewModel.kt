@@ -56,6 +56,9 @@ class SearchViewModel @Inject constructor(
     val losslessPrefetcher: LosslessUrlPrefetcher,
     private val playerRepository: PlayerRepository,
     private val streamingPreference: StreamingPreference,
+    private val trackDao: com.stash.core.data.db.dao.TrackDao,
+    private val oneDriveSyncManager: com.stash.core.data.onedrive.OneDriveSyncManager,
+    val streamUrlPrewarmer: com.stash.core.media.preview.StreamUrlPrewarmer,
 ) : ViewModel() {
 
     companion object {
@@ -188,7 +191,7 @@ class SearchViewModel @Inject constructor(
                 if (streamingPreference.current()) {
                     val result = playerRepository.playFromStream(item)
                     when (result) {
-                        is StreamRoutingResult.Item -> Unit // playback started by the repo
+                        is StreamRoutingResult.Item -> warehouseToOneDrive(item) // playing → also push to OneDrive
                         StreamRoutingResult.Deduped -> Unit // earlier tap is handling it
                         StreamRoutingResult.NotAvailable ->
                             _userMessages.emit("Couldn't find this track.")
@@ -205,6 +208,73 @@ class SearchViewModel @Inject constructor(
             } finally {
                 _tappedTrackId.value = null
             }
+        }
+    }
+
+    /**
+     * Auto-sync a played-from-search song to the user's OneDrive: add it to
+     * the library as a streamable (no download kept on the phone) if it
+     * isn't already there, then kick a sync pass so it's fetched and
+     * uploaded to OneDrive — so the next time you play it, it streams
+     * instantly from your own cloud and never needs syncing again.
+     * No-ops cleanly when OneDrive isn't connected.
+     */
+    private fun warehouseToOneDrive(item: TrackItem) {
+        viewModelScope.launch {
+            runCatching {
+                if (trackDao.findByYoutubeId(item.videoId) == null) {
+                    trackDao.insert(
+                        com.stash.core.data.db.entity.TrackEntity(
+                            title = item.title,
+                            artist = item.artist,
+                            album = item.album ?: "",
+                            durationMs = (item.durationSeconds * 1000).toLong(),
+                            youtubeId = item.videoId,
+                            albumArtUrl = item.thumbnailUrl,
+                            source = com.stash.core.model.MusicSource.YOUTUBE,
+                            isStreamable = true,
+                        ),
+                    )
+                    Log.d(TAG, "warehoused search track '${item.title}' for OneDrive")
+                }
+                oneDriveSyncManager.requestSync()
+            }.onFailure { Log.w(TAG, "warehouseToOneDrive failed: ${it.message}") }
+        }
+    }
+
+    /**
+     * Tap on a Playlists-section card: fetch the playlist's tracks via the
+     * proven [YTMusicApiClient.getPlaylistTracks] (the same call library
+     * sync uses, so it's reliable for any `VL…` playlist) and start
+     * playing it. Streams the FIRST track through the same routing path as
+     * a song tap [onResultTap]; the rest of the playlist is logged so a
+     * follow-up can queue them once stream-queue playback lands.
+     */
+    fun onPlaylistTap(playlist: com.stash.data.ytmusic.model.PlaylistSummary) {
+        viewModelScope.launch {
+            if (!streamingPreference.current()) {
+                _userMessages.emit("Turn on Online mode to play playlists.")
+                return@launch
+            }
+            _userMessages.emit("Opening \"${playlist.title}\"…")
+            val result = runCatching { api.getPlaylistTracks(playlist.playlistId) }.getOrNull()
+            val tracks = (result as? com.stash.core.model.SyncResult.Success)?.data?.tracks.orEmpty()
+            if (tracks.isEmpty()) {
+                _userMessages.emit("Couldn't load this playlist.")
+                return@launch
+            }
+            Log.d(TAG, "playlist '${playlist.title}': ${tracks.size} tracks, playing first")
+            val first = tracks.first()
+            onResultTap(
+                TrackItem(
+                    videoId = first.videoId,
+                    title = first.title,
+                    artist = first.artists,
+                    durationSeconds = (first.durationMs ?: 0L) / 1000.0,
+                    thumbnailUrl = first.thumbnailUrl,
+                    album = first.album,
+                ),
+            )
         }
     }
 

@@ -55,6 +55,10 @@ class PlayerRepositorySetQueueGateTest {
     private val streamUrlCache: StreamUrlCache = mockk(relaxUnitFun = true)
     private val connectivity: ConnectivityMonitor = mockk()
     private val trackDao: TrackDao = mockk()
+    private val streamHeadWarmer: com.stash.core.media.streaming.StreamHeadWarmer = mockk(relaxed = true)
+    private val playlistDao: com.stash.core.data.db.dao.PlaylistDao = mockk {
+        every { getAllVisible(any()) } returns flowOf(emptyList())
+    }
 
     private lateinit var repo: PlayerRepositoryImpl
 
@@ -78,6 +82,8 @@ class PlayerRepositorySetQueueGateTest {
             streamUrlCache = streamUrlCache,
             connectivity = connectivity,
             trackDao = trackDao,
+            streamHeadWarmer = streamHeadWarmer,
+            playlistDao = playlistDao,
         )
         repo.filePathExistsOnDisk = { true }
 
