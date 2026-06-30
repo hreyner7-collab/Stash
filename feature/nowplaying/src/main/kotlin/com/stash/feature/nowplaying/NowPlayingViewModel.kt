@@ -6,13 +6,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.palette.graphics.Palette
-import androidx.work.Constraints
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.OutOfQuotaPolicy
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
@@ -22,7 +15,6 @@ import com.stash.core.ui.components.PlaylistInfo
 import com.stash.core.model.Track
 import com.stash.data.lyrics.LyricsRepository
 import com.stash.data.lyrics.source.LyricsQuery
-import com.stash.data.lyrics.worker.LyricsFetchWorker
 import com.stash.feature.nowplaying.ui.LyricsViewState
 import com.stash.feature.nowplaying.ui.lyricsViewStateFor
 import com.stash.feature.nowplaying.ui.lyricsViewStateForResult
@@ -118,6 +110,12 @@ class NowPlayingViewModel @Inject constructor(
     private val _streamingLyricsState = MutableStateFlow<LyricsViewState?>(null)
 
     /**
+     * Track ids with an in-flight inline lyrics resolve ([fetchLibraryLyrics]),
+     * so reopening the sheet doesn't stack duplicate fetches for the same track.
+     */
+    private val lyricsFetchInFlight: MutableSet<Long> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
      * Re-derives [LyricsViewState] from the currently-playing track and
      * the observed [com.stash.core.data.db.entity.LyricsEntity] row.
      *
@@ -141,8 +139,17 @@ class NowPlayingViewModel @Inject constructor(
         .flatMapLatest { track ->
             when {
                 track == null -> flowOf(LyricsViewState.None)
-                track.id > 0L -> lyricsRepository.observe(track.id).map { row ->
-                    lyricsViewStateFor(track, row)
+                // Combine the lyrics row with the LIVE lyrics_fetched_at stamp.
+                // Deriving the sentinel from the captured track snapshot left the
+                // sheet stuck on Loading after a fetch finished (the stamp updated
+                // in Room but the captured value never did); watching the stamp
+                // live flips the sheet the instant the fetch completes — no
+                // close+reopen needed.
+                track.id > 0L -> combine(
+                    lyricsRepository.observe(track.id),
+                    lyricsRepository.observeFetchedAt(track.id),
+                ) { row, fetchedAt ->
+                    lyricsViewStateFor(track.copy(lyricsFetchedAt = fetchedAt), row)
                 }
                 // Streaming track (id == 0L). The transient flow is seeded by
                 // onShowLyrics -> fetchStreamingLyrics. Until then, null means
@@ -585,9 +592,10 @@ class NowPlayingViewModel @Inject constructor(
         _lyricsSheetOpen.value = true
         val track = _uiState.value.currentTrack ?: return
         when {
-            // Library track with no fetch attempt yet — queue the worker, let
-            // the Room observation pick up the result.
-            track.id > 0L && track.lyricsFetchedAt == null -> enqueuePriorityFetch(track.id)
+            // Library track with no fetch attempt yet — resolve inline (see
+            // fetchLibraryLyrics); the lyricsViewState combine picks up the
+            // Room row + stamp the moment it lands.
+            track.id > 0L && track.lyricsFetchedAt == null -> fetchLibraryLyrics(track)
             // Library track with prior attempt — Room observer already wired,
             // nothing to do.
             track.id > 0L -> Unit
@@ -603,14 +611,13 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     /**
-     * Retry the lyrics fetch for the currently-playing track. Re-enqueues
-     * with [ExistingWorkPolicy.REPLACE] so an in-flight (probably failing)
-     * attempt is cancelled in favour of a fresh one. No-op when nothing
-     * is playing or when the track has no valid id (search-preview rows).
+     * Retry the lyrics fetch for the currently-playing track. Resolves inline
+     * (library track) or re-runs the transient chain (streaming). No-op when
+     * nothing is playing or when the track has no valid id (search-preview rows).
      */
     fun onLyricsRetry() {
         val track = _uiState.value.currentTrack ?: return
-        if (track.id > 0L) enqueuePriorityFetch(track.id)
+        if (track.id > 0L) fetchLibraryLyrics(track, force = true)
         else fetchStreamingLyrics(track)
     }
 
@@ -648,28 +655,36 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     /**
-     * Enqueue a priority lyrics fetch for [trackId]. Unique-name keyed
-     * by `lyrics_priority_<trackId>` with REPLACE policy so opening the
-     * sheet always jumps the queue with a fresh expedited request.
+     * Library-track on-open lyrics fetch. Resolves INLINE via the repository
+     * (writes the Room row + stamps `lyrics_fetched_at`) instead of enqueuing a
+     * WorkManager job — the user is watching the sheet, so the fetch must not
+     * queue behind background workers (sync/backfill/discovery), which deferred
+     * the result by minutes. The [lyricsViewState] combine observes the row +
+     * stamp and flips the sheet the moment this finishes.
      *
-     * `OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST` keeps the
-     * worker valid in low-quota windows — it'll just run as a normal
-     * job instead of an expedited one.
+     * Deduped per track so reopening doesn't stack duplicate resolves; [force]
+     * (Retry) bypasses the in-flight guard but a confirmed-miss stamp is cleared
+     * first so the combine returns to Loading while the retry runs.
      */
-    private fun enqueuePriorityFetch(trackId: Long) {
-        WorkManager.getInstance(appContext).enqueueUniqueWork(
-            "${LyricsFetchWorker.UNIQUE_PREFIX_PRIORITY}$trackId",
-            ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<LyricsFetchWorker>()
-                .setInputData(workDataOf(LyricsFetchWorker.KEY_TRACK_ID to trackId))
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build(),
+    private fun fetchLibraryLyrics(track: Track, force: Boolean = false) {
+        if (!force && !lyricsFetchInFlight.add(track.id)) return
+        if (force) lyricsFetchInFlight.add(track.id)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val query = LyricsQuery(
+                    trackId = track.id,
+                    title = track.title,
+                    artist = track.artist,
+                    album = track.album.ifBlank { null },
+                    albumArtist = track.albumArtist.ifBlank { null },
+                    durationMs = track.durationMs.takeIf { it > 0 },
+                    youtubeVideoId = track.youtubeId,
                 )
-                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                .build(),
-        )
+                runCatching { lyricsRepository.resolveAndStore(query) }
+            } finally {
+                lyricsFetchInFlight.remove(track.id)
+            }
+        }
     }
 
     // ------------------------------------------------------------------

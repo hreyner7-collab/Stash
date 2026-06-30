@@ -825,6 +825,16 @@ interface TrackDao {
     @Query("UPDATE tracks SET lyrics_fetched_at = :ts WHERE id = :trackId")
     suspend fun setLyricsFetchedAt(trackId: Long, ts: Long)
 
+    /**
+     * Observe a single row's `lyrics_fetched_at` stamp. The Now Playing lyrics
+     * sheet pairs this with [LyricsDao.observe] so it reflects a fetch completing
+     * live — null = never tried, 0L = tried+missed, non-zero = hit. Without this,
+     * the sheet derives Loading/None from a stale captured value and sticks on
+     * Loading until a close+reopen.
+     */
+    @Query("SELECT lyrics_fetched_at FROM tracks WHERE id = :trackId")
+    fun observeLyricsFetchedAt(trackId: Long): kotlinx.coroutines.flow.Flow<Long?>
+
     // ── Release-downloads worker (Off→On "release space" path) ──────────
 
     /**

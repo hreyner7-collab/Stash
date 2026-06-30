@@ -743,6 +743,29 @@ class TrackDownloadWorker @AssistedInject constructor(
 
         when (outcome) {
             is TrackDownloadOutcome.Success -> {
+                // Persist the downloaded state on the TRACK row, mirroring chain
+                // mode (doWork). Without this the file lands on disk but
+                // tracks.is_downloaded / file_path stay unset, so the UI keeps
+                // showing the track as not-downloaded and it isn't playable from
+                // disk. (Pre-v0.9.63 single-track mode skipped this entirely.)
+                val fileSize = try { File(outcome.filePath).length() } catch (_: Exception) { 0L }
+                val meta = audioDurationExtractor.extract(outcome.filePath)
+                trackDao.markAsDownloaded(
+                    trackId = entry.trackId,
+                    filePath = outcome.filePath,
+                    fileSizeBytes = fileSize,
+                    sampleRateHz = meta?.sampleRateHz,
+                    bitsPerSample = meta?.bitsPerSample,
+                )
+                if (meta != null && meta.format != "unknown") {
+                    runCatching {
+                        trackDao.setFormatAndQuality(
+                            trackId = entry.trackId,
+                            fileFormat = meta.format,
+                            qualityKbps = meta.bitrateKbps,
+                        )
+                    }.onFailure { e -> Log.w(TAG, "setFormatAndQuality failed for ${entry.trackId}", e) }
+                }
                 downloadQueueDao.updateStatus(
                     id = entry.id,
                     status = DownloadStatus.COMPLETED,
